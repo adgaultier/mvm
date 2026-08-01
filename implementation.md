@@ -173,8 +173,10 @@ design meeting:
 - Guest chowns land on host subuids: remove sandbox state via `mvm rm`, not
   manual `rm -rf` of the data dir (subuid-owned files resist deletion).
 - No pseudo-TTY for exec (`-t`); `-i` streams raw stdin without a terminal.
-- Exec streams are UTF-8-lossy (binary stdin/stdout corrupted) — TODO.md #2.
-- Sandbox state `running` precedes agent vsock connect by a moment; exec in
-  that window fails with "no agent connection" (tests poll `exec <sb> true`).
 - gvproxy/tap networking implemented but not e2e-tested here (no gvproxy
   binary on this host); `none` profile verified.
+
+Fixed since first E2E: exec streams are binary-safe (base64 frames);
+`start` blocks until the guest agent connects (no more exec-races-agent
+500s); `mvm run` waits on the log stream ending (daemon closes it on shim
+exit) instead of polling; `logs -f` terminates when the sandbox exits.

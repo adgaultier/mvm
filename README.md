@@ -140,5 +140,4 @@ defined in `crates/common/src/protocol.rs`.
 - Guest chowns land on subuids on the host; clean up sandbox state through
   `mvm rm` (the daemon), not by deleting the data dir by hand.
 - No pseudo-TTY allocation for `exec` (no `-t`); `-i` streams raw stdin.
-- Exec streams are UTF-8-lossy (binary-unsafe) for now.
 - x86_64 Linux only (matches the vendored libkrun FFI subset).

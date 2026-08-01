@@ -369,7 +369,7 @@ impl Agent {
         let mut buf = [0u8; CHUNK];
         let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, CHUNK) };
         if n > 0 {
-            let data = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+            let data = buf[..n as usize].to_vec();
             let event = if is_stdout {
                 AgentEvent::Stdout { id: sid_key, data }
             } else {
@@ -412,7 +412,7 @@ impl Agent {
             AgentRequest::Exec { id, argv, env, workdir } => self.spawn_exec(id, argv, env, workdir),
             AgentRequest::Stdin { id, data } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
-                    s.stdin_buf.extend(data.as_bytes());
+                    s.stdin_buf.extend(data);
                     self.flush_session_stdin(id);
                 }
             }
@@ -477,7 +477,7 @@ impl Agent {
             Err(e) => {
                 self.send(&AgentEvent::Stderr {
                     id,
-                    data: format!("mvm-agent: exec {:?} failed: {e}\n", argv[0]),
+                    data: format!("mvm-agent: exec {:?} failed: {e}\n", argv[0]).into_bytes(),
                 });
                 self.send(&AgentEvent::Exit { id, code: 127 });
             }

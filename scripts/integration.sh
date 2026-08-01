@@ -79,6 +79,14 @@ check "exec exit code" "3" "$?"
 set -e
 check "exec -i stdin" "roundtrip" "$(printf 'roundtrip' | "$MVM" exec -i itest cat)"
 
+# Binary safety: random bytes must survive the exec stdin/stdout path intact.
+BINFILE=$(mktemp /tmp/mvm-itest-bin.XXXXXX)
+head -c 65536 /dev/urandom > "$BINFILE"
+check "exec binary roundtrip" \
+    "$(sha256sum < "$BINFILE" | cut -d' ' -f1)" \
+    "$("$MVM" exec -i itest cat < "$BINFILE" | sha256sum | cut -d' ' -f1)"
+rm -f "$BINFILE"
+
 echo "==> volumes"
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"
@@ -115,6 +123,9 @@ check "removed" "0" "$("$MVM" ps -a | grep -c itest || true)"
 echo "==> logs"
 "$MVM" run --name logtest --keep alpine sh -c 'echo l1; echo l2' >/dev/null
 check "logs" "l1 l2" "$("$MVM" logs logtest | tr '\n' ' ' | sed 's/ $//')"
+# Follow mode must terminate promptly on an exited sandbox, not hang.
+check "logs -f terminates" "l1 l2" \
+    "$(timeout 10 "$MVM" logs -f logtest | tr '\n' ' ' | sed 's/ $//')"
 "$MVM" rm logtest >/dev/null
 
 echo

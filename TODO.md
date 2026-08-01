@@ -2,55 +2,61 @@
 
 Prioritized backlog after the initial implementation (see `implementation.md`).
 
-## 1. Re-run integration on real host (validates userns virtiofs mode)
+## 1. Re-run integration on real host
 `scripts/integration.sh` must run in a normal shell (the Claude Code sandbox
-hides `/dev/kvm` and blocks `newuidmap`). The suite covers guest `chown`,
-root-owned files, and rootfs persistence across stop/start — all exercising
-the new rootless userns mode (virtiofs root + overlay driver), untested on
-real KVM. Expect `mvm: userns mode active` and `storage driver: overlay` in
-the daemon output.
+hides `/dev/kvm` and blocks `newuidmap`). Validates, since the last full run:
+the overlay driver in userns mode (`userxattr` fix — expect
+`storage driver: overlay` and the persistence check passing), binary-safe
+exec streams, the agent-ready barrier in `start` (no more 500s in the log),
+deterministic `mvm run` exit, and `logs -f` terminating on sandbox exit.
 
-## 2. Binary-safe exec streams
-`Stdin`/`Stdout`/`Stderr` protocol frames carry `String` after
-`from_utf8_lossy`, so binary data through `exec` is corrupted. Switch the data
-fields to base64 (or raw byte frames) across agent, manager, API, CLI.
-
-## 3. TTY support for exec (`-t`)
+## 2. TTY support for exec (`-t`)
 Sessions are pipes; interactive shells get no prompt/line editing. Needs pty
 allocation in the agent, a winsize/resize protocol message, raw-mode CLI.
 
-## 4. Exec kill on client disconnect
+## 3. Exec kill on client disconnect
 `AgentRequest::Kill` is implemented in the agent but never sent — Ctrl-C on
 `mvm exec` leaves the guest process running. Send Kill when the exec response
 stream is dropped (or add a kill endpoint) and hook CLI Ctrl-C.
 
-## 5. Deterministic `mvm run` exit
-`run_attached` polls state every 250 ms and sleeps 200 ms hoping the log tail
-flushed — last output lines can be cut. Wait on the `WorkloadExit` event (or
-console EOF) and join the log thread. Consider interactive stdin for `run`.
-Related: `exec` right after `start` races the agent's vsock connection (one
-500 seen in integration) — add a "wait for agent ready" barrier in `start`.
-
-## 6. Image store audit
+## 4. Image store audit
 Review `registry.rs`/`store.rs`: per-layer blob caching vs re-download,
 image GC / `rmi` refcounting against existing sandboxes, locking for
 concurrent pulls of the same reference. `daemon.pid` is defined but unused.
+
+## 5. Interactive stdin for `mvm run`
+`run` streams the console out but never in; `-i` exists only on `exec`.
 
 ---
 
 ## Done
 
-- **E2E integration** — 12/12 passing on real KVM (2026-08-01).
+- **E2E integration** — 12/12 passing on real KVM (2026-08-01); rerun with
+  userns mode: 14/15 (overlay probe fixed afterwards with `userxattr`).
 - **Rootless chown / virtiofs UID translation** — fixed while keeping
   virtiofs as the root filesystem: `mvm serve` re-execs into a user
   namespace (podman-style, subuid ranges via newuidmap/newgidmap), so
   libkrun's in-process virtiofs server has CAP_CHOWN over mapped uids.
-  Unpack applies real tar-header ownership as namespace-root. An `ext4`
-  block-root driver also exists (`MVM_STORAGE_DRIVER=ext4`, agent
-  pivot_root + ownership manifest) for hosts without subuid ranges.
+  Unpack applies real tar-header ownership as namespace-root. Validated on
+  real KVM (guest chown + root-owned files pass). An `ext4` block-root
+  driver also exists (`MVM_STORAGE_DRIVER=ext4`, agent pivot_root +
+  ownership manifest) for hosts without subuid ranges.
 - **Restart semantics** — overlay upper layer (default driver) and ext4
   disks persist across stop/start (docker-like); the `copy` fallback remains
   ephemeral and is documented as such. Overlay `create` no longer wipes the
   sandbox dir (which used to delete console.log on restart).
 - **Exec stdin** — `mvm exec -i` forwards local stdin over
   `POST /exec/{session}/stdin`.
+- **Binary-safe exec streams** — Stdin/Stdout/Stderr frames carry base64
+  bytes (hand-rolled codec in `common::protocol::b64`, no new agent deps);
+  integration has a 64 KiB /dev/urandom sha256 roundtrip check.
+- **Deterministic run/exec lifecycle** — `start` blocks until the guest
+  agent's vsock channel is up (or the VM dies); the daemon closes a
+  sandbox's log broadcast on shim exit, so `mvm run` just streams the
+  follow log to EOF (no state polling, no flush sleeps, no cut tails) and
+  `logs -f` terminates when the sandbox exits.
+- **Agent linkage guard** — dynamically-linked agent candidates are
+  rejected (ELF PT_INTERP check) so a glibc agent can never be injected
+  into a musl guest again; dev trees auto-find the musl build.
+- **CLI flag misuse guard** — mvm options after the image (which would
+  silently join the guest command) are rejected with a hint.

@@ -284,6 +284,30 @@ impl Manager {
             });
         }
 
+        // 10. Exec-readiness barrier: don't return "running" until the guest
+        // agent has connected (or the sandbox died / never had an agent).
+        // Callers that exec immediately after start would otherwise race the
+        // agent's vsock connection.
+        if agent_socket.is_some() {
+            const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+            let deadline = std::time::Instant::now() + AGENT_WAIT;
+            loop {
+                {
+                    let sandboxes = self.inner.sandboxes.read().unwrap();
+                    match sandboxes.get(&id) {
+                        Some(e) if e.agent.is_some() || !e.info.state.is_alive() => break,
+                        None => break,
+                        _ => {}
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(sandbox = %id, "agent did not connect within {AGENT_WAIT:?}");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
         Ok(self.get(&id)?)
     }
 
@@ -358,6 +382,9 @@ impl Manager {
     }
 
     /// Read the console log backlog and optionally subscribe for live data.
+    /// A follow subscription ends (channel closes) when the shim exits; for
+    /// a sandbox that is not running, only the backlog is returned so
+    /// followers don't hang waiting for a future boot.
     pub fn logs(
         &self,
         id_or_name: &str,
@@ -365,13 +392,19 @@ impl Manager {
     ) -> Result<(Vec<u8>, Option<broadcast::Receiver<Bytes>>)> {
         let id = self.resolve(id_or_name)?;
         let sb_dir = self.inner.data_dir.sandbox_dir(&SandboxId::from(id.clone()));
-        let backlog = std::fs::read(sb_dir.join("console.log")).unwrap_or_default();
+        // Subscribe (under the same lock as the liveness check, so an exit
+        // in between can't leave us on a channel nobody will ever close)
+        // *before* reading the backlog file, so no bytes fall in the gap.
         let rx = if follow {
             let sandboxes = self.inner.sandboxes.read().unwrap();
-            sandboxes.get(&id).map(|e| e.log_tx.subscribe())
+            sandboxes
+                .get(&id)
+                .filter(|e| e.info.state.is_alive())
+                .map(|e| e.log_tx.subscribe())
         } else {
             None
         };
+        let backlog = std::fs::read(sb_dir.join("console.log")).unwrap_or_default();
         Ok((backlog, rx))
     }
 
@@ -418,7 +451,7 @@ impl Manager {
     }
 
     /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
-    pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<String>) -> Result<()> {
+    pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
         let id = self.resolve(id_or_name)?;
         let sandboxes = self.inner.sandboxes.read().unwrap();
         let entry = sandboxes
@@ -469,6 +502,11 @@ impl Manager {
             } else {
                 SandboxState::Exited
             };
+            // Swap in a fresh log channel: dropping the registry's sender
+            // lets follow streams end once the pump thread (which holds the
+            // only other sender and drains the console pipe to EOF) exits.
+            let (log_tx, _) = broadcast::channel(LOG_BROADCAST_CAP);
+            entry.log_tx = log_tx;
             tracing::info!(sandbox = %id, state = %entry.info.state, "shim exited");
         }
         drop(sandboxes);

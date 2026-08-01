@@ -93,30 +93,24 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
 fn run_attached(client: &Client, id: &str) -> Result<i32, String> {
     client.start_sandbox(id)?;
 
-    // Stream logs in a background thread.
-    let log_client = Client::new(client.base());
-    let log_id = id.to_string();
-    let log_thread = std::thread::spawn(move || {
-        if let Ok(mut resp) = log_client.logs(&log_id, true) {
-            let mut out = std::io::stdout();
-            let _ = std::io::copy(&mut resp, &mut out);
-            let _ = out.flush();
-        }
-    });
+    // The follow stream carries the whole console and ends when the VM
+    // exits (the daemon closes the channel on shim exit), so streaming it
+    // to EOF *is* waiting for the workload — no polling, no lost tail.
+    let mut resp = client.logs(id, true)?;
+    let mut out = std::io::stdout();
+    std::io::copy(&mut resp, &mut out).map_err(|e| e.to_string())?;
+    let _ = out.flush();
 
-    // Poll until the workload exits.
-    let code = loop {
+    // The daemon's child watcher records the exit code at roughly the same
+    // moment the stream ends; allow it a bounded beat to land.
+    for _ in 0..200 {
         let sb = client.get_sandbox(id)?;
         if !sb.state.is_alive() {
-            break sb.exit_code.unwrap_or(0);
+            return Ok(sb.exit_code.unwrap_or(0));
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    };
-
-    // Give the log pump a moment to flush the tail.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    drop(log_thread);
-    Ok(code)
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Err("sandbox still running after log stream ended".into())
 }
 
 /// Execute a command in a running sandbox, streaming framed output.
@@ -168,12 +162,14 @@ pub fn exec(
         for event in events {
             match event {
                 AgentEvent::Stdout { data, .. } => {
-                    print!("{data}");
-                    let _ = std::io::stdout().flush();
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(&data);
+                    let _ = out.flush();
                 }
                 AgentEvent::Stderr { data, .. } => {
-                    eprint!("{data}");
-                    let _ = std::io::stderr().flush();
+                    let mut err = std::io::stderr();
+                    let _ = err.write_all(&data);
+                    let _ = err.flush();
                 }
                 AgentEvent::Exit { code, .. } => return Ok(code),
                 AgentEvent::Error { message } => return Err(message),

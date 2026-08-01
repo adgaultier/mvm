@@ -151,11 +151,7 @@ async fn exec_stdin(
     Query(q): Query<StdinQuery>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    let data = if q.eof {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&body).into_owned())
-    };
+    let data = if q.eof { None } else { Some(body.to_vec()) };
     state.manager.exec_stdin(&id, session, data)?;
     Ok(StatusCode::NO_CONTENT)
 }
