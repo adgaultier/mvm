@@ -53,6 +53,7 @@ check "daemon health" "ok" "$(curl -sf "$MVM_HOST/health")"
 echo "==> pull"
 "$MVM" pull alpine >/dev/null
 check "image listed" "1" "$("$MVM" images | grep -c alpine)"
+check "re-pull up to date" "1" "$("$MVM" pull alpine | grep -c 'up to date')"
 
 echo "==> run"
 check "run stdout" "hello-vm" "$("$MVM" run alpine echo hello-vm)"
@@ -94,6 +95,14 @@ rm -f "$BINFILE"
 # -t allocates a pty: the guest command must see a terminal on stdin.
 check "exec tty allocation" "TTY-OK" \
     "$("$MVM" exec -t itest sh -c '[ -t 0 ] && echo TTY-OK' | tr -d '\r')"
+
+# rmi must refuse while a sandbox references the image.
+set +e
+"$MVM" rmi alpine >/dev/null 2>&1
+RMI_RC=$?
+set -e
+check "rmi refused while in use" "1" "$RMI_RC"
+check "image survived rmi attempt" "1" "$("$MVM" images | grep -c alpine)"
 
 # Killing the client mid-exec must not orphan the guest process.
 "$MVM" exec itest sleep 299 >/dev/null 2>&1 &

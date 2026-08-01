@@ -225,7 +225,7 @@ async fn remove_image(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state.manager.images().remove(&name)?;
+    state.manager.remove_image(&name)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

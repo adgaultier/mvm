@@ -2,10 +2,12 @@
 
 use mvm_common::{DataDir, Error, ImageConfig, ImageInfo, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::reference::ImageReference;
-use crate::registry::{PullEvent, RegistryClient};
+use crate::registry::{PullEvent, PullOutcome, RegistryClient};
 
 const OWNERSHIP_FILE: &str = "ownership.jsonl";
 
@@ -22,6 +24,23 @@ struct ImageMeta {
 pub struct ImageStore {
     data_dir: DataDir,
     client: RegistryClient,
+    /// Per-store-key pull serialization (concurrent pulls of the same
+    /// reference would race on the store directory).
+    pull_locks: Arc<(Mutex<HashSet<String>>, Condvar)>,
+}
+
+/// Holds one key in the pull-lock set; released on drop.
+struct PullGuard {
+    locks: Arc<(Mutex<HashSet<String>>, Condvar)>,
+    key: String,
+}
+
+impl Drop for PullGuard {
+    fn drop(&mut self) {
+        let (set, cv) = &*self.locks;
+        set.lock().unwrap().remove(&self.key);
+        cv.notify_all();
+    }
 }
 
 impl ImageStore {
@@ -30,10 +49,27 @@ impl ImageStore {
         Ok(Self {
             data_dir,
             client: RegistryClient::new()?,
+            pull_locks: Arc::new((Mutex::new(HashSet::new()), Condvar::new())),
         })
     }
 
-    /// Pull an image (re-pull overwrites). Returns its info.
+    fn lock_pull(&self, key: &str) -> PullGuard {
+        let (set, cv) = &*self.pull_locks;
+        let mut held = set.lock().unwrap();
+        while held.contains(key) {
+            held = cv.wait(held).unwrap();
+        }
+        held.insert(key.to_string());
+        PullGuard {
+            locks: self.pull_locks.clone(),
+            key: key.to_string(),
+        }
+    }
+
+    /// Pull an image. Skips the download when the stored copy already
+    /// matches the registry digest; otherwise downloads into a staging dir
+    /// and swaps it in atomically, so a failed pull never destroys the
+    /// existing image. Concurrent pulls of the same reference serialize.
     pub fn pull(
         &self,
         reference: &str,
@@ -41,17 +77,37 @@ impl ImageStore {
     ) -> Result<ImageInfo> {
         let reference = ImageReference::parse(reference)?;
         let key = reference.store_key();
-        let dir = self.data_dir.image_dir(&key);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        std::fs::create_dir_all(&dir)?;
-        let rootfs = dir.join("rootfs");
+        let _guard = self.lock_pull(&key);
 
-        let pulled = self.client.pull(&reference, &rootfs, on_event)?;
+        let dir = self.data_dir.image_dir(&key);
+        let existing_digest = std::fs::read_to_string(dir.join("meta.json"))
+            .ok()
+            .and_then(|data| serde_json::from_str::<ImageMeta>(&data).ok())
+            .map(|meta| meta.digest);
+
+        // Stage under a dot-dir (list() skips those) in the same fs.
+        let staging = self.data_dir.images_dir().join(format!(".pulling-{key}"));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+        let rootfs = staging.join("rootfs");
+
+        let outcome =
+            self.client
+                .pull(&reference, &rootfs, existing_digest.as_deref(), on_event);
+        let pulled = match outcome {
+            Ok(PullOutcome::Pulled(pulled)) => pulled,
+            Ok(PullOutcome::UpToDate { .. }) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return self.load(&dir).map(|img| img.info);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
 
         if !pulled.ownership.is_empty() {
-            pulled.ownership.save(&dir.join(OWNERSHIP_FILE))?;
+            pulled.ownership.save(&staging.join(OWNERSHIP_FILE))?;
         }
 
         let meta = ImageMeta {
@@ -61,7 +117,15 @@ impl ImageStore {
             created_at: chrono::Utc::now(),
             config: pulled.config,
         };
-        std::fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta)?)?;
+        std::fs::write(
+            staging.join("meta.json"),
+            serde_json::to_string_pretty(&meta)?,
+        )?;
+
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::rename(&staging, &dir)?;
 
         Ok(ImageInfo {
             reference: meta.reference,
@@ -124,6 +188,10 @@ impl ImageStore {
         }
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
+            // Skip staging dirs (".pulling-*") and stray files.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let meta_path = entry.path().join("meta.json");
             if let Ok(data) = std::fs::read_to_string(&meta_path) {
                 if let Ok(meta) = serde_json::from_str::<ImageMeta>(&data) {

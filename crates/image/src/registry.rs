@@ -28,6 +28,7 @@ pub enum PullEvent {
     LayerDone { digest: String },
     Unpacking { digest: String },
     Done { digest: String },
+    UpToDate { digest: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +88,13 @@ pub struct RegistryClient {
     tokens: Mutex<std::collections::HashMap<String, String>>,
 }
 
+/// Result of a pull attempt.
+pub enum PullOutcome {
+    Pulled(PulledImage),
+    /// The stored copy already matches the registry's manifest digest.
+    UpToDate { digest: String },
+}
+
 /// Everything pulled for one image, unpacked on disk.
 pub struct PulledImage {
     pub digest: String,
@@ -109,13 +117,15 @@ impl RegistryClient {
     }
 
     /// Pull `reference`, unpack layers into `dest_rootfs`, and report progress
-    /// through `on_event`.
+    /// through `on_event`. When the resolved manifest digest equals
+    /// `skip_if_digest`, nothing is downloaded and `UpToDate` is returned.
     pub fn pull(
         &self,
         reference: &ImageReference,
         dest_rootfs: &Path,
+        skip_if_digest: Option<&str>,
         mut on_event: impl FnMut(PullEvent),
-    ) -> Result<PulledImage> {
+    ) -> Result<PullOutcome> {
         on_event(PullEvent::Manifest {
             reference: reference.to_string(),
         });
@@ -126,6 +136,11 @@ impl RegistryClient {
             RefKind::Digest(d) if manifest.media_type.is_empty() => d.clone(),
             _ => manifest_digest,
         };
+
+        if skip_if_digest == Some(digest.as_str()) {
+            on_event(PullEvent::UpToDate { digest: digest.clone() });
+            return Ok(PullOutcome::UpToDate { digest });
+        }
 
         // 2. Config blob.
         on_event(PullEvent::Config {
@@ -183,12 +198,12 @@ impl RegistryClient {
         on_event(PullEvent::Done {
             digest: digest.clone(),
         });
-        Ok(PulledImage {
+        Ok(PullOutcome::Pulled(PulledImage {
             digest,
             config,
             size: total_size,
             ownership,
-        })
+        }))
     }
 
     /// Fetch a manifest; if it is an index/list, resolve to the platform

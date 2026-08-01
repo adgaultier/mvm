@@ -55,6 +55,12 @@ fn print_pull_event(line: &str) {
                 short(v["digest"].as_str().unwrap_or(""))
             );
         }
+        Some("uptodate") => {
+            println!(
+                "up to date ({})",
+                short(v["digest"].as_str().unwrap_or(""))
+            );
+        }
         Some("error") => {
             eprintln!("pull error: {}", v["error"].as_str().unwrap_or_default());
         }

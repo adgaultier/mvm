@@ -473,6 +473,25 @@ impl Manager {
         Ok((session_id, rx))
     }
 
+    /// Remove a stored image, refusing while any sandbox references it.
+    pub fn remove_image(&self, name: &str) -> Result<()> {
+        let target = self.inner.images.get(name)?;
+        {
+            let sandboxes = self.inner.sandboxes.read().unwrap();
+            for entry in sandboxes.values() {
+                if let Ok(img) = self.inner.images.get(&entry.info.spec.image) {
+                    if img.rootfs == target.rootfs {
+                        return Err(Error::InvalidState(format!(
+                            "image '{name}' is in use by sandbox {} — remove it first",
+                            entry.info.id
+                        )));
+                    }
+                }
+            }
+        }
+        self.inner.images.remove(name)
+    }
+
     /// Write to the guest console's stdin (`attach_stdin` sandboxes only).
     /// `None` = EOF: the console is a tty, which has no pipe-style EOF, so
     /// VEOF (^D) is sent for the guest line discipline to translate, then

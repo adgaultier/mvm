@@ -58,10 +58,6 @@ impl DataDir {
         self.sandboxes_dir().join(id.as_str())
     }
 
-    /// Path to the daemon's auth-free local HTTP endpoint config file.
-    pub fn daemon_pidfile(&self) -> PathBuf {
-        self.root.join("daemon.pid")
-    }
 }
 
 /// Path to the guest agent binary, resolved at runtime.
