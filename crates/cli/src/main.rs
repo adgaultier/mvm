@@ -238,8 +238,35 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
     }
 }
 
+/// Everything after the image is the guest command (docker-style trailing
+/// args) — so an mvm option placed there would silently run *inside* the
+/// guest. Reject the obvious cases instead.
+fn validate_guest_command(command: &[String]) -> Result<(), String> {
+    const MVM_FLAGS: &[&str] = &[
+        "--name", "--env", "--volume", "--publish", "--net", "--cpus", "--memory", "--workdir",
+        "--keep", "--host",
+    ];
+    if let Some(first) = command.first() {
+        if first.starts_with('-') {
+            return Err(format!(
+                "guest command starts with '{first}'; mvm options must come before the image \
+                 (e.g. `mvm run --net gvproxy <image> <command>`)"
+            ));
+        }
+    }
+    if let Some(flag) = command.iter().find(|t| MVM_FLAGS.contains(&t.as_str())) {
+        return Err(format!(
+            "'{flag}' appears after the image and would be passed to the guest command; \
+             place mvm options before the image (wrap the command in sh -c '...' if the \
+             guest really needs a literal '{flag}')"
+        ));
+    }
+    Ok(())
+}
+
 impl BoxArgs {
     pub(crate) fn spec(&self) -> Result<SandboxSpec, String> {
+        validate_guest_command(&self.command)?;
         let network: NetworkMode = self.net.parse().map_err(|e: String| e)?;
         let mounts = self
             .volume
@@ -337,4 +364,29 @@ fn human_size(bytes: u64) -> String {
 #[allow(dead_code)]
 fn print_sandbox(sb: &Sandbox) {
     println!("{} ({})", sb.id, sb.state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rejects_mvm_flags_after_image() {
+        assert!(validate_guest_command(&cmd(&["sh", "-c", "apk add curl", "--net", "gvproxy"]))
+            .is_err());
+        assert!(validate_guest_command(&cmd(&["--keep", "sh"])).is_err());
+        assert!(validate_guest_command(&cmd(&["-x"])).is_err());
+    }
+
+    #[test]
+    fn allows_normal_guest_commands() {
+        assert!(validate_guest_command(&cmd(&[])).is_ok());
+        assert!(validate_guest_command(&cmd(&["sh", "-c", "echo --net gvproxy"])).is_ok());
+        assert!(validate_guest_command(&cmd(&["grep", "-e", "pattern", "file"])).is_ok());
+        assert!(validate_guest_command(&cmd(&["cat", "-v", "file"])).is_ok());
+    }
 }
