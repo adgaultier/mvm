@@ -32,6 +32,17 @@ unsafe extern "C" {
     /// Sets the path to be used as root for the microVM (virtiofs).
     pub fn krun_set_root(ctx_id: c_uint, root_path: *const c_char) -> c_int;
 
+    /// Adds a virtio-net device backed by a connected unixgram fd
+    /// (disables the default TSI backend).
+    pub fn krun_add_net_unixgram(
+        ctx_id: c_uint,
+        c_path: *const c_char,
+        fd: c_int,
+        c_mac: *const c_uchar,
+        features: c_uint,
+        flags: c_uint,
+    ) -> c_int;
+
     /// Adds a raw disk image as a virtio-blk device.
     pub fn krun_add_disk(
         ctx_id: c_uint,

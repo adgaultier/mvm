@@ -114,6 +114,48 @@ sleep 1
 check "exec killed on disconnect" "0" \
     "$("$MVM" exec itest sh -c 'c=0; for p in $(pgrep -x sleep); do grep -q 299 /proc/$p/cmdline && c=$((c+1)); done; echo $c')"
 
+echo "==> networking"
+# --net none must be truly isolated: libkrun defaults to TSI (transparent
+# host networking) without a NIC, which mvm now disables with a dead NIC.
+set +e
+"$MVM" run alpine timeout 5 wget -q -O /dev/null http://1.1.1.1 >/dev/null 2>&1
+NONE_RC=$?
+set -e
+check "none profile is isolated" "isolated" "$([ "$NONE_RC" -ne 0 ] && echo isolated)"
+
+# --net tsi: libkrun transparent socket impersonation — outbound + DNS with
+# zero host setup.
+check "tsi outbound + dns" "TSI-OK" \
+    "$("$MVM" run --net tsi alpine sh -c \
+        'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo TSI-OK')"
+
+if command -v gvproxy >/dev/null 2>&1; then
+    GVSOCK="$MVM_DATA_DIR/gvproxy.sock"
+    gvproxy -listen-vfkit "unixgram://$GVSOCK" >/dev/null 2>&1 &
+    GVPID=$!
+    for _ in $(seq 1 50); do [ -S "$GVSOCK" ] && break; sleep 0.1; done
+
+    check "gvproxy outbound + dns" "NET-OK" \
+        "$("$MVM" run --net "gvproxy:$GVSOCK" alpine sh -c \
+            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
+
+    # Port forwarding: guest httpd reachable from the host.
+    "$MVM" run --keep --name web --net "gvproxy:$GVSOCK" -p 18080:8000 alpine \
+        sh -c 'mkdir -p /www && echo gv-web > /www/index.html && httpd -f -p 8000 -h /www' >/dev/null 2>&1 &
+    WEB_PID=$!
+    for _ in $(seq 1 100); do
+        curl -sf --max-time 1 http://127.0.0.1:18080/ >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    check "gvproxy port forward" "gv-web" "$(curl -sf --max-time 3 http://127.0.0.1:18080/)"
+    "$MVM" stop web >/dev/null 2>&1 || true
+    wait "$WEB_PID" 2>/dev/null || true
+    "$MVM" rm web >/dev/null 2>&1 || true
+    kill "$GVPID" 2>/dev/null || true
+else
+    echo "skip: gvproxy not installed (outbound + port-forward checks)"
+fi
+
 echo "==> volumes"
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"

@@ -8,9 +8,12 @@ use crate::SandboxId;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
-    /// No network device at all (fully isolated). Default.
+    /// No network device and TSI disabled (fully isolated). Default.
     #[default]
     None,
+    /// libkrun's native TSI backend: transparent socket impersonation —
+    /// guest sockets are serviced by the host, no NIC, no extra setup.
+    Tsi,
     /// Userspace NAT via gvproxy (requires gvproxy binary).
     Gvproxy { socket: PathBuf },
     /// Attach to a pre-existing TAP device (requires privileges).
@@ -21,6 +24,7 @@ impl std::fmt::Display for NetworkMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NetworkMode::None => write!(f, "none"),
+            NetworkMode::Tsi => write!(f, "tsi"),
             NetworkMode::Gvproxy { .. } => write!(f, "gvproxy"),
             NetworkMode::Tap { name } => write!(f, "tap:{name}"),
         }
@@ -32,13 +36,19 @@ impl std::str::FromStr for NetworkMode {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "none" => Ok(NetworkMode::None),
+            "tsi" => Ok(NetworkMode::Tsi),
             "gvproxy" => Ok(NetworkMode::Gvproxy {
                 socket: PathBuf::from("/run/gvproxy/gvproxy.sock"),
+            }),
+            _ if s.starts_with("gvproxy:") => Ok(NetworkMode::Gvproxy {
+                socket: PathBuf::from(s.trim_start_matches("gvproxy:")),
             }),
             _ if s.starts_with("tap:") => Ok(NetworkMode::Tap {
                 name: s.trim_start_matches("tap:").to_string(),
             }),
-            _ => Err(format!("unknown network mode '{s}' (none|gvproxy|tap:<dev>)")),
+            _ => Err(format!(
+                "unknown network mode '{s}' (none|tsi|gvproxy[:<socket>]|tap:<dev>)"
+            )),
         }
     }
 }

@@ -63,7 +63,27 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
     }
 
     match &config.network {
-        NetworkMode::None => {}
+        NetworkMode::None => {
+            // libkrun defaults to TSI (transparent host networking) when no
+            // NIC is configured — the opposite of what "none" promises.
+            // Attach a virtio-net device backed by a dead socketpair end:
+            // TSI is disabled and every frame is silently dropped.
+            let mut sp = [-1i32; 2];
+            let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, sp.as_mut_ptr()) };
+            if rc != 0 {
+                return Err(mvm_common::Error::Runtime(
+                    "socketpair for isolated NIC failed".into(),
+                ));
+            }
+            // sp[1] intentionally stays open for the VM's lifetime.
+            ctx.add_net_unixgram(sp[0])?;
+        }
+        NetworkMode::Tsi => {
+            // No NIC: libkrun's default TSI backend takes over — guest
+            // sockets are transparently serviced by the host. Port maps
+            // ride the same mechanism.
+            ctx.set_port_map(&config.ports)?;
+        }
         NetworkMode::Gvproxy { socket } => {
             ctx.set_gvproxy(socket)?;
             ctx.set_port_map(&config.ports)?;
@@ -99,6 +119,19 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             if let Some(workdir) = &config.workdir {
                 env.push(format!("MVM_WORKDIR={workdir}"));
             }
+        }
+        match config.network {
+            NetworkMode::Gvproxy { .. } => {
+                // gvproxy's vfkit-mode defaults; the agent applies them if
+                // nothing else configured the interface.
+                env.push("MVM_NET_CONFIG=192.168.127.2/24,192.168.127.1".to_string());
+            }
+            NetworkMode::Tsi => {
+                // TSI needs no interface config, but images ship an empty
+                // resolv.conf; the agent fills in public resolvers.
+                env.push("MVM_NET_TSI=1".to_string());
+            }
+            _ => {}
         }
         if !config.mounts.is_empty() {
             let spec = config

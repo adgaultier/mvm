@@ -1,67 +1,110 @@
 # TODO
 
-Prioritized backlog after the initial implementation (see `implementation.md`).
+Prioritized backlog. See `implementation.md` for architecture.
 
-## 1. Re-run integration on real host
-`scripts/integration.sh` must run in a normal shell (the Claude Code sandbox
-hides `/dev/kvm` and blocks `newuidmap`). Validates, since the last full run:
-the overlay driver in userns mode (`userxattr` fix — expect
-`storage driver: overlay` and the persistence check passing), binary-safe
-exec streams, the agent-ready barrier in `start` (no more 500s in the log),
-deterministic `mvm run` exit, and `logs -f` terminating on sandbox exit.
+## 1. Validate networking modes on real host
+`scripts/integration.sh` gained a networking section: `none` isolation
+(TSI must be off), `tsi` outbound+DNS, and — with gvproxy installed —
+gvproxy outbound/DNS and `-p` port forwarding. None of it has run on real
+KVM yet, and the guest-side static config (192.168.127.2/24 via agent
+ioctls) plus the vfkit-socket wiring are exactly the kind of thing that
+needs one live round.
 
-## 2. Image store audit
-Review `registry.rs`/`store.rs`: per-layer blob caching vs re-download,
-image GC / `rmi` refcounting against existing sandboxes, locking for
-concurrent pulls of the same reference. `daemon.pid` is defined but unused.
+## 2. Honor the image USER directive
+`ImageConfig.user` is parsed and ignored — every workload runs as root.
+Faithful behavior (docker parity, needed by e.g.
+`docker/sandbox-templates:opencode`, which runs as `agent`): the guest
+agent resolves the user against the rootfs `/etc/passwd`/`/etc/group`,
+then setgroups/setgid/setuid before spawning the workload, and sets
+HOME/USER/LOGNAME. Also applies to exec sessions (docker exec runs as the
+container user by default, `-u` overrides).
+
+## 3. Credentials injection (design plan)
+Modeled on Docker Sandboxes' credential handling
+(https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
+mvm's daemon + vsock architecture. Guiding principle: **real secrets never
+enter the guest** — not its env, not its filesystem; the guest sees
+sentinels and the host injects at the network boundary.
+
+**Milestone A — secret store + env injection (foundation):**
+- `mvm secret set|rm|ls` in the daemon. Backends: Linux Secret Service
+  (GNOME Keyring / KDE Wallet) via D-Bus, falling back to an encrypted
+  file under the data dir (0700 dir / 0600 file, same posture as
+  `~/.docker/config.json`).
+- Scopes, docker-style: global (all sandboxes, applied at create) vs
+  per-sandbox (immediate). `mvm run --secret NAME[=ENV_VAR]` resolves at
+  start. Secret *names* go in `SandboxSpec`; values are resolved at start
+  time only — never persisted in `sandboxes.json`, redacted in
+  `mvm inspect` output.
+- Weakness (accepted for A): the value still lands in the guest's env,
+  like `-e` today. A is about storage hygiene + UX, not isolation.
+
+**Milestone B — credential proxy with sentinel values (the real thing):**
+- Guest env gets `ANTHROPIC_API_KEY=mvm-proxy-managed` (sentinel), plus
+  `HTTP(S)_PROXY=http://127.0.0.1:<port>`. The agent bridges that
+  loopback port over **vsock** to a host-side proxy owned by the daemon —
+  works in every network mode including `none`/`tsi`, since egress
+  happens host-side.
+- The host proxy matches requests against a service map (api.anthropic.com,
+  api.openai.com, api.github.com, generativelanguage.googleapis.com, …)
+  and swaps the sentinel for the real header value on the way out.
+  Built-in service list + user-defined `(domain, header, secret)` triples.
+- HTTPS: header injection requires TLS termination at the proxy. Generate
+  a per-data-dir CA, terminate+re-originate TLS for *matched* domains
+  only, and have the agent install the CA into the guest trust store at
+  boot (append to `/etc/ssl/certs/ca-certificates.crt` + the common
+  distro variants). Unmatched domains get plain CONNECT tunneling — no
+  MITM outside the declared service list.
+- Egress policy falls out for free: the proxy can enforce a domain
+  allowlist per sandbox (deny-by-default option for agentic workloads).
+
+**Milestone C — forwarding, not copying:**
+- SSH agent forwarding over vsock (`SSH_AUTH_SOCK` bridged by the guest
+  agent) for git push/commit signing — keys never enter the guest.
+- OAuth-style flows (Claude Code, etc.): token lives host-side, proxy
+  injects; sandbox never sees it.
+
+Non-goals for now: console-log secret redaction; Windows/macOS keychains.
+
+## 4. Console polish for `mvm run -it`
+No winsize propagation to the guest console (exec -it has full resize),
+and TERM isn't injected on the console path (`-e TERM=xterm-256color`
+works around it). Agent-side: TIOCSWINSZ on the console + a resize
+message keyed to the sandbox rather than an exec session.
+
+## 5. Pull memory usage
+Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
+unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
+temp file with incremental hashing instead — matters for images like
+`docker/sandbox-templates:opencode` (~750 MB compressed).
 
 ---
 
 ## Done
 
-- **E2E integration** — 12/12 passing on real KVM (2026-08-01); rerun with
-  userns mode: 14/15 (overlay probe fixed afterwards with `userxattr`).
-- **Rootless chown / virtiofs UID translation** — fixed while keeping
-  virtiofs as the root filesystem: `mvm serve` re-execs into a user
-  namespace (podman-style, subuid ranges via newuidmap/newgidmap), so
-  libkrun's in-process virtiofs server has CAP_CHOWN over mapped uids.
-  Unpack applies real tar-header ownership as namespace-root. Validated on
-  real KVM (guest chown + root-owned files pass). An `ext4` block-root
-  driver also exists (`MVM_STORAGE_DRIVER=ext4`, agent pivot_root +
-  ownership manifest) for hosts without subuid ranges.
-- **Restart semantics** — overlay upper layer (default driver) and ext4
-  disks persist across stop/start (docker-like); the `copy` fallback remains
-  ephemeral and is documented as such. Overlay `create` no longer wipes the
-  sandbox dir (which used to delete console.log on restart).
-- **Exec stdin** — `mvm exec -i` forwards local stdin over
-  `POST /exec/{session}/stdin`.
-- **Binary-safe exec streams** — Stdin/Stdout/Stderr frames carry base64
-  bytes (hand-rolled codec in `common::protocol::b64`, no new agent deps);
-  integration has a 64 KiB /dev/urandom sha256 roundtrip check.
-- **Deterministic run/exec lifecycle** — `start` blocks until the guest
-  agent's vsock channel is up (or the VM dies); the daemon closes a
-  sandbox's log broadcast on shim exit, so `mvm run` just streams the
-  follow log to EOF (no state polling, no flush sleeps, no cut tails) and
-  `logs -f` terminates when the sandbox exits.
-- **Agent linkage guard** — dynamically-linked agent candidates are
-  rejected (ELF PT_INTERP check) so a glibc agent can never be injected
-  into a musl guest again; dev trees auto-find the musl build.
-- **CLI flag misuse guard** — mvm options after the image (which would
-  silently join the guest command) are rejected with a hint.
-- **Exec TTY support** — `mvm exec -it sb sh` gives a real interactive
-  shell: the agent allocates a pty (openpty; mounts devpts at boot), the
-  child becomes session leader on the slave, output merges onto Stdout;
-  a `Resize` protocol message + `/exec/{session}/resize` endpoint carry
-  winsize (initial size in the Exec request, then a 500 ms poll in the
-  CLI); the CLI enters raw mode (termios, restored on drop) so ^C/arrows
-  reach the guest.
-- **Exec kill on client disconnect** — the API's exec stream holds a
-  kill-on-drop guard: if the HTTP response is dropped before the Exit
-  frame (client Ctrl-C/crash/network loss), the daemon SIGKILLs the guest
-  session. Integration check: killed client → no orphaned `sleep` in VM.
-- **Interactive `mvm run` (`-i`/`-t`)** — attach_stdin sandboxes get the
-  shim's stdin as a pipe feeding the guest console (default stays
-  /dev/null so stdin-readers see EOF); POST /sandboxes/{id}/stdin writes
-  to it; EOF sends VEOF through the console line discipline (a tty has no
-  pipe EOF). CLI pumps local stdin; `-t` adds local raw mode. Console
-  resize is not propagated (known gap; exec -it has full resize).
+- **E2E integration** — 21/21 on real KVM in rootless userns mode with
+  the overlay driver (2026-08-01).
+- **Rootless chown / virtiofs UID translation** — `mvm serve` re-execs
+  into a user namespace (subuid ranges via newuidmap/newgidmap, two-stage
+  SIGSTOP handshake so the daemon keeps capabilities after exec); the
+  in-process virtiofs server chowns to mapped uids. Unpack applies real
+  tar-header ownership. `ext4` block-root driver kept as opt-in.
+- **Overlay storage rootless** — `userxattr` mounts inside the userns;
+  upper layer persists across stop/start; probe with labeled fallback.
+- **Network isolation + modes** — `none` now really is isolated (dead
+  unixgram NIC disables libkrun's default TSI); `tsi` exposed as an
+  explicit zero-setup outbound mode (agent writes public resolvers);
+  `gvproxy[:<socket>]` fixed to the vfkit datagram protocol with
+  agent-side static IP/route/DNS bootstrap (ioctls, no guest binaries).
+- **Exec**: binary-safe base64 streams; `-it` with real pty (openpty,
+  devpts, Resize protocol + endpoint, raw-mode CLI); kill-on-disconnect
+  guard on the API stream.
+- **Interactive `mvm run -i/-t`** — console stdin attach over
+  `POST /sandboxes/{id}/stdin`, VEOF on EOF, local raw mode with `-t`.
+- **Deterministic lifecycle** — `start` waits for the agent channel
+  (exec also tolerates a concurrent start); log broadcast closes on shim
+  exit so `run` streams to EOF and `logs -f` terminates.
+- **Image store** — up-to-date digest short-circuit, atomic staged
+  pulls, per-key pull locking, `rmi` in-use refusal.
+- **Guardrails** — dynamically-linked agent rejected (PT_INTERP check);
+  mvm flags after the image rejected with a hint.

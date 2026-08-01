@@ -133,17 +133,25 @@ defined in `crates/common/src/protocol.rs`.
   - `ext4` (opt-in): per-sandbox ext4 image built with `mkfs.ext4 -d`,
     booted as a virtio-blk root instead of virtiofs.
 - **Network profiles** (`--net`, placed before the image):
-  - `none` (default): no virtio-net device at all — loopback only,
-    strongest isolation.
-  - `gvproxy`: rootless userspace NAT (the same stack podman machine
-    uses). Outbound internet plus `-p host:guest` port forwards. Needs a
-    gvproxy running at `/run/gvproxy/gvproxy.sock` first:
+  - `none` (default): fully isolated — loopback only. (mvm attaches a
+    dead NIC to switch off libkrun's default TSI backend, which would
+    otherwise give every guest transparent host networking.)
+  - `tsi`: libkrun's Transparent Socket Impersonation — guest sockets are
+    serviced by the host directly. Outbound internet + DNS with **zero
+    setup** (no proxy, no NIC, no root), plus `-p` port maps. The guest
+    shares the host's network identity; use `gvproxy` when you want NAT
+    separation.
+  - `gvproxy[:<socket>]`: rootless userspace NAT (the same stack podman
+    machine uses). Outbound internet plus `-p host:guest` port forwards.
+    Needs a gvproxy listening in **vfkit** mode (libkrun speaks the vfkit
+    datagram protocol — not `-listen-qemu`):
 
     ```console
-    $ gvproxy -listen-qemu unix:///run/gvproxy/gvproxy.sock &
+    $ gvproxy -listen-vfkit unixgram:///run/gvproxy/gvproxy.sock &
     $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
     ```
 
+    The guest is configured automatically (192.168.127.2/24, gw/DNS .1).
     Throughput is modest (userspace TCP/IP) — fine for package installs
     and API calls.
   - `tap:<dev>`: attach to an existing TAP device for near-native

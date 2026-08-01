@@ -123,6 +123,26 @@ impl KrunContext {
         )
     }
 
+    /// Attach a virtio-net device backed by a unixgram fd. Used with a
+    /// dead socketpair end to *disable* libkrun's default TSI backend
+    /// (transparent host networking) for truly isolated sandboxes.
+    pub fn add_net_unixgram(&self, fd: std::os::unix::io::RawFd) -> Result<()> {
+        let mac: [u8; 6] = [0x5a, 0x4d, 0x56, 0x4d, 0x00, 0x01]; // locally administered
+        check(
+            unsafe {
+                krun_sys::krun_add_net_unixgram(
+                    self.ctx,
+                    std::ptr::null(),
+                    fd,
+                    mac.as_ptr(),
+                    0,
+                    0,
+                )
+            },
+            "krun_add_net_unixgram",
+        )
+    }
+
     /// Attach to an existing TAP device.
     pub fn add_net_tap(&self, name: &str) -> Result<()> {
         let mut n = cstr(name)?.into_bytes_with_nul();

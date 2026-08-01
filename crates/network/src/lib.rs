@@ -10,12 +10,14 @@ use mvm_common::{Error, NetworkMode, Result};
 pub fn validate(mode: &NetworkMode) -> Result<()> {
     match mode {
         NetworkMode::None => Ok(()),
+        // TSI is provided by the libkrunfw kernel; nothing to check host-side.
+        NetworkMode::Tsi => Ok(()),
         NetworkMode::Gvproxy { socket } => {
             if socket.exists() {
                 Ok(())
             } else {
                 Err(Error::Network(format!(
-                    "gvproxy socket {} not found; start gvproxy first (e.g. `gvproxy -listen-qemu unix://{0}`)",
+                    "gvproxy socket {} not found; start gvproxy first (e.g. `gvproxy -listen-vfkit unixgram://{0}`) — note: libkrun speaks the vfkit datagram protocol, not -listen-qemu",
                     socket.display()
                 )))
             }
