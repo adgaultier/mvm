@@ -14,9 +14,9 @@ $ mvm run --name dev --keep alpine sleep infinity &
 $ mvm exec dev uname -a
 Linux localhost 6.12.91 #1 SMP PREEMPT_DYNAMIC ... x86_64 Linux
 $ printf 'stdin works\n' | mvm exec -i dev cat
+stdin works
 $ mvm exec -it dev sh          # interactive shell on a pty (vi/top work)
 $ mvm run -it alpine sh        # one-shot interactive sandbox (console attach)
-stdin works
 $ mvm stop dev && mvm rm dev
 ```
 
@@ -132,9 +132,28 @@ defined in `crates/common/src/protocol.rs`.
     (wiped) on every start.
   - `ext4` (opt-in): per-sandbox ext4 image built with `mkfs.ext4 -d`,
     booted as a virtio-blk root instead of virtiofs.
-- **Network profiles:** `none` (default — no NIC, strongest isolation),
-  `gvproxy` (userspace NAT + `-p` port maps; needs a running gvproxy),
-  `tap:<dev>` (pre-configured TAP device).
+- **Network profiles** (`--net`, placed before the image):
+  - `none` (default): no virtio-net device at all — loopback only,
+    strongest isolation.
+  - `gvproxy`: rootless userspace NAT (the same stack podman machine
+    uses). Outbound internet plus `-p host:guest` port forwards. Needs a
+    gvproxy running at `/run/gvproxy/gvproxy.sock` first:
+
+    ```console
+    $ gvproxy -listen-qemu unix:///run/gvproxy/gvproxy.sock &
+    $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
+    ```
+
+    Throughput is modest (userspace TCP/IP) — fine for package installs
+    and API calls.
+  - `tap:<dev>`: attach to an existing TAP device for near-native
+    performance; you own the plumbing (and the guest needs its own IP
+    config — mvm does no addressing):
+
+    ```console
+    $ sudo ip tuntap add dev mvmtap0 mode tap && sudo ip link set mvmtap0 up
+    $ mvm run --net tap:mvmtap0 alpine ...
+    ```
 
 ## Known limitations
 

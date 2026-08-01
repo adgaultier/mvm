@@ -16,16 +16,38 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 const CHILD_MARK: &str = "MVM_USERNS_CHILD";
-const PIPE_FD: &str = "MVM_USERNS_PIPE";
 
 /// Called by `serve` before the tokio runtime starts (the process must
 /// still be single-threaded: unshare(CLONE_NEWUSER) fails otherwise).
 /// Either returns quickly (child / disabled / unavailable) or re-execs and
 /// never returns from the parent side.
 pub fn maybe_enter_userns() {
-    if std::env::var_os(CHILD_MARK).is_some() {
-        finish_child();
-        return;
+    match std::env::var(CHILD_MARK).as_deref() {
+        // Stage 1: we're inside the fresh user namespace, but we exec'd
+        // before the id maps existed, so execve computed an *empty*
+        // capability set (unmapped euid). Stop; the parent maps us and
+        // SIGCONTs; then re-exec — this time as mapped uid 0, which grants
+        // full capabilities in the namespace.
+        Ok("1") => {
+            unsafe { libc::raise(libc::SIGSTOP) };
+            if unsafe { libc::geteuid() } != 0 {
+                // Maps never landed; the parent handles fallback messaging.
+                std::process::exit(1);
+            }
+            let exe = std::env::current_exe().unwrap_or_else(|_| "/proc/self/exe".into());
+            let err = Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .env(CHILD_MARK, "2")
+                .exec();
+            eprintln!("mvm: userns re-exec failed: {err}");
+            std::process::exit(1);
+        }
+        // Stage 2: mapped root with full caps; finish namespace setup.
+        Ok(_) => {
+            finish_child();
+            return;
+        }
+        Err(_) => {}
     }
     if unsafe { libc::geteuid() } == 0 {
         return; // real root: nothing to gain
@@ -54,14 +76,6 @@ pub fn maybe_enter_userns() {
         }
     }
 
-    // Handshake pipe: the child blocks until the parent has written the
-    // uid/gid maps (fds from pipe(2) are inherited across exec).
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        eprintln!("mvm: pipe failed; running without a user namespace");
-        return;
-    }
-
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -70,9 +84,7 @@ pub fn maybe_enter_userns() {
         }
     };
     let mut cmd = Command::new(exe);
-    cmd.args(std::env::args_os().skip(1))
-        .env(CHILD_MARK, "1")
-        .env(PIPE_FD, fds[0].to_string());
+    cmd.args(std::env::args_os().skip(1)).env(CHILD_MARK, "1");
     unsafe {
         cmd.pre_exec(|| {
             if libc::unshare(libc::CLONE_NEWUSER) != 0 {
@@ -80,6 +92,9 @@ pub fn maybe_enter_userns() {
             }
             // If the parent dies, take the daemon down with it.
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            // NOTE: the SIGSTOP handshake happens *after* exec (stage 1
+            // above), not here — Command::spawn blocks until the child
+            // execs, so stopping pre-exec would deadlock the parent.
             Ok(())
         });
     }
@@ -88,35 +103,26 @@ pub fn maybe_enter_userns() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("mvm: userns unshare failed ({e}); running without a user namespace");
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
-            }
             return;
         }
     };
 
     let pid = child.id();
+    // Wait for the pre-exec SIGSTOP, install the maps, release the child.
+    let mut status = 0i32;
+    let stopped = unsafe { libc::waitpid(pid as i32, &mut status, libc::WUNTRACED) } == pid as i32
+        && libc::WIFSTOPPED(status);
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-    let mapped = write_maps(pid, uid, gid, &sub_uid, &sub_gid);
+    let mapped = stopped && write_maps(pid, uid, gid, &sub_uid, &sub_gid);
     if !mapped {
         eprintln!("mvm: newuidmap/newgidmap failed; running without a user namespace");
         let _ = child.kill();
+        unsafe { libc::kill(pid as i32, libc::SIGCONT) };
         let _ = child.wait();
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
         return;
     }
-
-    // Release the child and become a thin supervisor.
-    unsafe {
-        libc::write(fds[1], [1u8].as_ptr() as *const libc::c_void, 1);
-        libc::close(fds[1]);
-        libc::close(fds[0]);
-    }
+    unsafe { libc::kill(pid as i32, libc::SIGCONT) };
     eprintln!(
         "mvm: userns mode active (uid 0 -> {uid}, 1.. -> {}+{})",
         sub_uid.start, sub_uid.count
@@ -137,21 +143,11 @@ fn status_signal(status: &std::process::ExitStatus) -> i32 {
     status.signal().unwrap_or(1)
 }
 
-/// Child side: wait for the parent to install the id maps, then finish
-/// namespace setup (private mount namespace for the storage drivers).
+/// Child side. The parent installed the id maps while we were stopped
+/// pre-exec, so we're already (mapped) root with full capabilities here;
+/// finish namespace setup (private mount namespace for storage drivers).
 fn finish_child() {
-    if let Ok(fd) = std::env::var(PIPE_FD).and_then(|v| {
-        v.parse::<i32>()
-            .map_err(|_| std::env::VarError::NotPresent)
-    }) {
-        let mut byte = [0u8; 1];
-        unsafe {
-            libc::read(fd, byte.as_mut_ptr() as *mut libc::c_void, 1);
-            libc::close(fd);
-        }
-    }
     std::env::remove_var(CHILD_MARK);
-    std::env::remove_var(PIPE_FD);
 
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("mvm: warning: uid map not installed; userns setup incomplete");
@@ -160,16 +156,21 @@ fn finish_child() {
 
     // A private mount namespace so overlay mounts don't leak to the host.
     unsafe {
-        if libc::unshare(libc::CLONE_NEWNS) == 0 {
-            let root = std::ffi::CString::new("/").unwrap();
-            libc::mount(
-                std::ptr::null(),
-                root.as_ptr(),
-                std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
-                std::ptr::null(),
+        if libc::unshare(libc::CLONE_NEWNS) != 0 {
+            eprintln!(
+                "mvm: warning: mount-namespace unshare failed: {} (overlay storage may not work)",
+                std::io::Error::last_os_error()
             );
+            return;
         }
+        let root = std::ffi::CString::new("/").unwrap();
+        libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        );
     }
 }
 

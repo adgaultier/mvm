@@ -432,21 +432,31 @@ impl Manager {
         let (tx, rx) = mpsc::channel(64);
         let session_id = self.inner.session_counter.fetch_add(1, Ordering::SeqCst);
 
-        let sender = {
-            let mut sandboxes = self.inner.sandboxes.write().unwrap();
-            let entry = sandboxes
-                .get_mut(&id)
-                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
-            if !entry.info.state.is_alive() {
-                return Err(Error::InvalidState("sandbox is not running".into()));
+        // A concurrent `start` may have flipped the state to Running before
+        // the agent's vsock channel is up; give it a moment rather than 500.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let sender = loop {
+            {
+                let mut sandboxes = self.inner.sandboxes.write().unwrap();
+                let entry = sandboxes
+                    .get_mut(&id)
+                    .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
+                if !entry.info.state.is_alive() {
+                    return Err(Error::InvalidState("sandbox is not running".into()));
+                }
+                if let Some(agent) = entry.agent.as_ref() {
+                    let sender = agent.sender();
+                    entry.exec_sessions.insert(session_id, ExecSession { tx });
+                    break sender;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Runtime(
+                        "sandbox has no agent connection (was it started with exec support?)"
+                            .into(),
+                    ));
+                }
             }
-            let agent = entry.agent.as_ref().ok_or_else(|| {
-                Error::Runtime("sandbox has no agent connection (was it started with exec support?)".into())
-            })?;
-            entry
-                .exec_sessions
-                .insert(session_id, ExecSession { tx });
-            agent.sender()
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
 
         sender

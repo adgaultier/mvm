@@ -32,10 +32,16 @@ impl OverlayDriver {
                 return false;
             }
         }
-        let ok = mount_overlay(&lower, &upper, &work, &merged).is_ok();
-        if ok {
-            let _ = Command::new("umount").arg(&merged).status();
-        }
+        let ok = match mount_overlay(&lower, &upper, &work, &merged) {
+            Ok(()) => {
+                let _ = Command::new("umount").arg(&merged).status();
+                true
+            }
+            Err(e) => {
+                tracing::warn!("overlay unavailable, falling back to copy driver: {e}");
+                false
+            }
+        };
         let _ = std::fs::remove_dir_all(&base);
         ok
     }
@@ -54,15 +60,16 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Resu
     if !mvm_common::is_init_ns_root() {
         opts.push_str(",userxattr,redirect_dir=nofollow,index=off,metacopy=off");
     }
-    let status = Command::new("mount")
+    let out = Command::new("mount")
         .args(["-t", "overlay", "overlay", "-o", &opts])
         .arg(merged)
-        .status()
+        .output()
         .map_err(|e| storage_err(format!("spawning mount: {e}")))?;
-    if !status.success() {
+    if !out.status.success() {
         return Err(storage_err(format!(
-            "overlay mount failed for {}",
-            merged.display()
+            "overlay mount failed for {}: {}",
+            merged.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
     Ok(())
