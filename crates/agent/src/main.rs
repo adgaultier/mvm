@@ -1,0 +1,582 @@
+//! mvm-agent: PID 1 inside the guest microVM.
+//!
+//! Boots the workload, connects to the host over vsock (port 1024), and
+//! serves exec requests. Single-threaded poll() event loop; reaps zombies
+//! as PID 1. Built statically (crt-static) so it runs in any rootfs.
+
+use std::collections::{HashMap, VecDeque};
+use std::os::unix::io::{IntoRawFd, RawFd};
+use std::process::{Command, Stdio};
+
+use mvm_common::protocol::{
+    self, encode_frame, AgentEvent, AgentRequest, FrameDecoder,
+};
+
+const HOST_CID: u32 = 2; // VMADDR_CID_HOST
+const CHUNK: usize = 8192;
+
+static SELFPIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+extern "C" fn signal_handler(sig: i32) {
+    let fd = SELFPIPE_W.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = [sig as u8];
+        unsafe {
+            // Best-effort, async-signal-safe, nonblocking (pipe is O_NONBLOCK).
+            libc::write(fd, byte.as_ptr() as *const libc::c_void, 1);
+        }
+    }
+}
+
+struct Session {
+    pid: i32,
+    stdin_fd: Option<RawFd>,
+    stdin_buf: VecDeque<u8>,
+    stdout_fd: Option<RawFd>,
+    stderr_fd: Option<RawFd>,
+    exit_code: Option<i32>,
+}
+
+impl Session {
+    fn fully_drained(&self) -> bool {
+        self.stdout_fd.is_none() && self.stderr_fd.is_none()
+    }
+}
+
+struct Agent {
+    vsock: RawFd,
+    out_queue: VecDeque<u8>,
+    decoder: FrameDecoder,
+    sessions: HashMap<u32, Session>,
+    workload_pid: i32,
+    workload_code: Option<i32>,
+}
+
+fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    let code = real_main(&argv[1..]);
+    std::process::exit(code);
+}
+
+fn real_main(workload_argv: &[String]) -> i32 {
+    // 1. Mount any virtiofs bind mounts passed via MVM_MOUNTS.
+    mount_bind_shares();
+
+    // 2. Spawn the workload inheriting our stdio (= guest console).
+    let workload = if workload_argv.is_empty() {
+        None
+    } else {
+        match Command::new(&workload_argv[0])
+            .args(&workload_argv[1..])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => Some(child),
+            Err(e) => {
+                eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
+                return 127;
+            }
+        }
+    };
+    let workload_pid = workload.map(|c| c.id() as i32).unwrap_or(-1);
+
+    // 3. Self-pipe for signals (must exist before handlers install).
+    let mut pipe_fds = [-1i32; 2];
+    unsafe {
+        if libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) != 0 {
+            // Without a self-pipe we can't multiplex signals; bail.
+            return 1;
+        }
+    }
+    let selfpipe_r = pipe_fds[0];
+    SELFPIPE_W.store(pipe_fds[1], std::sync::atomic::Ordering::Relaxed);
+    install_handlers();
+
+    // 4. Connect to the host over vsock (retry while host listener comes up).
+    let vsock = match connect_vsock_retry(HOST_CID, protocol::AGENT_VSOCK_PORT, 100) {
+        Some(fd) => fd,
+        None => {
+            // No control channel: still run the workload to completion.
+            let mut status = 0;
+            unsafe {
+                libc::waitpid(workload_pid, &mut status, 0);
+            }
+            return exit_status_to_code(status);
+        }
+    };
+
+    let mut agent = Agent {
+        vsock,
+        out_queue: VecDeque::new(),
+        decoder: FrameDecoder::default(),
+        sessions: HashMap::new(),
+        workload_pid,
+        workload_code: None,
+    };
+    agent.send(&AgentEvent::Ready {
+        workload_pid: workload_pid.max(0) as u32,
+    });
+
+    agent.run(selfpipe_r)
+}
+
+impl Agent {
+    fn send(&mut self, event: &AgentEvent) {
+        if let Ok(frame) = encode_frame(event) {
+            self.out_queue.extend(frame);
+            let _ = self.flush_out();
+        }
+    }
+
+    fn flush_out(&mut self) -> std::io::Result<()> {
+        while !self.out_queue.is_empty() {
+            let n = unsafe {
+                libc::write(
+                    self.vsock,
+                    self.out_queue.as_slices().0.as_ptr() as *const libc::c_void,
+                    self.out_queue.len(),
+                )
+            };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+            self.out_queue.drain(..n as usize);
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, selfpipe_r: RawFd) -> i32 {
+        let mut read_buf = [0u8; CHUNK];
+        loop {
+            // Build the pollfd set.
+            let mut fds: Vec<libc::pollfd> = Vec::with_capacity(4 + self.sessions.len() * 3);
+            let out_wanted = if self.out_queue.is_empty() { 0 } else { libc::POLLOUT };
+            fds.push(libc::pollfd {
+                fd: self.vsock,
+                events: libc::POLLIN | out_wanted,
+                revents: 0,
+            });
+            fds.push(libc::pollfd {
+                fd: selfpipe_r,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            // Track which session/fd each pollfd belongs to.
+            let mut fd_map: Vec<(u32, u8)> = Vec::new(); // (session id, 0=stdout,1=stderr,2=stdin)
+            for (id, s) in self.sessions.iter() {
+                if let Some(fd) = s.stdout_fd {
+                    fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+                    fd_map.push((*id, 0));
+                }
+                if let Some(fd) = s.stderr_fd {
+                    fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+                    fd_map.push((*id, 1));
+                }
+                if let Some(fd) = s.stdin_fd {
+                    if !s.stdin_buf.is_empty() {
+                        fds.push(libc::pollfd { fd, events: libc::POLLOUT, revents: 0 });
+                        fd_map.push((*id, 2));
+                    }
+                }
+            }
+
+            let timeout = if self.workload_pid < 0 && self.sessions.is_empty() {
+                60_000 // idle VM: wake up once a minute anyway
+            } else {
+                5_000
+            };
+            let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            if n < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if n == 0 {
+                // Opportunistic zombie reaping even without a signal.
+                self.reap_children();
+                continue;
+            }
+
+            // 1) vsock readable/writable
+            let vsock_revents = fds[0].revents;
+            if vsock_revents & libc::POLLOUT != 0 {
+                let _ = self.flush_out();
+            }
+            if vsock_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::read(self.vsock, read_buf.as_mut_ptr() as *mut libc::c_void, CHUNK)
+                };
+                if n <= 0 {
+                    // Host gone: shut down.
+                    self.kill_all();
+                    return self.workload_code.unwrap_or(1);
+                }
+                match self.decoder.feed::<AgentRequest>(&read_buf[..n as usize]) {
+                    Ok(requests) => {
+                        for req in requests {
+                            self.handle_request(req);
+                        }
+                    }
+                    Err(_) => {
+                        self.send(&AgentEvent::Error {
+                            message: "corrupt frame from host".into(),
+                        });
+                    }
+                }
+            }
+
+            // 2) signals
+            if fds[1].revents & libc::POLLIN != 0 {
+                let mut sigs = [0u8; 64];
+                let n = unsafe {
+                    libc::read(selfpipe_r, sigs.as_mut_ptr() as *mut libc::c_void, 64)
+                };
+                for i in 0..n.max(0) as usize {
+                    self.handle_signal(sigs[i] as i32);
+                }
+            }
+
+            // 3) session pipes
+            let base = 2usize;
+            for (i, (sid, kind)) in fd_map.iter().enumerate() {
+                let revents = fds[base + i].revents;
+                if revents == 0 {
+                    continue;
+                }
+                let sid = *sid;
+                match kind {
+                    0 | 1 => self.pump_session_pipe(sid, *kind == 0, revents),
+                    2 => self.flush_session_stdin(sid),
+                    _ => {}
+                }
+            }
+
+            // Sessions whose child exited and pipes are drained: report.
+            let finished: Vec<u32> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.exit_code.is_some() && s.fully_drained())
+                .map(|(id, _)| *id)
+                .collect();
+            for sid in finished {
+                let s = self.sessions.remove(&sid).unwrap();
+                if let Some(fd) = s.stdin_fd {
+                    unsafe { libc::close(fd) };
+                }
+                self.send(&AgentEvent::Exit {
+                    id: sid,
+                    code: s.exit_code.unwrap_or(-1),
+                });
+            }
+
+            // Workload finished and everything reported: we're done.
+            if let Some(code) = self.workload_code {
+                self.send(&AgentEvent::WorkloadExit { code });
+                let _ = self.flush_out();
+                self.kill_all_sessions();
+                return code;
+            }
+        }
+        1
+    }
+
+    fn handle_signal(&mut self, sig: i32) {
+        match sig {
+            libc::SIGCHLD => self.reap_children(),
+            libc::SIGTERM | libc::SIGINT => {
+                // Forward to workload + exec children.
+                if self.workload_pid > 0 {
+                    unsafe { libc::kill(self.workload_pid, sig) };
+                }
+                for s in self.sessions.values() {
+                    unsafe { libc::kill(s.pid, sig) };
+                }
+                if self.workload_pid <= 0 {
+                    self.workload_code = Some(128 + sig);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reap_children(&mut self) {
+        loop {
+            let mut status: i32 = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
+                break;
+            }
+            let code = exit_status_to_code(status);
+            if pid == self.workload_pid {
+                self.workload_pid = -1;
+                self.workload_code = Some(code);
+                continue;
+            }
+            if let Some((sid, _)) = self.sessions.iter().find(|(_, s)| s.pid == pid).map(|(a, b)| (*a, b.pid)) {
+                if let Some(s) = self.sessions.get_mut(&sid) {
+                    s.exit_code = Some(code);
+                    // Close stdin so readers see a clean EOF.
+                    if let Some(fd) = s.stdin_fd.take() {
+                        unsafe { libc::close(fd) };
+                    }
+                }
+            }
+            // Unknown pids: reaped (zombie prevention as PID 1).
+        }
+    }
+
+    fn pump_session_pipe(&mut self, sid: u32, is_stdout: bool, revents: i16) {
+        let (fd_opt, sid_key) = {
+            let s = match self.sessions.get(&sid) {
+                Some(s) => s,
+                None => return,
+            };
+            (if is_stdout { s.stdout_fd } else { s.stderr_fd }, sid)
+        };
+        let Some(fd) = fd_opt else { return };
+
+        let mut buf = [0u8; CHUNK];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, CHUNK) };
+        if n > 0 {
+            let data = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+            let event = if is_stdout {
+                AgentEvent::Stdout { id: sid_key, data }
+            } else {
+                AgentEvent::Stderr { id: sid_key, data }
+            };
+            self.send(&event);
+        } else if n == 0 || (revents & (libc::POLLHUP | libc::POLLERR) != 0) {
+            unsafe { libc::close(fd) };
+            if let Some(s) = self.sessions.get_mut(&sid) {
+                if is_stdout {
+                    s.stdout_fd = None;
+                } else {
+                    s.stderr_fd = None;
+                }
+            }
+        }
+    }
+
+    fn flush_session_stdin(&mut self, sid: u32) {
+        let Some(s) = self.sessions.get_mut(&sid) else { return };
+        let Some(fd) = s.stdin_fd else { return };
+        while !s.stdin_buf.is_empty() {
+            let n = unsafe {
+                libc::write(
+                    fd,
+                    s.stdin_buf.as_slices().0.as_ptr() as *const libc::c_void,
+                    s.stdin_buf.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            s.stdin_buf.drain(..n as usize);
+        }
+    }
+
+    fn handle_request(&mut self, req: AgentRequest) {
+        match req {
+            AgentRequest::Ping => self.send(&AgentEvent::Pong),
+            AgentRequest::Exec { id, argv, env, workdir } => self.spawn_exec(id, argv, env, workdir),
+            AgentRequest::Stdin { id, data } => {
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    s.stdin_buf.extend(data.as_bytes());
+                    self.flush_session_stdin(id);
+                }
+            }
+            AgentRequest::StdinEof { id } => {
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    if let Some(fd) = s.stdin_fd.take() {
+                        unsafe { libc::close(fd) };
+                    }
+                }
+            }
+            AgentRequest::Kill { id } => {
+                if let Some(s) = self.sessions.get(&id) {
+                    unsafe { libc::kill(s.pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
+    fn spawn_exec(&mut self, id: u32, argv: Vec<String>, env: Vec<String>, workdir: Option<String>) {
+        if argv.is_empty() {
+            self.send(&AgentEvent::Exit { id, code: 126 });
+            return;
+        }
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_clear()
+            .envs(baseline_env());
+        for kv in env {
+            if let Some((k, v)) = kv.split_once('=') {
+                cmd.env(k, v);
+            }
+        }
+        if let Some(dir) = workdir {
+            cmd.current_dir(dir);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let pid = child.id() as i32;
+                let stdin_fd = child.stdin.take().map(|s| s.into_raw_fd());
+                let stdout_fd = child.stdout.take().map(|s| s.into_raw_fd());
+                let stderr_fd = child.stderr.take().map(|s| s.into_raw_fd());
+                for fd in [stdin_fd, stdout_fd, stderr_fd].into_iter().flatten() {
+                    set_nonblocking(fd);
+                }
+                // Detach the std Child so nobody waits on it but us.
+                std::mem::forget(child);
+                self.sessions.insert(
+                    id,
+                    Session {
+                        pid,
+                        stdin_fd,
+                        stdin_buf: VecDeque::new(),
+                        stdout_fd,
+                        stderr_fd,
+                        exit_code: None,
+                    },
+                );
+            }
+            Err(e) => {
+                self.send(&AgentEvent::Stderr {
+                    id,
+                    data: format!("mvm-agent: exec {:?} failed: {e}\n", argv[0]),
+                });
+                self.send(&AgentEvent::Exit { id, code: 127 });
+            }
+        }
+    }
+
+    fn kill_all_sessions(&mut self) {
+        for s in self.sessions.values() {
+            unsafe { libc::kill(s.pid, libc::SIGKILL) };
+        }
+        self.sessions.clear();
+    }
+
+    fn kill_all(&mut self) {
+        if self.workload_pid > 0 {
+            unsafe { libc::kill(self.workload_pid, libc::SIGKILL) };
+        }
+        self.kill_all_sessions();
+    }
+}
+
+fn baseline_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    if !env.iter().any(|(k, _)| k == "PATH") {
+        env.push(("PATH".into(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
+    }
+    env
+}
+
+fn set_nonblocking(fd: RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+}
+
+fn install_handlers() {
+    unsafe {
+        let handler = signal_handler as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGCHLD, handler);
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
+
+fn exit_status_to_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        1
+    }
+}
+
+/// Connect to the host's vsock listener, retrying until the shim has the
+/// unix socket ready. Returns a nonblocking fd with CLOEXEC.
+fn connect_vsock_retry(cid: u32, port: u32, attempts: u32) -> Option<RawFd> {
+    #[repr(C)]
+    struct SockaddrVm {
+        svm_family: u16,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
+    const AF_VSOCK: i32 = 40;
+
+    for _ in 0..attempts {
+        let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return None;
+        }
+        let addr = SockaddrVm {
+            svm_family: AF_VSOCK as u16,
+            svm_reserved1: 0,
+            svm_port: port,
+            svm_cid: cid,
+            svm_zero: [0; 4],
+        };
+        let rc = unsafe {
+            libc::connect(
+                fd,
+                &addr as *const SockaddrVm as *const libc::sockaddr,
+                std::mem::size_of::<SockaddrVm>() as u32,
+            )
+        };
+        if rc == 0 {
+            set_nonblocking(fd);
+            return Some(fd);
+        }
+        unsafe { libc::close(fd) };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
+}
+
+/// Mount extra virtiofs shares listed in MVM_MOUNTS: "tag:guest[:ro];..."
+fn mount_bind_shares() {
+    let Ok(spec) = std::env::var("MVM_MOUNTS") else { return };
+    for entry in spec.split(';').filter(|e| !e.is_empty()) {
+        let mut parts = entry.split(':');
+        let (Some(tag), Some(guest)) = (parts.next(), parts.next()) else { continue };
+        let read_only = parts.next() == Some("ro");
+        let _ = std::fs::create_dir_all(guest);
+        let c_tag = match std::ffi::CString::new(tag) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let c_guest = match std::ffi::CString::new(guest) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let c_type = std::ffi::CString::new("virtiofs").unwrap();
+        let flags = if read_only { libc::MS_RDONLY } else { 0 };
+        unsafe {
+            libc::mount(
+                c_tag.as_ptr(),
+                c_guest.as_ptr(),
+                c_type.as_ptr(),
+                flags as libc::c_ulong,
+                std::ptr::null(),
+            );
+        }
+    }
+}

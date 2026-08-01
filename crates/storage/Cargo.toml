@@ -1,0 +1,9 @@
+[package]
+name = "mvm-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mvm-common = { path = "../common" }
+tracing.workspace = true

@@ -1,0 +1,21 @@
+# Build artifacts
+/target
+/dist
+
+# Claude Code local state
+.claude/
+
+# Editor / local tool config
+.idea
+.vscode
+.mcp.json
+
+# Sandbox mount artifacts (zero-byte placeholders, owned by nobody)
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc

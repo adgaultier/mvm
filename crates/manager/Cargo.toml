@@ -1,0 +1,19 @@
+[package]
+name = "mvm-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mvm-common = { path = "../common" }
+mvm-image = { path = "../image" }
+mvm-network = { path = "../network" }
+mvm-runtime = { path = "../runtime" }
+mvm-storage = { path = "../storage" }
+bytes.workspace = true
+chrono.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

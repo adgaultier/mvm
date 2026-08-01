@@ -1,0 +1,22 @@
+[package]
+name = "mvm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mvm"
+path = "src/main.rs"
+
+[dependencies]
+mvm-api = { path = "../api" }
+mvm-common = { path = "../common" }
+mvm-manager = { path = "../manager" }
+mvm-runtime = { path = "../runtime" }
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

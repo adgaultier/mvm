@@ -1,0 +1,17 @@
+[package]
+name = "mvm-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mvm-common = { path = "../common" }
+mvm-manager = { path = "../manager" }
+axum.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http = { version = "0.6", features = ["trace"] }
+tracing.workspace = true
