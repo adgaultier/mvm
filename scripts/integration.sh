@@ -67,6 +67,19 @@ set -e
 check "run -i stdin" "found" \
     "$(printf 'from-stdin\n' | timeout 60 "$MVM" run -i alpine cat | tr -d '\r' | grep -q from-stdin && echo found)"
 
+# The guest console is a tty for the workload (independent of client -t).
+check "run console is a tty" "CONSOLE-TTY" \
+    "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' | tr -d '\r')"
+
+# run -it end to end: wrap the client in a real pty via script(1) so the
+# raw-mode path (termios guard enable/restore) actually engages.
+if command -v script >/dev/null 2>&1; then
+    check "run -it raw mode" "found" \
+        "$(printf 'exit\n' | timeout 60 script -qec "$MVM run -it alpine sh -c 'echo RAW-OK'" /dev/null | grep -q RAW-OK && echo found)"
+else
+    echo "skip: script(1) not available (run -it raw-mode check)"
+fi
+
 echo "==> exec"
 "$MVM" run --name itest --keep alpine sleep 60 >/dev/null &
 RUN_PID=$!
