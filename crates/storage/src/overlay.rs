@@ -42,12 +42,18 @@ impl OverlayDriver {
 }
 
 fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
-    let opts = format!(
+    let mut opts = format!(
         "lowerdir={},upperdir={},workdir={}",
         lower.display(),
         upper.display(),
         work.display()
     );
+    // Unprivileged overlay in a user namespace must use user.* xattrs
+    // (trusted.* needs init-ns CAP_SYS_ADMIN → EPERM otherwise), and
+    // userxattr in turn requires these features off.
+    if !mvm_common::is_init_ns_root() {
+        opts.push_str(",userxattr,redirect_dir=nofollow,index=off,metacopy=off");
+    }
     let status = Command::new("mount")
         .args(["-t", "overlay", "overlay", "-o", &opts])
         .arg(merged)
