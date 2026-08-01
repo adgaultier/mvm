@@ -64,11 +64,19 @@ design meeting:
    gzip/zstd/tar layer decompression, and OCI whiteouts (`.wh.*` + opaque dirs).
    Device nodes are skipped when rootless (guest gets devtmpfs anyway).
 6. **Storage drivers** (rootless-first):
+   - `ext4` (rootless default): per-sandbox ext4 image built rootless with
+     `mkfs.ext4 -d <image-rootfs>`, attached via `krun_add_disk`. The guest
+     boots a tiny virtiofs bootstrap dir (agent + ownership manifest only);
+     the agent mounts `/dev/vda`, restores file owners recorded from the
+     layer tar headers (rootless unpack can't chown), `pivot_root`s, and
+     remounts proc/sys/dev. Fixes guest chown (virtiofs has no UID
+     translation) and persists the disk across stop/start.
    - `copy`: full recursive copy of the image rootfs per sandbox
-     (`cp --reflink=auto --preserve=mode`, manual fallback), works as uid 1000.
+     (`cp --reflink=auto --preserve=mode`, manual fallback), works as uid
+     1000. Fallback when mkfs.ext4 is missing; rootfs wiped on each start.
    - `overlay`: real OverlayFS (image = lower, per-sandbox upper/work/merged)
      via `mount -t overlay`, requires root. Selected by `MVM_STORAGE_DRIVER`
-     or auto (root → overlay, else copy).
+     or auto (root → overlay, rootless → ext4, else copy).
 7. **Networking profiles**: `none` (default, no virtio-net device = isolated),
    `gvproxy` (userspace NAT via `krun_set_gvproxy_path` + `krun_set_port_map`),
    `tap:<dev>` (existing TAP via `krun_add_net_tap`). Validated by the network
@@ -102,6 +110,8 @@ design meeting:
     ├── shim.json           # ShimConfig written by the daemon
     ├── console.log         # guest console (appended by log pump)
     ├── rootfs/             # per-sandbox writable root (copy driver)
+    ├── disk.img            # ext4 root image (ext4 driver, sparse)
+    ├── bootstrap/          # virtiofs boot dir (ext4 driver: agent+manifest)
     └── agent.sock          # unix socket for the agent control channel
 ```
 
@@ -144,9 +154,14 @@ design meeting:
 
 ## Known limitations
 
-- Rootless guest `chown` fails (libkrun virtiofs runs with host
-  credentials — no UID translation, no external virtiofsd).
+- Guest `chown` on **virtiofs** (volumes; root when using `copy`/`overlay`)
+  is limited to host credentials. The rootless-default `ext4` driver is not
+  affected: it boots from a block device and restores ownership from the
+  tar-header manifest. ext4 driver not yet validated on real KVM — re-run
+  `scripts/integration.sh` (new checks: chown, root-owned files, restart
+  persistence).
 - No pseudo-TTY for exec (`-t`); `-i` streams raw stdin without a terminal.
+- Exec streams are UTF-8-lossy (binary stdin/stdout corrupted) — TODO.md #2.
 - Sandbox state `running` precedes agent vsock connect by a moment; exec in
   that window fails with "no agent connection" (tests poll `exec <sb> true`).
 - gvproxy/tap networking implemented but not e2e-tested here (no gvproxy

@@ -1,13 +1,85 @@
 //! Layer unpacking with OCI whiteout handling.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use mvm_common::protocol::OwnershipEntry;
+
 use crate::{img_err, ImgResult};
 
+/// Accumulates tar-header ownership across layers. Rootless unpacks cannot
+/// chown, so the real uid/gid/mode of every entry is recorded here and later
+/// re-applied inside the guest (where root actually is root).
+#[derive(Default)]
+pub struct OwnershipManifest {
+    /// path (relative, no leading ./) -> (uid, gid, mode)
+    entries: BTreeMap<String, (u32, u32, u32)>,
+}
+
+impl OwnershipManifest {
+    fn record(&mut self, path: &Path, uid: u32, gid: u32, mode: u32) {
+        let key = normalize(path);
+        if !key.is_empty() {
+            self.entries.insert(key, (uid, gid, mode));
+        }
+    }
+
+    /// A later layer deleted this path (whiteout): drop it and any children.
+    fn remove_subtree(&mut self, path: &Path) {
+        let key = normalize(path);
+        let prefix = format!("{key}/");
+        self.entries
+            .retain(|k, _| k != &key && !k.starts_with(&prefix));
+    }
+
+    /// An opaque whiteout cleared everything under `dir` (children only).
+    fn clear_children(&mut self, dir: &Path) {
+        let key = normalize(dir);
+        let prefix = if key.is_empty() { String::new() } else { format!("{key}/") };
+        self.entries.retain(|k, _| !k.starts_with(&prefix) || k == &key);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Write as JSON-lines (one `OwnershipEntry` per line).
+    pub fn save(&self, path: &Path) -> ImgResult<()> {
+        use std::io::Write;
+        let file = std::fs::File::create(path)?;
+        let mut w = std::io::BufWriter::new(file);
+        for (p, (u, g, m)) in &self.entries {
+            let entry = OwnershipEntry { p: p.clone(), u: *u, g: *g, m: *m };
+            let line = serde_json::to_string(&entry).map_err(|e| img_err(format!("manifest: {e}")))?;
+            writeln!(w, "{line}")?;
+        }
+        w.flush()?;
+        Ok(())
+    }
+}
+
+/// Normalize a tar path to a clean relative key ("./usr//bin" -> "usr/bin").
+fn normalize(path: &Path) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.components() {
+        if let std::path::Component::Normal(c) = comp {
+            if let Some(s) = c.to_str() {
+                parts.push(s);
+            }
+        }
+    }
+    parts.join("/")
+}
+
 /// Unpack one layer blob (tar / tar+gzip / tar+zstd) onto `dest`,
-/// applying whiteouts.
-pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()> {
+/// applying whiteouts and recording ownership into `manifest`.
+pub fn unpack_layer(
+    blob: &[u8],
+    media_type: &str,
+    dest: &Path,
+    manifest: &mut OwnershipManifest,
+) -> ImgResult<()> {
     let reader: Box<dyn Read> = if media_type.ends_with("+gzip")
         || media_type.contains("tar.gzip")
         || is_gzip(blob)
@@ -53,12 +125,15 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
                     remove_all(&child.path())?;
                 }
             }
+            manifest.clear_children(&parent);
             continue;
         }
         if let Some(rest) = name.strip_prefix(".wh.") {
             // Whiteout: delete the corresponding path.
-            let target = safe_join(dest, &parent.join(rest))?;
+            let removed = parent.join(rest);
+            let target = safe_join(dest, &removed)?;
             remove_all(&target)?;
+            manifest.remove_subtree(&removed);
             continue;
         }
 
@@ -73,13 +148,19 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
             continue;
         }
 
+        let uid = entry.header().uid().unwrap_or(0) as u32;
+        let gid = entry.header().gid().unwrap_or(0) as u32;
+        let mode = entry.header().mode().unwrap_or(0o644);
+
         // unpack_in guards against path escapes; false => unsafe path skipped.
         let ok = entry
             .unpack_in(dest)
             .map_err(|e| img_err(format!("unpack {}: {e}", path.display())))?;
         if !ok {
             tracing::warn!("skipped unsafe tar path: {}", path.display());
+            continue;
         }
+        manifest.record(&path, uid, gid, mode);
     }
     Ok(())
 }
@@ -127,11 +208,17 @@ mod tests {
     use std::io::Write;
 
     fn build_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        build_tar_owned(&entries.iter().map(|(n, d)| (*n, *d, 0, 0)).collect::<Vec<_>>())
+    }
+
+    fn build_tar_owned(entries: &[(&str, &[u8], u64, u64)]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
-        for (name, data) in entries {
+        for (name, data, uid, gid) in entries {
             let mut header = tar::Header::new_gnu();
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
+            header.set_uid(*uid);
+            header.set_gid(*gid);
             header.set_cksum();
             builder
                 .append_data(&mut header, name, *data)
@@ -140,12 +227,18 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    fn unpack(tar: &[u8], media: &str, dest: &Path) -> OwnershipManifest {
+        let mut manifest = OwnershipManifest::default();
+        unpack_layer(tar, media, dest, &mut manifest).unwrap();
+        manifest
+    }
+
     #[test]
     fn unpacks_plain_tar() {
         let tmp = std::env::temp_dir().join(format!("mvm-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let tar = build_tar(&[("hello.txt", b"world"), ("dir/inner.txt", b"inner")]);
-        unpack_layer(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp).unwrap();
+        unpack(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp);
         assert_eq!(std::fs::read(tmp.join("hello.txt")).unwrap(), b"world");
         assert_eq!(std::fs::read(tmp.join("dir/inner.txt")).unwrap(), b"inner");
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -157,7 +250,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("doomed.txt"), b"x").unwrap();
         let tar = build_tar(&[(".wh.doomed.txt", b"")]);
-        unpack_layer(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp).unwrap();
+        unpack(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp);
         assert!(!tmp.join("doomed.txt").exists());
         std::fs::remove_dir_all(&tmp).unwrap();
     }
@@ -169,7 +262,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("old.conf"), b"x").unwrap();
         let tar = build_tar(&[("etc/.wh..wh..opq", b""), ("etc/new.conf", b"n")]);
-        unpack_layer(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp).unwrap();
+        unpack(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp);
         assert!(!d.join("old.conf").exists());
         assert!(d.join("new.conf").exists());
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -183,8 +276,40 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(&tar).unwrap();
         let gz = enc.finish().unwrap();
-        unpack_layer(&gz, "application/vnd.oci.image.layer.v1.tar+gzip", &tmp).unwrap();
+        unpack(&gz, "application/vnd.oci.image.layer.v1.tar+gzip", &tmp);
         assert_eq!(std::fs::read(tmp.join("gz.txt")).unwrap(), b"gzdata");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn manifest_records_ownership_and_honors_whiteouts() {
+        let tmp = std::env::temp_dir().join(format!("mvm-test-own-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Layer 1: root- and daemon-owned files.
+        let l1 = build_tar_owned(&[
+            ("bin/su", b"x" as &[u8], 0, 0),
+            ("var/spool/mail", b"m", 8, 12),
+            ("tmp/scratch", b"s", 0, 0),
+        ]);
+        let mut manifest = OwnershipManifest::default();
+        unpack_layer(&l1, "application/vnd.oci.image.layer.v1.tar", &tmp, &mut manifest).unwrap();
+
+        // Layer 2: whiteout for tmp/scratch, chown of mail spool.
+        let l2 = build_tar_owned(&[("tmp/.wh.scratch", b"", 0, 0), ("var/spool/mail", b"m", 100, 100)]);
+        unpack_layer(&l2, "application/vnd.oci.image.layer.v1.tar", &tmp, &mut manifest).unwrap();
+
+        let out = tmp.join("ownership.jsonl");
+        manifest.save(&out).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        let entries: Vec<OwnershipEntry> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert!(entries.iter().any(|e| e.p == "bin/su" && e.u == 0 && e.g == 0));
+        assert!(entries.iter().any(|e| e.p == "var/spool/mail" && e.u == 100));
+        assert!(!entries.iter().any(|e| e.p == "tmp/scratch"));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

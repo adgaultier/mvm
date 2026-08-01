@@ -85,10 +85,30 @@ echo vol-data > "$VOLDIR/f.txt"
 check "volume mount" "vol-data" "$("$MVM" run alpine -v "$VOLDIR:/data" cat /data/f.txt)"
 rm -rf "$VOLDIR"
 
+echo "==> ext4 root (chown + ownership)"
+# Rootless virtiofs roots can't chown; the ext4 driver must allow it and
+# must have restored root ownership from the manifest.
+check "guest chown" "daemon" "$("$MVM" exec itest sh -c 'chown daemon:daemon /tmp && stat -c %U /tmp')"
+check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"
+"$MVM" exec itest touch /persist-marker >/dev/null
+
 echo "==> lifecycle"
 "$MVM" stop itest >/dev/null
 wait "$RUN_PID" 2>/dev/null || true
 check "stopped state" "1" "$("$MVM" ps -a | grep itest | grep -c stopped)"
+
+# ext4 disks survive stop/start (docker-like persistence).
+"$MVM" start itest >/dev/null
+for _ in $(seq 1 100); do
+    "$MVM" exec itest true >/dev/null 2>&1 && break
+    sleep 0.2
+done
+set +e
+"$MVM" exec itest test -f /persist-marker >/dev/null 2>&1
+check "rootfs persists across restart" "0" "$?"
+set -e
+"$MVM" stop itest >/dev/null
+
 "$MVM" rm itest >/dev/null
 check "removed" "0" "$("$MVM" ps -a | grep -c itest || true)"
 

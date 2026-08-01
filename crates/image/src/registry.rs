@@ -92,6 +92,8 @@ pub struct PulledImage {
     pub digest: String,
     pub config: ImageConfig,
     pub size: u64,
+    /// Ownership recorded from the layer tar headers (see `OwnershipManifest`).
+    pub ownership: crate::unpack::OwnershipManifest,
 }
 
 impl RegistryClient {
@@ -150,6 +152,7 @@ impl RegistryClient {
         // 3. Layers.
         std::fs::create_dir_all(dest_rootfs)?;
         let mut total_size = 0u64;
+        let mut ownership = crate::unpack::OwnershipManifest::default();
         for layer in &manifest.layers {
             if layer.media_type.contains("nondistributable")
                 || layer.media_type.contains("foreign")
@@ -170,7 +173,7 @@ impl RegistryClient {
             on_event(PullEvent::Unpacking {
                 digest: layer.digest.clone(),
             });
-            crate::unpack::unpack_layer(&blob[..], &layer.media_type, dest_rootfs)?;
+            crate::unpack::unpack_layer(&blob[..], &layer.media_type, dest_rootfs, &mut ownership)?;
             total_size += blob.len() as u64;
             on_event(PullEvent::LayerDone {
                 digest: layer.digest.clone(),
@@ -184,6 +187,7 @@ impl RegistryClient {
             digest,
             config,
             size: total_size,
+            ownership,
         })
     }
 

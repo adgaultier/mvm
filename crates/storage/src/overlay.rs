@@ -51,7 +51,10 @@ impl StorageDriver for OverlayDriver {
                 merged.display()
             )));
         }
-        Ok(PreparedRootfs { rootfs: merged })
+        Ok(PreparedRootfs {
+            rootfs: merged,
+            root_disk: None,
+        })
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<()> {

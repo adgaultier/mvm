@@ -164,8 +164,28 @@ impl Manager {
         // 1. Writable rootfs.
         let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
 
-        // 2. Inject the guest agent (enables exec). Not fatal if missing.
-        let agent_socket = self.inject_agent(&prepared.rootfs).ok().map(|_| {
+        // 2. Inject the guest agent (enables exec). Not fatal if missing —
+        // except for block-device roots, where the agent performs the pivot.
+        let injected = self.inject_agent(&prepared.rootfs);
+        if prepared.root_disk.is_some() {
+            injected.as_ref().map_err(|e| {
+                Error::Runtime(format!(
+                    "the '{}' storage driver requires the mvm-agent binary: {e}",
+                    self.inner.storage.name()
+                ))
+            })?;
+            // Stage the image's ownership manifest next to the agent so it
+            // can restore real file owners on the disk at first boot.
+            if let Some(manifest) = &image.ownership {
+                std::fs::copy(
+                    manifest,
+                    prepared
+                        .rootfs
+                        .join(protocol::GUEST_OWNERSHIP_PATH.trim_start_matches('/')),
+                )?;
+            }
+        }
+        let agent_socket = injected.ok().map(|_| {
             let sock = sb_dir.join("agent.sock");
             let _ = std::fs::remove_file(&sock);
             sock
@@ -185,6 +205,7 @@ impl Manager {
         let config = ShimConfig {
             sandbox_id: id.clone(),
             rootfs: prepared.rootfs,
+            root_disk: prepared.root_disk,
             exec,
             env,
             workdir,

@@ -114,15 +114,24 @@ defined in `crates/common/src/protocol.rs`.
 ## Storage & networking
 
 - **Storage drivers** (auto-selected, override `MVM_STORAGE_DRIVER`):
-  `copy` (per-sandbox rootfs copy; rootless-safe) or `overlay`
-  (kernel OverlayFS; requires root).
+  - `ext4` (rootless default): per-sandbox ext4 image built with
+    `mkfs.ext4 -d`, booted as a virtio-blk root. Full chown/uid semantics
+    inside the guest (file owners are restored from the layer tar headers),
+    and the disk persists across `stop`/`start`. Writable slack defaults to
+    1 GiB sparse (`MVM_DISK_SLACK_MIB`).
+  - `copy`: per-sandbox rootfs copy over virtiofs; rootless-safe fallback
+    when `mkfs.ext4` is unavailable. Guest chown is limited to host
+    credentials, and the rootfs is rebuilt (wiped) on every start.
+  - `overlay` (root default): kernel OverlayFS over virtiofs; requires root.
 - **Network profiles:** `none` (default — no NIC, strongest isolation),
   `gvproxy` (userspace NAT + `-p` port maps; needs a running gvproxy),
   `tap:<dev>` (pre-configured TAP device).
 
 ## Known limitations
 
-- Guest `chown` fails when rootless (libkrun virtiofs uses host credentials;
-  no UID translation).
+- Guest `chown` on **virtiofs** mounts (volumes, and the root when using the
+  `copy`/`overlay` drivers) is limited to host credentials — the default
+  rootless `ext4` driver is not affected.
 - No pseudo-TTY allocation for `exec` (no `-t`); `-i` streams raw stdin.
+- Exec streams are UTF-8-lossy (binary-unsafe) for now.
 - x86_64 Linux only (matches the vendored libkrun FFI subset).

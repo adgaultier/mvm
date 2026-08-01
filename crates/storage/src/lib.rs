@@ -1,22 +1,31 @@
 //! Per-sandbox writable filesystem layers.
 //!
-//! Two drivers:
-//!  - `copy`:    full recursive copy of the image rootfs (rootless-safe).
+//! Three drivers:
+//!  - `ext4`:    per-sandbox ext4 image built with mkfs.ext4 -d, booted as a
+//!               virtio-blk root (rootless-safe, full chown semantics).
+//!  - `copy`:    full recursive copy of the image rootfs (rootless-safe,
+//!               virtiofs root: guest chown is limited to host credentials).
 //!  - `overlay`: real OverlayFS (image = lower, per-sandbox upper), needs root.
 
 use mvm_common::{DataDir, Error, Result, SandboxId};
 use std::path::{Path, PathBuf};
 
 mod copy;
+mod ext4;
 mod overlay;
 
 pub use copy::CopyDriver;
+pub use ext4::Ext4Driver;
 pub use overlay::OverlayDriver;
 
 /// What the caller gets back after preparing a sandbox filesystem.
 pub struct PreparedRootfs {
-    /// Path to pass to libkrun as the guest root.
+    /// Path to pass to libkrun as the (virtiofs) guest root. For disk-backed
+    /// drivers this is a minimal bootstrap dir; the agent pivots off it.
     pub rootfs: PathBuf,
+    /// Raw disk image holding the real root filesystem, when the driver is
+    /// block-device based.
+    pub root_disk: Option<PathBuf>,
 }
 
 /// Storage driver interface.
@@ -29,16 +38,19 @@ pub trait StorageDriver: Send + Sync {
 }
 
 /// Pick the default driver: $MVM_STORAGE_DRIVER, else overlay as root,
-/// else copy.
+/// else ext4 (falling back to copy when mkfs.ext4 is missing).
 pub fn default_driver(data_dir: DataDir) -> Box<dyn StorageDriver> {
     let choice = std::env::var("MVM_STORAGE_DRIVER").unwrap_or_default();
     match choice.as_str() {
         "copy" => return Box::new(CopyDriver::new(data_dir)),
+        "ext4" => return Box::new(Ext4Driver::new(data_dir)),
         "overlay" => return Box::new(OverlayDriver::new(data_dir)),
         _ => {}
     }
     if is_root() {
         Box::new(OverlayDriver::new(data_dir))
+    } else if Ext4Driver::available() {
+        Box::new(Ext4Driver::new(data_dir))
     } else {
         Box::new(CopyDriver::new(data_dir))
     }

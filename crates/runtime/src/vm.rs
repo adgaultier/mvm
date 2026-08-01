@@ -71,6 +71,16 @@ impl KrunContext {
         )
     }
 
+    /// Attach a raw disk image as a virtio-blk device (/dev/vd*).
+    pub fn add_disk(&self, block_id: &str, path: &Path, read_only: bool) -> Result<()> {
+        let b = cstr(block_id)?;
+        let p = cstr(&path.to_string_lossy())?;
+        check(
+            unsafe { krun_sys::krun_add_disk(self.ctx, b.as_ptr(), p.as_ptr(), read_only) },
+            "krun_add_disk",
+        )
+    }
+
     /// Add an extra virtio-fs mount (bind mount into the guest).
     pub fn add_virtiofs(&self, tag: &str, path: &Path, read_only: bool) -> Result<()> {
         let t = cstr(tag)?;

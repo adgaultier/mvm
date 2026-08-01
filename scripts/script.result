@@ -1,0 +1,44 @@
+==> starting daemon (data dir /tmp/mvm-itest.ZKYKiF, port 24699)
+mvm: data dir /tmp/mvm-itest.ZKYKiF
+[2m2026-08-01T19:01:29.931511Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m storage driver: copy
+[2m2026-08-01T19:01:29.932546Z[0m [32m INFO[0m [2mmvm_api[0m[2m:[0m mvm daemon listening on http://127.0.0.1:24699
+ok   daemon health
+==> pull
+ok   image listed
+==> run
+[2m2026-08-01T19:01:31.834088Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m guest agent connected [3msandbox[0m[2m=[0m1b3bebd5595e
+[2m2026-08-01T19:01:31.834377Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m agent ready [3msandbox[0m[2m=[0m1b3bebd5595e [3mworkload_pid[0m[2m=[0m419
+[2m2026-08-01T19:01:31.837641Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m workload exited [3msandbox[0m[2m=[0m1b3bebd5595e [3mcode[0m[2m=[0m0
+[2m2026-08-01T19:01:31.840972Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m shim exited [3msandbox[0m[2m=[0m1b3bebd5595e [3mstate[0m[2m=[0mexited
+ok   run stdout
+[2m2026-08-01T19:01:32.350956Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m guest agent connected [3msandbox[0m[2m=[0m48549b78fbac
+[2m2026-08-01T19:01:32.351193Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m agent ready [3msandbox[0m[2m=[0m48549b78fbac [3mworkload_pid[0m[2m=[0m419
+[2m2026-08-01T19:01:32.354771Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m workload exited [3msandbox[0m[2m=[0m48549b78fbac [3mcode[0m[2m=[0m7
+[2m2026-08-01T19:01:32.357524Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m shim exited [3msandbox[0m[2m=[0m48549b78fbac [3mstate[0m[2m=[0mexited
+ok   run exit code
+==> exec
+[2m2026-08-01T19:01:32.831597Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-08-01T19:01:32.883190Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m guest agent connected [3msandbox[0m[2m=[0m2ef7c89e4587
+[2m2026-08-01T19:01:32.883394Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m agent ready [3msandbox[0m[2m=[0m2ef7c89e4587 [3mworkload_pid[0m[2m=[0m418
+ok   sandbox running
+ok   exec stdout
+ok   exec exit code
+ok   exec -i stdin
+==> volumes
+[2m2026-08-01T19:01:33.526330Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m guest agent connected [3msandbox[0m[2m=[0mc0563902cfbb
+[2m2026-08-01T19:01:33.526532Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m agent ready [3msandbox[0m[2m=[0mc0563902cfbb [3mworkload_pid[0m[2m=[0m425
+[2m2026-08-01T19:01:33.530941Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m workload exited [3msandbox[0m[2m=[0mc0563902cfbb [3mcode[0m[2m=[0m0
+[2m2026-08-01T19:01:33.533754Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m shim exited [3msandbox[0m[2m=[0mc0563902cfbb [3mstate[0m[2m=[0mexited
+ok   volume mount
+==> lifecycle
+[2m2026-08-01T19:01:33.824245Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m shim exited [3msandbox[0m[2m=[0m2ef7c89e4587 [3mstate[0m[2m=[0mstopped
+ok   stopped state
+ok   removed
+==> logs
+[2m2026-08-01T19:01:34.439034Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m guest agent connected [3msandbox[0m[2m=[0mffa9edc92db3
+[2m2026-08-01T19:01:34.439290Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m agent ready [3msandbox[0m[2m=[0mffa9edc92db3 [3mworkload_pid[0m[2m=[0m419
+[2m2026-08-01T19:01:34.442870Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m workload exited [3msandbox[0m[2m=[0mffa9edc92db3 [3mcode[0m[2m=[0m0
+[2m2026-08-01T19:01:34.445803Z[0m [32m INFO[0m [2mmvm_manager[0m[2m:[0m shim exited [3msandbox[0m[2m=[0mffa9edc92db3 [3mstate[0m[2m=[0mexited
+ok   logs
+
+12 passed, 0 failed

@@ -32,7 +32,10 @@ impl StorageDriver for CopyDriver {
         }
         std::fs::create_dir_all(&dest)?;
         copy_tree(image_rootfs, &dest)?;
-        Ok(PreparedRootfs { rootfs: dest })
+        Ok(PreparedRootfs {
+            rootfs: dest,
+            root_disk: None,
+        })
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<()> {
