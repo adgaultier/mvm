@@ -23,6 +23,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/sandboxes/{id}/start", post(start_sandbox))
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
         .route("/sandboxes/{id}/logs", get(logs))
+        .route("/sandboxes/{id}/stdin", post(console_stdin))
         .route("/sandboxes/{id}/exec", post(exec))
         .route("/sandboxes/{id}/exec/{session}/stdin", post(exec_stdin))
         .route("/sandboxes/{id}/exec/{session}/resize", post(exec_resize))
@@ -111,6 +112,21 @@ async fn logs(
     };
 
     Ok(Response::new(Body::from_stream(stream)))
+}
+
+/// Write to (or with `?eof=true` close) the guest console's stdin.
+async fn console_stdin(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<StdinQuery>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let data = if q.eof { None } else { Some(body.to_vec()) };
+    let manager = state.manager.clone();
+    tokio::task::spawn_blocking(move || manager.console_stdin(&id, data))
+        .await
+        .map_err(|e| mvm_common::Error::Runtime(format!("stdin task: {e}")))??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- exec ----------------------------------------------------------------

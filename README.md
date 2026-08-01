@@ -15,6 +15,7 @@ $ mvm exec dev uname -a
 Linux localhost 6.12.91 #1 SMP PREEMPT_DYNAMIC ... x86_64 Linux
 $ printf 'stdin works\n' | mvm exec -i dev cat
 $ mvm exec -it dev sh          # interactive shell on a pty (vi/top work)
+$ mvm run -it alpine sh        # one-shot interactive sandbox (console attach)
 stdin works
 $ mvm stop dev && mvm rm dev
 ```
@@ -82,7 +83,7 @@ libc you don't control.
 | `mvm serve [--addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
-| `mvm run IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` |
+| `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` (`-i` attaches stdin to the console, `-it` = interactive) |
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
 | `mvm start/stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |

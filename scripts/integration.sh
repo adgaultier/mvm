@@ -62,6 +62,10 @@ set +e
 check "run exit code" "7" "$?"
 set -e
 
+# run -i attaches local stdin to the guest console.
+check "run -i stdin" "found" \
+    "$(printf 'from-stdin\n' | timeout 60 "$MVM" run -i alpine cat | tr -d '\r' | grep -q from-stdin && echo found)"
+
 echo "==> exec"
 "$MVM" run --name itest --keep alpine sleep 60 >/dev/null &
 RUN_PID=$!

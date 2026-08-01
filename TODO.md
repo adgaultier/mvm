@@ -15,9 +15,6 @@ Review `registry.rs`/`store.rs`: per-layer blob caching vs re-download,
 image GC / `rmi` refcounting against existing sandboxes, locking for
 concurrent pulls of the same reference. `daemon.pid` is defined but unused.
 
-## 3. Interactive stdin for `mvm run`
-`run` streams the console out but never in; `-i`/`-t` exist only on `exec`.
-
 ---
 
 ## Done
@@ -62,3 +59,9 @@ concurrent pulls of the same reference. `daemon.pid` is defined but unused.
   kill-on-drop guard: if the HTTP response is dropped before the Exit
   frame (client Ctrl-C/crash/network loss), the daemon SIGKILLs the guest
   session. Integration check: killed client → no orphaned `sleep` in VM.
+- **Interactive `mvm run` (`-i`/`-t`)** — attach_stdin sandboxes get the
+  shim's stdin as a pipe feeding the guest console (default stays
+  /dev/null so stdin-readers see EOF); POST /sandboxes/{id}/stdin writes
+  to it; EOF sends VEOF through the console line discipline (a tty has no
+  pipe EOF). CLI pumps local stdin; `-t` adds local raw mode. Console
+  resize is not propagated (known gap; exec -it has full resize).

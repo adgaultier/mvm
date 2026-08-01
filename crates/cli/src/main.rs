@@ -113,6 +113,13 @@ pub(crate) struct BoxArgs {
     /// Keep the sandbox after the workload exits (run only).
     #[arg(long)]
     keep: bool,
+    /// Attach local stdin to the guest console (run only).
+    #[arg(short, long)]
+    interactive: bool,
+    /// Treat the console as a terminal: raw mode locally (run only,
+    /// combine with -i).
+    #[arg(short, long)]
+    tty: bool,
 }
 
 fn main() {
@@ -248,7 +255,7 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
 fn validate_guest_command(command: &[String]) -> Result<(), String> {
     const MVM_FLAGS: &[&str] = &[
         "--name", "--env", "--volume", "--publish", "--net", "--cpus", "--memory", "--workdir",
-        "--keep", "--host",
+        "--keep", "--host", "--interactive", "--tty",
     ];
     if let Some(first) = command.first() {
         if first.starts_with('-') {
@@ -285,6 +292,7 @@ impl BoxArgs {
             workdir: self.workdir.clone(),
             vcpus: self.cpus,
             ram_mib: self.memory,
+            attach_stdin: self.interactive,
             network,
             ports: self.publish.clone(),
             mounts,

@@ -12,12 +12,17 @@ pub struct ShimHandle {
     pub child: Child,
     /// Combined stdout+stderr of the shim (= guest console).
     pub console: std::process::ChildStdout,
+    /// Write end of the guest console (only with `attach_stdin`); dropping
+    /// it delivers EOF to the guest console.
+    pub console_stdin: Option<std::process::ChildStdin>,
     pub config_path: PathBuf,
 }
 
 /// Write the shim config into `sandbox_dir` and spawn the shim as a
-/// detached process (own session, stdin from /dev/null, console piped).
-pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path) -> Result<ShimHandle> {
+/// detached process (own session, console piped). With `attach_stdin`,
+/// the shim's stdin is a pipe feeding the guest console; otherwise it is
+/// /dev/null so console reads see EOF immediately.
+pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -> Result<ShimHandle> {
     let config_path = sandbox_dir.join("shim.json");
     config.save(&config_path)?;
 
@@ -25,7 +30,7 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path) -> Result<ShimHandle>
     let mut cmd = Command::new(exe);
     cmd.arg("__vm-shim")
         .arg(&config_path)
-        .stdin(Stdio::null())
+        .stdin(if attach_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -42,6 +47,7 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path) -> Result<ShimHandle>
 
     let mut child = cmd.spawn()?;
     let console = child.stdout.take().expect("stdout piped");
+    let console_stdin = child.stdin.take();
 
     // Redirect shim stderr into stdout's stream is not directly possible;
     // drain stderr in a thread that echoes into tracing.
@@ -64,6 +70,7 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path) -> Result<ShimHandle>
     Ok(ShimHandle {
         child,
         console,
+        console_stdin,
         config_path,
     })
 }

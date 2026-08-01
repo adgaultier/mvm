@@ -74,6 +74,11 @@ pub struct SandboxSpec {
     /// RAM in MiB.
     #[serde(default = "default_ram")]
     pub ram_mib: u32,
+    /// Keep the guest console's stdin open and writable through the API
+    /// (`mvm run -i`). Off by default: workloads reading stdin then see
+    /// immediate EOF instead of blocking forever.
+    #[serde(default)]
+    pub attach_stdin: bool,
     /// Network profile.
     #[serde(default)]
     pub network: NetworkMode,
@@ -105,6 +110,7 @@ impl Default for SandboxSpec {
             workdir: None,
             vcpus: default_vcpus(),
             ram_mib: default_ram(),
+            attach_stdin: false,
             network: NetworkMode::None,
             ports: vec![],
             mounts: vec![],

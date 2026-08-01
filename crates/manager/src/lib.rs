@@ -33,6 +33,9 @@ struct SandboxEntry {
     log_tx: broadcast::Sender<Bytes>,
     agent: Option<AgentConn>,
     exec_sessions: HashMap<u32, ExecSession>,
+    /// Write end of the guest console (attach_stdin sandboxes only).
+    /// Shared so writes happen outside the registry lock.
+    console_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
     stop_requested: bool,
 }
 
@@ -44,6 +47,7 @@ impl SandboxEntry {
             log_tx,
             agent: None,
             exec_sessions: HashMap::new(),
+            console_stdin: None,
             stop_requested: false,
         }
     }
@@ -218,8 +222,9 @@ impl Manager {
         };
 
         // 5. Spawn the shim.
-        let handle = spawn_shim(&config, &sb_dir)?;
+        let handle = spawn_shim(&config, &sb_dir, spec.attach_stdin)?;
         let pid = handle.child.id();
+        let console_stdin = handle.console_stdin.map(|s| Arc::new(Mutex::new(s)));
         let mut child = handle.child;
 
         // 6. Log pump: shim stdout -> console.log + broadcast.
@@ -255,6 +260,7 @@ impl Manager {
             entry.info.started_at = Some(chrono::Utc::now());
             entry.info.finished_at = None;
             entry.info.exit_code = None;
+            entry.console_stdin = console_stdin;
             entry.stop_requested = false;
         }
         self.persist()?;
@@ -457,6 +463,42 @@ impl Manager {
         Ok((session_id, rx))
     }
 
+    /// Write to the guest console's stdin (`attach_stdin` sandboxes only).
+    /// `None` = EOF: the console is a tty, which has no pipe-style EOF, so
+    /// VEOF (^D) is sent for the guest line discipline to translate, then
+    /// the write end is dropped. Blocking write — call off the async runtime.
+    pub fn console_stdin(&self, id_or_name: &str, data: Option<Vec<u8>>) -> Result<()> {
+        let id = self.resolve(id_or_name)?;
+        let (handle, payload, is_eof) = {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            let entry = sandboxes
+                .get_mut(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
+            match data {
+                None => (entry.console_stdin.take(), vec![0x04u8], true),
+                Some(bytes) => {
+                    let h = entry.console_stdin.clone().ok_or_else(|| {
+                        Error::InvalidState(
+                            "sandbox console stdin is not attached (create it with -i)".into(),
+                        )
+                    })?;
+                    (Some(h), bytes, false)
+                }
+            }
+        };
+        // Write outside the registry lock: a full pipe must not stall the
+        // whole daemon.
+        let Some(handle) = handle else {
+            return Ok(()); // EOF on a non-attached console: nothing to do
+        };
+        let mut stdin = handle.lock().unwrap();
+        let result = stdin.write_all(&payload).and_then(|_| stdin.flush());
+        if is_eof {
+            return Ok(()); // best effort; the handle drops (real EOF) here
+        }
+        result.map_err(|e| Error::Runtime(format!("console stdin: {e}")))
+    }
+
     /// Kill a live exec session (SIGKILL in the guest).
     pub fn exec_kill(&self, id_or_name: &str, session: u32) -> Result<()> {
         self.send_to_agent(id_or_name, protocol::AgentRequest::Kill { id: session })
@@ -519,6 +561,7 @@ impl Manager {
             entry.info.exit_code = code;
             entry.agent = None;
             entry.exec_sessions.clear();
+            entry.console_stdin = None;
             entry.info.state = if entry.stop_requested {
                 SandboxState::Stopped
             } else if status.is_none() {

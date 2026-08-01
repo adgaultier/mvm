@@ -65,11 +65,13 @@ fn print_pull_event(line: &str) {
 /// create + start + stream logs + wait + cleanup.
 pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
     let keep = args.keep;
+    let interactive = args.interactive;
+    let tty = args.tty;
     let spec = args.spec()?;
     let sb = client.create_sandbox(&spec)?;
     let id = sb.id.to_string();
 
-    let result = run_attached(client, &id);
+    let result = run_attached(client, &id, interactive, tty);
 
     let exit_code = match result {
         Ok(code) => code,
@@ -90,8 +92,38 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
     Ok(exit_code)
 }
 
-fn run_attached(client: &Client, id: &str) -> Result<i32, String> {
+fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Result<i32, String> {
     client.start_sandbox(id)?;
+
+    // Raw mode while attached (interactive tty runs); restored by Drop.
+    // The guest console is a tty with echo, so keystrokes render from the
+    // guest side, docker-style.
+    let _raw = if tty && interactive {
+        RawTermGuard::enable()
+    } else {
+        None
+    };
+
+    // Pump local stdin into the guest console.
+    if interactive {
+        let stdin_client = Client::new(client.base());
+        let sid = id.to_string();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stdin.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_client.sandbox_stdin(&sid, chunk[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = stdin_client.sandbox_stdin_eof(&sid);
+        });
+    }
 
     // The follow stream carries the whole console and ends when the VM
     // exits (the daemon closes the channel on shim exit), so streaming it
