@@ -4,21 +4,23 @@ Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
 ## 1. Validate networking modes on real host
-`scripts/integration.sh` gained a networking section: `none` isolation
-(TSI must be off), `tsi` outbound+DNS, and — with gvproxy installed —
-gvproxy outbound/DNS and `-p` port forwarding. None of it has run on real
-KVM yet, and the guest-side static config (192.168.127.2/24 via agent
-ioctls) plus the vfkit-socket wiring are exactly the kind of thing that
-needs one live round.
+`scripts/integration.sh` now exercises these on real KVM: `none` isolation
+(TSI must be off), `tsi` outbound+DNS, and gvproxy outbound/DNS. The gvproxy
+control API registers `-p` mappings, but host-to-guest forwarding still needs
+investigation; the current compatible gvproxy run is 28 passed, 1 failed.
+The guest-side static config (192.168.127.2/24 via agent ioctls) and vfkit
+socket wiring otherwise work for outbound traffic.
 
 ## 2. Honor the image USER directive
 `ImageConfig.user` is parsed and ignored — every workload runs as root.
 Faithful behavior (docker parity, needed by e.g.
 `docker/sandbox-templates:opencode`, which runs as `agent`): the guest
-agent resolves the user against the rootfs `/etc/passwd`/`/etc/group`,
-then setgroups/setgid/setuid before spawning the workload, and sets
+agent resolves the user against the rootfs `/etc/passwd`/`/etc/group`, then
+setgroups/setgid/setuid before spawning the workload, and sets
 HOME/USER/LOGNAME. Also applies to exec sessions (docker exec runs as the
-container user by default, `-u` overrides).
+container user by default, `-u` overrides). The OpenCode image now pulls
+successfully after hard-link replacement handling was added, but its VM
+startup still stops before this identity behavior can be tested.
 
 ## 3. Credentials injection (design plan)
 Modeled on Docker Sandboxes' credential handling
@@ -107,5 +109,7 @@ temp file with incremental hashing instead — matters for images like
   exit so `run` streams to EOF and `logs -f` terminates.
 - **Image store** — up-to-date digest short-circuit, atomic staged
   pulls, per-key pull locking, `rmi` in-use refusal.
+- **Layer replacement unpacking** — later OCI hard-link entries replace an
+  existing destination before unpacking, matching Docker layer semantics.
 - **Guardrails** — dynamically-linked agent rejected (PT_INTERP check);
   mvm flags after the image rejected with a hint.

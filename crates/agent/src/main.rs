@@ -110,6 +110,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // but not devpts). Best effort; EBUSY when already mounted is fine.
     ensure_devpts();
 
+    // Keep console output byte-oriented. The host owns the terminal display
+    // policy; ONLCR here would turn every workload newline into CRLF in logs.
+    normalize_console_termios();
+
     // 4. Spawn the workload inheriting our stdio (= guest console).
     let workload = if workload_argv.is_empty() {
         None
@@ -168,6 +172,16 @@ fn real_main(workload_argv: &[String]) -> i32 {
     });
 
     agent.run(selfpipe_r)
+}
+
+fn normalize_console_termios() {
+    unsafe {
+        let mut term = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut term) == 0 {
+            term.c_oflag &= !libc::ONLCR;
+            let _ = libc::tcsetattr(0, libc::TCSANOW, &term);
+        }
+    }
 }
 
 impl Agent {

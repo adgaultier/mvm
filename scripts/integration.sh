@@ -16,6 +16,7 @@ PORT=24699
 export MVM_HOST="http://127.0.0.1:$PORT"
 export MVM_DATA_DIR=$(mktemp -d /tmp/mvm-itest.XXXXXX)
 export MVM_AGENT_PATH="$PWD/$AGENT"
+export MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
 
 [ -e /dev/kvm ] || { echo "SKIP: /dev/kvm not available"; exit 0; }
 [ -x "$MVM" ] || { echo "FAIL: $MVM not built (run scripts/build.sh or cargo build)"; exit 1; }
@@ -24,8 +25,10 @@ export MVM_AGENT_PATH="$PWD/$AGENT"
 PASS=0
 FAIL=0
 DAEMON_PID=
+GVPID=
 
 cleanup() {
+    [ -n "$GVPID" ] && kill "$GVPID" 2>/dev/null || true
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
     rm -rf "$MVM_DATA_DIR"
 }
@@ -42,7 +45,7 @@ check() { # check <name> <expected> <actual>
 }
 
 echo "==> starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
-"$MVM" serve --addr "127.0.0.1:$PORT" &
+"$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 50); do
     curl -sf "$MVM_HOST/health" >/dev/null 2>&1 && break
@@ -144,23 +147,25 @@ check "tsi outbound + dns" "TSI-OK" \
 
 if command -v gvproxy >/dev/null 2>&1; then
     GVSOCK="$MVM_DATA_DIR/gvproxy.sock"
-    gvproxy -listen-vfkit "unixgram://$GVSOCK" >/dev/null 2>&1 &
+    gvproxy -ssh-port -1 -listen "unix://$MVM_GVPROXY_CONTROL" \
+        -listen-vfkit "unixgram://$GVSOCK" >/dev/null 2>&1 &
     GVPID=$!
-    for _ in $(seq 1 50); do [ -S "$GVSOCK" ] && break; sleep 0.1; done
+    for _ in $(seq 1 50); do
+        [ -S "$GVSOCK" ] && [ -S "$MVM_GVPROXY_CONTROL" ] && break
+        sleep 0.1
+    done
 
     check "gvproxy outbound + dns" "NET-OK" \
         "$("$MVM" run --net "gvproxy:$GVSOCK" alpine sh -c \
             'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
 
-    # Port forwarding: guest httpd reachable from the host.
+    # Port forwarding: a guest TCP listener reachable from the host.
     "$MVM" run --keep --name web --net "gvproxy:$GVSOCK" -p 18080:8000 alpine \
-        sh -c 'mkdir -p /www && echo gv-web > /www/index.html && httpd -f -p 8000 -h /www' >/dev/null 2>&1 &
+        sh -c 'while true; do printf "gv-web\\n" | nc -l -p 8000; done' >/dev/null 2>&1 &
     WEB_PID=$!
-    for _ in $(seq 1 100); do
-        curl -sf --max-time 1 http://127.0.0.1:18080/ >/dev/null 2>&1 && break
-        sleep 0.2
-    done
-    check "gvproxy port forward" "gv-web" "$(curl -sf --max-time 3 http://127.0.0.1:18080/)"
+    sleep 2
+    WEB_RESPONSE=$(printf 'gv-web\n' | nc -w 3 127.0.0.1 18080 2>/dev/null || true)
+    check "gvproxy port forward" "gv-web" "$WEB_RESPONSE"
     "$MVM" stop web >/dev/null 2>&1 || true
     wait "$WEB_PID" 2>/dev/null || true
     "$MVM" rm web >/dev/null 2>&1 || true

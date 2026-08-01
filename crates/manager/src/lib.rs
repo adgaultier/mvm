@@ -2,8 +2,10 @@
 //! persistence, and the host side of the guest-agent control channel.
 
 mod agent_conn;
+mod gvproxy;
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -35,7 +37,7 @@ struct SandboxEntry {
     exec_sessions: HashMap<u32, ExecSession>,
     /// Write end of the guest console (attach_stdin sandboxes only).
     /// Shared so writes happen outside the registry lock.
-    console_stdin: Option<Arc<Mutex<std::process::ChildStdin>>>,
+    console_stdin: Option<Arc<Mutex<File>>>,
     stop_requested: bool,
 }
 
@@ -66,6 +68,7 @@ struct ManagerInner {
     sandboxes: RwLock<HashMap<String, SandboxEntry>>,
     session_counter: AtomicU32,
     persist_lock: Mutex<()>,
+    gvproxy_control: Option<PathBuf>,
 }
 
 impl Manager {
@@ -102,6 +105,7 @@ impl Manager {
                 sandboxes: RwLock::new(sandboxes),
                 session_counter: AtomicU32::new(1),
                 persist_lock: Mutex::new(()),
+                gvproxy_control: std::env::var_os("MVM_GVPROXY_CONTROL").map(PathBuf::from),
             }),
         })
     }
@@ -221,13 +225,22 @@ impl Manager {
             agent_socket: agent_socket.clone(),
         };
 
-        // 5. Spawn the shim.
-        let handle = spawn_shim(&config, &sb_dir, spec.attach_stdin)?;
+        // 5. Register gvproxy port forwards before booting the guest.
+        let gvproxy_ports = self.configure_gvproxy_ports(&spec).await?;
+
+        // 6. Spawn the shim.
+        let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.remove_gvproxy_ports(gvproxy_ports).await;
+                return Err(error);
+            }
+        };
         let pid = handle.child.id();
         let console_stdin = handle.console_stdin.map(|s| Arc::new(Mutex::new(s)));
         let mut child = handle.child;
 
-        // 6. Log pump: shim stdout -> console.log + broadcast.
+        // 7. Log pump: shim stdout -> console.log + broadcast.
         let log_path = sb_dir.join("console.log");
         let pump_tx = log_tx.clone();
         std::thread::spawn(move || {
@@ -251,7 +264,7 @@ impl Manager {
             }
         });
 
-        // 7. Update state.
+        // 8. Update state.
         {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes.get_mut(&id).unwrap();
@@ -265,7 +278,7 @@ impl Manager {
         }
         self.persist()?;
 
-        // 8. Agent control channel accept task.
+        // 9. Agent control channel accept task.
         if let Some(listener) = agent_listener {
             let mgr = self.clone();
             let cid = id.clone();
@@ -280,7 +293,7 @@ impl Manager {
             });
         }
 
-        // 9. Child watcher.
+        // 10. Child watcher.
         {
             let mgr = self.clone();
             let cid = id.clone();
@@ -290,7 +303,7 @@ impl Manager {
             });
         }
 
-        // 10. Exec-readiness barrier: don't return "running" until the guest
+        // 11. Exec-readiness barrier: don't return "running" until the guest
         // agent has connected (or the sandbox died / never had an agent).
         // Callers that exec immediately after start would otherwise race the
         // agent's vsock connection.
@@ -582,6 +595,18 @@ impl Manager {
 
     /// Called by the watcher task when the shim process exits.
     fn on_shim_exit(&self, id: &str, status: Option<std::process::ExitStatus>) {
+        let ports = {
+            let sandboxes = self.inner.sandboxes.read().unwrap();
+            sandboxes.get(id).and_then(|entry| {
+                if matches!(entry.info.spec.network, mvm_common::NetworkMode::Gvproxy { .. })
+                    && !entry.info.spec.ports.is_empty()
+                {
+                    Some(entry.info.spec.ports.clone())
+                } else {
+                    None
+                }
+            })
+        };
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
         if let Some(entry) = sandboxes.get_mut(id) {
             let code = status.and_then(|s| s.code());
@@ -607,6 +632,42 @@ impl Manager {
         }
         drop(sandboxes);
         let _ = self.persist();
+        if let Some(ports) = ports {
+            let mgr = self.clone();
+            tokio::spawn(async move { mgr.remove_gvproxy_ports(Some(ports)).await });
+        }
+    }
+
+    async fn configure_gvproxy_ports(&self, spec: &SandboxSpec) -> Result<Option<Vec<String>>> {
+        if !matches!(spec.network, mvm_common::NetworkMode::Gvproxy { .. })
+            || spec.ports.is_empty()
+        {
+            return Ok(None);
+        }
+        let control = self.inner.gvproxy_control.clone().ok_or_else(|| {
+            Error::Network(
+                "gvproxy port mappings require MVM_GVPROXY_CONTROL pointing to gvproxy's --listen Unix socket".into(),
+            )
+        })?;
+        let ports = spec
+            .ports
+            .iter()
+            .map(|p| mvm_network::parse_port_map(p))
+            .collect::<Result<Vec<_>>>()?;
+        tokio::task::spawn_blocking(move || gvproxy::expose(&control, &ports))
+            .await
+            .map_err(|e| Error::Network(format!("gvproxy setup task failed: {e}")))??;
+        Ok(Some(spec.ports.clone()))
+    }
+
+    async fn remove_gvproxy_ports(&self, mappings: Option<Vec<String>>) {
+        let Some(mappings) = mappings else { return };
+        let Some(control) = self.inner.gvproxy_control.clone() else { return };
+        let ports = mappings
+            .iter()
+            .filter_map(|p| mvm_network::parse_port_map(p).ok())
+            .collect::<Vec<_>>();
+        let _ = tokio::task::spawn_blocking(move || gvproxy::unexpose(&control, &ports)).await;
     }
 
     /// Attach a freshly connected guest agent stream.

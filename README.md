@@ -51,7 +51,8 @@ $ mvm stop dev && mvm rm dev
   `exec` (with stdin/stdout/stderr streaming and exit codes) over
   **vsock** — no networking required in the guest.
 - **Pure-Rust image pulls.** Registry auth, manifest resolution, blob
-  verification, layer unpack and OCI whiteouts are implemented in-tree; no
+  verification, layer unpack and OCI whiteouts are implemented in-tree; later
+  layers can replace existing paths, including hard-link destinations; no
   skopeo/podman needed.
 
 ## Requirements
@@ -147,9 +148,16 @@ defined in `crates/common/src/protocol.rs`.
     datagram protocol — not `-listen-qemu`):
 
     ```console
-    $ gvproxy -listen-vfkit unixgram:///run/gvproxy/gvproxy.sock &
+    $ gvproxy -listen unix:///run/gvproxy/control.sock \
+        -listen-vfkit unixgram:///run/gvproxy/gvproxy.sock &
+    $ export MVM_GVPROXY_CONTROL=/run/gvproxy/control.sock
     $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
     ```
+
+    Port mappings are registered through gvproxy's HTTP control API. On Linux,
+    gvproxy <v0.8.9 does not implement vfkit unixgram sockets and exits with
+    `unsupported 'unixgram' scheme`; use a newer build that includes Unix vfkit
+    transport support (or build the upstream project).
 
     The guest is configured automatically (192.168.127.2/24, gw/DNS .1).
     Throughput is modest (userspace TCP/IP) — fine for package installs

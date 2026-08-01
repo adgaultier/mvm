@@ -111,7 +111,9 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
 - Whiteout handling and layer unpack have unit tests in `crates/image` —
-  extend those rather than testing via pulls.
+  extend those rather than testing via pulls. Later OCI layers may replace an
+  existing path with a hard link; remove the destination before
+  `tar::Entry::unpack_in` or the unpack fails with `EEXIST`.
 
 ## Runtime env vars
 

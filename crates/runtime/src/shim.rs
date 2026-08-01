@@ -86,7 +86,6 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         }
         NetworkMode::Gvproxy { socket } => {
             ctx.set_gvproxy(socket)?;
-            ctx.set_port_map(&config.ports)?;
         }
         NetworkMode::Tap { name } => {
             ctx.add_net_tap(name)?;

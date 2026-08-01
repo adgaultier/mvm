@@ -149,6 +149,13 @@ pub fn unpack_layer(
             continue;
         }
 
+        // A later OCI layer may replace an existing path with a hard link.
+        // tar::Entry::unpack_in does not remove the old path first, so the
+        // hard-link creation fails with EEXIST instead of applying the layer.
+        if header_type == tar::EntryType::Link {
+            remove_all(&safe_join(dest, &path)?)?;
+        }
+
         let uid = entry.header().uid().unwrap_or(0) as u32;
         let gid = entry.header().gid().unwrap_or(0) as u32;
         let mode = entry.header().mode().unwrap_or(0o644);
@@ -156,7 +163,14 @@ pub fn unpack_layer(
         // unpack_in guards against path escapes; false => unsafe path skipped.
         let ok = entry
             .unpack_in(dest)
-            .map_err(|e| img_err(format!("unpack {}: {e}", path.display())))?;
+            .map_err(|e| {
+                img_err(format!(
+                    "unpack {} type={:?} link={:?}: {e:?}",
+                    path.display(),
+                    entry.header().entry_type(),
+                    entry.link_name().ok().flatten()
+                ))
+            })?;
         if !ok {
             tracing::warn!("skipped unsafe tar path: {}", path.display());
             continue;
@@ -230,6 +244,7 @@ fn is_root() -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
 
     fn build_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         build_tar_owned(&entries.iter().map(|(n, d)| (*n, *d, 0, 0)).collect::<Vec<_>>())
@@ -302,6 +317,35 @@ mod tests {
         let gz = enc.finish().unwrap();
         unpack(&gz, "application/vnd.oci.image.layer.v1.tar+gzip", &tmp);
         assert_eq!(std::fs::read(tmp.join("gz.txt")).unwrap(), b"gzdata");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn replaces_existing_path_with_hard_link() {
+        let tmp = std::env::temp_dir().join(format!("mvm-test-link-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let layer1 = build_tar(&[("usr/bin/perl5.40.1", b"old")]);
+        unpack(&layer1, "application/vnd.oci.image.layer.v1.tar", &tmp);
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_link(&mut header, "usr/bin/perl5.40.1", "usr/bin/perl")
+            .unwrap();
+        let layer2 = builder.into_inner().unwrap();
+        std::fs::write(tmp.join("usr/bin/perl"), b"new").unwrap();
+        unpack(&layer2, "application/vnd.oci.image.layer.v1.tar", &tmp);
+
+        assert_eq!(std::fs::read(tmp.join("usr/bin/perl5.40.1")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(tmp.join("usr/bin/perl")).unwrap().ino(),
+            std::fs::metadata(tmp.join("usr/bin/perl5.40.1")).unwrap().ino()
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
