@@ -36,12 +36,20 @@ pub const MAX_FRAME: u32 = 1 << 20;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AgentRequest {
-    /// Spawn a process inside the sandbox.
+    /// Spawn a process inside the sandbox. With `tty`, the process runs on
+    /// a pseudo-terminal (`cols`/`rows` set the initial size when nonzero)
+    /// and its output arrives merged on the Stdout stream.
     Exec {
         id: u32,
         argv: Vec<String>,
         env: Vec<String>,
         workdir: Option<String>,
+        #[serde(default)]
+        tty: bool,
+        #[serde(default)]
+        cols: u16,
+        #[serde(default)]
+        rows: u16,
     },
     /// stdin data for an exec session (base64 over the wire: binary-safe).
     Stdin {
@@ -49,8 +57,10 @@ pub enum AgentRequest {
         #[serde(with = "b64")]
         data: Vec<u8>,
     },
-    /// Close stdin for an exec session.
+    /// Close stdin for an exec session (tty sessions receive VEOF instead).
     StdinEof { id: u32 },
+    /// Resize a tty exec session.
+    Resize { id: u32, cols: u16, rows: u16 },
     /// Kill an exec session.
     Kill { id: u32 },
     /// Liveness probe.
@@ -206,6 +216,9 @@ mod tests {
             argv: vec!["echo".into(), "hi".into()],
             env: vec![],
             workdir: None,
+            tty: false,
+            cols: 0,
+            rows: 0,
         };
         let frame = encode_frame(&req).unwrap();
         let mut dec = FrameDecoder::default();

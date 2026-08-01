@@ -113,17 +113,94 @@ fn run_attached(client: &Client, id: &str) -> Result<i32, String> {
     Err("sandbox still running after log stream ended".into())
 }
 
+/// Restores the local terminal on drop (raw mode for `exec -it`).
+struct RawTermGuard(libc::termios);
+
+impl RawTermGuard {
+    /// Put the local terminal into raw mode; None when stdin isn't a tty.
+    fn enable() -> Option<Self> {
+        unsafe {
+            if libc::isatty(0) == 0 {
+                return None;
+            }
+            let mut term: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut term) != 0 {
+                return None;
+            }
+            let orig = term;
+            libc::cfmakeraw(&mut term);
+            if libc::tcsetattr(0, libc::TCSANOW, &term) != 0 {
+                return None;
+            }
+            Some(Self(orig))
+        }
+    }
+}
+
+impl Drop for RawTermGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &self.0);
+        }
+    }
+}
+
+/// Local terminal size, if any std fd is a tty.
+fn term_size() -> Option<(u16, u16)> {
+    for fd in [0, 1, 2] {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
+            return Some((ws.ws_col, ws.ws_row));
+        }
+    }
+    None
+}
+
 /// Execute a command in a running sandbox, streaming framed output.
 ///
 /// With `interactive`, local stdin is pumped to the exec session until EOF;
 /// otherwise the session's stdin is closed immediately so readers don't hang.
+/// With `tty`, the guest process runs on a pseudo-terminal; when the local
+/// stdin is also a terminal, it is switched to raw mode so keystrokes
+/// (including ^C, arrows, etc.) pass through to the guest.
 pub fn exec(
     client: &Client,
     sandbox: &str,
     command: Vec<String>,
     interactive: bool,
+    tty: bool,
 ) -> Result<i32, String> {
-    let (session, mut resp) = client.exec(sandbox, command, vec![], None)?;
+    let (cols, rows) = if tty { term_size().unwrap_or((0, 0)) } else { (0, 0) };
+    let (session, mut resp) = client.exec(sandbox, command, vec![], None, tty, cols, rows)?;
+
+    // Raw mode while the session runs; restored by Drop on every exit path.
+    let _raw = if tty && interactive {
+        RawTermGuard::enable()
+    } else {
+        None
+    };
+
+    // Track local terminal resizes (poll: no signal handler needed).
+    if tty && term_size().is_some() {
+        let resize_client = Client::new(client.base());
+        let sb = sandbox.to_string();
+        std::thread::spawn(move || {
+            let mut last = (cols, rows);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                match term_size() {
+                    Some(size) if size != last => {
+                        if resize_client.exec_resize(&sb, session, size.0, size.1).is_err() {
+                            break;
+                        }
+                        last = size;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        });
+    }
 
     if interactive {
         let stdin_client = Client::new(client.base());

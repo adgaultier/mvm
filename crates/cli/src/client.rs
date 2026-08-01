@@ -96,17 +96,28 @@ impl Client {
 
     /// Streaming exec. Returns the exec session id (for stdin routing)
     /// and the framed event stream.
+    #[allow(clippy::too_many_arguments)]
     pub fn exec(
         &self,
         id: &str,
         argv: Vec<String>,
         env: Vec<String>,
         workdir: Option<String>,
+        tty: bool,
+        cols: u16,
+        rows: u16,
     ) -> Result<(u32, reqwest::blocking::Response), String> {
         let resp = self
             .http
             .post(format!("{}/api/v1/sandboxes/{id}/exec", self.base))
-            .json(&ExecRequest { argv, env, workdir })
+            .json(&ExecRequest {
+                argv,
+                env,
+                workdir,
+                tty,
+                cols,
+                rows,
+            })
             .send()
             .map_err(|e| e.to_string())?;
         let resp = Self::expect(resp, &[200])?;
@@ -128,6 +139,20 @@ impl Client {
                 self.base
             ))
             .body(data)
+            .send()
+            .map_err(|e| e.to_string())?;
+        Self::expect(resp, &[204]).map(|_| ())
+    }
+
+    /// Resize a live tty exec session.
+    pub fn exec_resize(&self, id: &str, session: u32, cols: u16, rows: u16) -> Result<(), String> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/v1/sandboxes/{id}/exec/{session}/resize",
+                self.base
+            ))
+            .json(&mvm_common::api::ResizeRequest { cols, rows })
             .send()
             .map_err(|e| e.to_string())?;
         Self::expect(resp, &[204]).map(|_| ())

@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::unix::io::{IntoRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use mvm_common::protocol::{
@@ -30,6 +31,9 @@ extern "C" fn signal_handler(sig: i32) {
 
 struct Session {
     pid: i32,
+    /// Pty session: stdin_fd and stdout_fd are the same fd (the pty
+    /// master), stderr is merged into it, and it must be closed only once.
+    tty: bool,
     stdin_fd: Option<RawFd>,
     stdin_buf: VecDeque<u8>,
     stdout_fd: Option<RawFd>,
@@ -85,6 +89,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
     for var in ["MVM_ROOT_DISK", "MVM_WORKDIR", "MVM_MOUNTS"] {
         std::env::remove_var(var);
     }
+
+    // Pty support for exec -t needs /dev/pts (libkrun's init mounts /dev
+    // but not devpts). Best effort; EBUSY when already mounted is fine.
+    ensure_devpts();
 
     // 4. Spawn the workload inheriting our stdio (= guest console).
     let workload = if workload_argv.is_empty() {
@@ -346,9 +354,12 @@ impl Agent {
             if let Some((sid, _)) = self.sessions.iter().find(|(_, s)| s.pid == pid).map(|(a, b)| (*a, b.pid)) {
                 if let Some(s) = self.sessions.get_mut(&sid) {
                     s.exit_code = Some(code);
-                    // Close stdin so readers see a clean EOF.
-                    if let Some(fd) = s.stdin_fd.take() {
-                        unsafe { libc::close(fd) };
+                    // Close stdin so readers see a clean EOF. Not for tty:
+                    // stdin *is* the master, which the pump still drains.
+                    if !s.tty {
+                        if let Some(fd) = s.stdin_fd.take() {
+                            unsafe { libc::close(fd) };
+                        }
                     }
                 }
             }
@@ -384,6 +395,10 @@ impl Agent {
                 } else {
                     s.stderr_fd = None;
                 }
+                if s.tty {
+                    // Same fd; it's gone now, don't close it a second time.
+                    s.stdin_fd = None;
+                }
             }
         }
     }
@@ -409,7 +424,9 @@ impl Agent {
     fn handle_request(&mut self, req: AgentRequest) {
         match req {
             AgentRequest::Ping => self.send(&AgentEvent::Pong),
-            AgentRequest::Exec { id, argv, env, workdir } => self.spawn_exec(id, argv, env, workdir),
+            AgentRequest::Exec { id, argv, env, workdir, tty, cols, rows } => {
+                self.spawn_exec(id, argv, env, workdir, tty, cols, rows)
+            }
             AgentRequest::Stdin { id, data } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.stdin_buf.extend(data);
@@ -418,8 +435,25 @@ impl Agent {
             }
             AgentRequest::StdinEof { id } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
-                    if let Some(fd) = s.stdin_fd.take() {
+                    if s.tty {
+                        // A pty can't be half-closed; signal EOF the tty way.
+                        s.stdin_buf.push_back(0x04); // VEOF (^D)
+                        self.flush_session_stdin(id);
+                    } else if let Some(fd) = s.stdin_fd.take() {
                         unsafe { libc::close(fd) };
+                    }
+                }
+            }
+            AgentRequest::Resize { id, cols, rows } => {
+                if let Some(s) = self.sessions.get(&id) {
+                    if let (true, Some(fd)) = (s.tty, s.stdout_fd) {
+                        let ws = libc::winsize {
+                            ws_row: rows,
+                            ws_col: cols,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) };
                     }
                 }
             }
@@ -431,18 +465,86 @@ impl Agent {
         }
     }
 
-    fn spawn_exec(&mut self, id: u32, argv: Vec<String>, env: Vec<String>, workdir: Option<String>) {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_exec(
+        &mut self,
+        id: u32,
+        argv: Vec<String>,
+        env: Vec<String>,
+        workdir: Option<String>,
+        tty: bool,
+        cols: u16,
+        rows: u16,
+    ) {
         if argv.is_empty() {
             self.send(&AgentEvent::Exit { id, code: 126 });
             return;
         }
+
+        // For tty sessions, allocate the pty up front; the child gets the
+        // slave as its stdio and becomes the session leader on it.
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+        if tty {
+            let mut ws = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            let wsp = if cols > 0 && rows > 0 {
+                &mut ws as *mut libc::winsize
+            } else {
+                std::ptr::null_mut()
+            };
+            let rc = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    wsp,
+                )
+            };
+            if rc != 0 {
+                self.send(&AgentEvent::Stderr {
+                    id,
+                    data: format!(
+                        "mvm-agent: openpty failed: {}\n",
+                        std::io::Error::last_os_error()
+                    )
+                    .into_bytes(),
+                });
+                self.send(&AgentEvent::Exit { id, code: 126 });
+                return;
+            }
+            unsafe {
+                libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+
         let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear()
-            .envs(baseline_env());
+        cmd.args(&argv[1..]).env_clear().envs(baseline_env());
+        if tty {
+            let stdio = |fd: RawFd| unsafe {
+                use std::os::unix::io::FromRawFd;
+                Stdio::from_raw_fd(libc::dup(fd))
+            };
+            cmd.stdin(stdio(slave)).stdout(stdio(slave)).stderr(stdio(slave));
+            if !env.iter().any(|kv| kv.starts_with("TERM=")) {
+                cmd.env("TERM", "xterm");
+            }
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    // Make the pty the controlling terminal (fd 0 = slave).
+                    libc::ioctl(0, libc::TIOCSCTTY, 0);
+                    Ok(())
+                });
+            }
+        } else {
+            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
         for kv in env {
             if let Some((k, v)) = kv.split_once('=') {
                 cmd.env(k, v);
@@ -451,21 +553,32 @@ impl Agent {
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
         }
-        match cmd.spawn() {
+        let spawned = cmd.spawn();
+        if tty {
+            unsafe { libc::close(slave) };
+        }
+        match spawned {
             Ok(mut child) => {
                 let pid = child.id() as i32;
-                let stdin_fd = child.stdin.take().map(|s| s.into_raw_fd());
-                let stdout_fd = child.stdout.take().map(|s| s.into_raw_fd());
-                let stderr_fd = child.stderr.take().map(|s| s.into_raw_fd());
-                for fd in [stdin_fd, stdout_fd, stderr_fd].into_iter().flatten() {
-                    set_nonblocking(fd);
-                }
+                let (stdin_fd, stdout_fd, stderr_fd) = if tty {
+                    set_nonblocking(master);
+                    (Some(master), Some(master), None)
+                } else {
+                    let sin = child.stdin.take().map(|s| s.into_raw_fd());
+                    let sout = child.stdout.take().map(|s| s.into_raw_fd());
+                    let serr = child.stderr.take().map(|s| s.into_raw_fd());
+                    for fd in [sin, sout, serr].into_iter().flatten() {
+                        set_nonblocking(fd);
+                    }
+                    (sin, sout, serr)
+                };
                 // Detach the std Child so nobody waits on it but us.
                 std::mem::forget(child);
                 self.sessions.insert(
                     id,
                     Session {
                         pid,
+                        tty,
                         stdin_fd,
                         stdin_buf: VecDeque::new(),
                         stdout_fd,
@@ -475,6 +588,9 @@ impl Agent {
                 );
             }
             Err(e) => {
+                if tty {
+                    unsafe { libc::close(master) };
+                }
                 self.send(&AgentEvent::Stderr {
                     id,
                     data: format!("mvm-agent: exec {:?} failed: {e}\n", argv[0]).into_bytes(),
@@ -660,6 +776,23 @@ fn apply_ownership(root: &str, manifest: &str) {
             // symlink entries in image layers.
             unsafe { libc::chmod(c_path.as_ptr(), e.m as libc::mode_t) };
         }
+    }
+}
+
+/// Mount devpts at /dev/pts so openpty works (pty slaves live there).
+fn ensure_devpts() {
+    let _ = std::fs::create_dir_all("/dev/pts");
+    let c_src = std::ffi::CString::new("devpts").unwrap();
+    let c_target = std::ffi::CString::new("/dev/pts").unwrap();
+    let c_data = std::ffi::CString::new("mode=0620,ptmxmode=0666").unwrap();
+    unsafe {
+        libc::mount(
+            c_src.as_ptr(),
+            c_target.as_ptr(),
+            c_src.as_ptr(), // fstype == "devpts" too
+            0,
+            c_data.as_ptr() as *const libc::c_void,
+        );
     }
 }
 

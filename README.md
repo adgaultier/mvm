@@ -14,6 +14,7 @@ $ mvm run --name dev --keep alpine sleep infinity &
 $ mvm exec dev uname -a
 Linux localhost 6.12.91 #1 SMP PREEMPT_DYNAMIC ... x86_64 Linux
 $ printf 'stdin works\n' | mvm exec -i dev cat
+$ mvm exec -it dev sh          # interactive shell on a pty (vi/top work)
 stdin works
 $ mvm stop dev && mvm rm dev
 ```
@@ -85,7 +86,7 @@ libc you don't control.
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
 | `mvm start/stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |
-| `mvm exec [-i] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin) |
+| `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
 | `mvm logs [-f] SANDBOX` | guest console output |
 | `mvm inspect SANDBOX` | full sandbox JSON |
 | `mvm-tui` | live dashboard (sandboxes, images, console) |
@@ -104,6 +105,7 @@ POST   /api/v1/sandboxes/{id}/start      POST   /api/v1/sandboxes/{id}/stop
 GET    /api/v1/sandboxes/{id}/logs?follow=bool        (raw console stream)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]
+POST   /api/v1/sandboxes/{id}/exec/{session}/resize   {"cols":N,"rows":N}
 GET    /api/v1/images                    DELETE /api/v1/images/{name}
 POST   /api/v1/images/pull                            (JSON-lines progress)
 ```
@@ -139,5 +141,4 @@ defined in `crates/common/src/protocol.rs`.
   virtiofs is limited to host credentials.
 - Guest chowns land on subuids on the host; clean up sandbox state through
   `mvm rm` (the daemon), not by deleting the data dir by hand.
-- No pseudo-TTY allocation for `exec` (no `-t`); `-i` streams raw stdin.
 - x86_64 Linux only (matches the vendored libkrun FFI subset).

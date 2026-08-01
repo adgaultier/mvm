@@ -6,7 +6,9 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
-use mvm_common::api::{ExecRequest, InfoResponse, LogsQuery, PullRequest, StdinQuery};
+use mvm_common::api::{
+    ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest, StdinQuery,
+};
 use mvm_common::protocol::{encode_frame, AgentEvent};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
 use std::convert::Infallible;
@@ -23,6 +25,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/sandboxes/{id}/logs", get(logs))
         .route("/sandboxes/{id}/exec", post(exec))
         .route("/sandboxes/{id}/exec/{session}/stdin", post(exec_stdin))
+        .route("/sandboxes/{id}/exec/{session}/resize", post(exec_resize))
         .route("/images", get(list_images))
         .route("/images/pull", post(pull_image))
         .route("/images/{*name}", delete(remove_image))
@@ -119,20 +122,50 @@ async fn exec(
 ) -> Result<Response, ApiError> {
     let (session, rx) = state
         .manager
-        .exec(&id, req.argv, req.env, req.workdir)
+        .exec(&id, req.argv, req.env, req.workdir, req.tty, req.cols, req.rows)
         .await?;
 
+    // If the client goes away mid-session (Ctrl-C, crash, network drop),
+    // dropping the response stream must not leave the guest process
+    // running: the guard kills the session unless it completed normally.
+    struct KillOnDrop {
+        manager: mvm_manager::Manager,
+        id: String,
+        session: u32,
+        armed: bool,
+    }
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self.manager.exec_kill(&self.id, self.session);
+            }
+        }
+    }
+    let guard = KillOnDrop {
+        manager: state.manager.clone(),
+        id: id.clone(),
+        session,
+        armed: true,
+    };
+
     // Stream framed AgentEvents; terminate after the Exit frame.
-    let stream = stream::unfold(Some(rx), |state| async move {
-        let mut rx = state?;
+    let stream = stream::unfold(Some((rx, guard)), |state| async move {
+        let (mut rx, mut guard) = state?;
         match rx.recv().await {
             Some(event) => {
                 let done = matches!(event, AgentEvent::Exit { .. });
+                if done {
+                    guard.armed = false;
+                }
                 let frame = encode_frame(&event).unwrap_or_default();
-                let next = if done { None } else { Some(rx) };
+                let next = if done { None } else { Some((rx, guard)) };
                 Some((Ok::<Bytes, Infallible>(Bytes::from(frame)), next))
             }
-            None => None,
+            None => {
+                // Agent gone (VM died): nothing left to kill.
+                guard.armed = false;
+                None
+            }
         }
     });
 
@@ -142,6 +175,16 @@ async fn exec(
         session.to_string().parse().expect("numeric header"),
     );
     Ok(resp)
+}
+
+/// Resize a live tty exec session.
+async fn exec_resize(
+    State(state): State<AppState>,
+    Path((id, session)): Path<(String, u32)>,
+    Json(req): Json<ResizeRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.manager.exec_resize(&id, session, req.cols, req.rows)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Feed stdin into a live exec session. `?eof=true` closes stdin instead.

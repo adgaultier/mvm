@@ -10,22 +10,13 @@ the overlay driver in userns mode (`userxattr` fix — expect
 exec streams, the agent-ready barrier in `start` (no more 500s in the log),
 deterministic `mvm run` exit, and `logs -f` terminating on sandbox exit.
 
-## 2. TTY support for exec (`-t`)
-Sessions are pipes; interactive shells get no prompt/line editing. Needs pty
-allocation in the agent, a winsize/resize protocol message, raw-mode CLI.
-
-## 3. Exec kill on client disconnect
-`AgentRequest::Kill` is implemented in the agent but never sent — Ctrl-C on
-`mvm exec` leaves the guest process running. Send Kill when the exec response
-stream is dropped (or add a kill endpoint) and hook CLI Ctrl-C.
-
-## 4. Image store audit
+## 2. Image store audit
 Review `registry.rs`/`store.rs`: per-layer blob caching vs re-download,
 image GC / `rmi` refcounting against existing sandboxes, locking for
 concurrent pulls of the same reference. `daemon.pid` is defined but unused.
 
-## 5. Interactive stdin for `mvm run`
-`run` streams the console out but never in; `-i` exists only on `exec`.
+## 3. Interactive stdin for `mvm run`
+`run` streams the console out but never in; `-i`/`-t` exist only on `exec`.
 
 ---
 
@@ -60,3 +51,14 @@ concurrent pulls of the same reference. `daemon.pid` is defined but unused.
   into a musl guest again; dev trees auto-find the musl build.
 - **CLI flag misuse guard** — mvm options after the image (which would
   silently join the guest command) are rejected with a hint.
+- **Exec TTY support** — `mvm exec -it sb sh` gives a real interactive
+  shell: the agent allocates a pty (openpty; mounts devpts at boot), the
+  child becomes session leader on the slave, output merges onto Stdout;
+  a `Resize` protocol message + `/exec/{session}/resize` endpoint carry
+  winsize (initial size in the Exec request, then a 500 ms poll in the
+  CLI); the CLI enters raw mode (termios, restored on drop) so ^C/arrows
+  reach the guest.
+- **Exec kill on client disconnect** — the API's exec stream holds a
+  kill-on-drop guard: if the HTTP response is dropped before the Exit
+  frame (client Ctrl-C/crash/network loss), the daemon SIGKILLs the guest
+  session. Integration check: killed client → no orphaned `sleep` in VM.

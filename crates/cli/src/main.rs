@@ -70,6 +70,9 @@ enum Command {
         /// Keep stdin open and forward it to the command.
         #[arg(short, long)]
         interactive: bool,
+        /// Allocate a pseudo-terminal (combine with -i for a shell).
+        #[arg(short, long)]
+        tty: bool,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
@@ -232,8 +235,9 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         Command::Exec {
             sandbox,
             interactive,
+            tty,
             command,
-        } => run::exec(client, &sandbox, command, interactive),
+        } => run::exec(client, &sandbox, command, interactive, tty),
         Command::Serve { .. } | Command::VmShim { .. } => unreachable!(),
     }
 }

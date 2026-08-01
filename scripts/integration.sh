@@ -87,6 +87,20 @@ check "exec binary roundtrip" \
     "$("$MVM" exec -i itest cat < "$BINFILE" | sha256sum | cut -d' ' -f1)"
 rm -f "$BINFILE"
 
+# -t allocates a pty: the guest command must see a terminal on stdin.
+check "exec tty allocation" "TTY-OK" \
+    "$("$MVM" exec -t itest sh -c '[ -t 0 ] && echo TTY-OK' | tr -d '\r')"
+
+# Killing the client mid-exec must not orphan the guest process.
+"$MVM" exec itest sleep 299 >/dev/null 2>&1 &
+EXEC_PID=$!
+sleep 1
+kill "$EXEC_PID" 2>/dev/null || true
+wait "$EXEC_PID" 2>/dev/null || true
+sleep 1
+check "exec killed on disconnect" "0" \
+    "$("$MVM" exec itest sh -c 'c=0; for p in $(pgrep -x sleep); do grep -q 299 /proc/$p/cmdline && c=$((c+1)); done; echo $c')"
+
 echo "==> volumes"
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"

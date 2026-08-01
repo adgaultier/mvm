@@ -411,12 +411,16 @@ impl Manager {
     /// Run a command inside a running sandbox via the guest agent.
     /// Returns the session id (for stdin routing) and a stream of events
     /// (stdout/stderr/exit).
+    #[allow(clippy::too_many_arguments)]
     pub async fn exec(
         &self,
         id_or_name: &str,
         argv: Vec<String>,
         env: Vec<String>,
         workdir: Option<String>,
+        tty: bool,
+        cols: u16,
+        rows: u16,
     ) -> Result<(u32, mpsc::Receiver<protocol::AgentEvent>)> {
         let id = self.resolve(id_or_name)?;
         let (tx, rx) = mpsc::channel(64);
@@ -445,13 +449,28 @@ impl Manager {
                 argv,
                 env,
                 workdir,
+                tty,
+                cols,
+                rows,
             })
             .map_err(|_| Error::Runtime("agent channel closed".into()))?;
         Ok((session_id, rx))
     }
 
-    /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
-    pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
+    /// Kill a live exec session (SIGKILL in the guest).
+    pub fn exec_kill(&self, id_or_name: &str, session: u32) -> Result<()> {
+        self.send_to_agent(id_or_name, protocol::AgentRequest::Kill { id: session })
+    }
+
+    /// Resize a live tty exec session.
+    pub fn exec_resize(&self, id_or_name: &str, session: u32, cols: u16, rows: u16) -> Result<()> {
+        self.send_to_agent(
+            id_or_name,
+            protocol::AgentRequest::Resize { id: session, cols, rows },
+        )
+    }
+
+    fn send_to_agent(&self, id_or_name: &str, req: protocol::AgentRequest) -> Result<()> {
         let id = self.resolve(id_or_name)?;
         let sandboxes = self.inner.sandboxes.read().unwrap();
         let entry = sandboxes
@@ -461,14 +480,19 @@ impl Manager {
             .agent
             .as_ref()
             .ok_or_else(|| Error::Runtime("sandbox has no agent connection".into()))?;
-        let req = match data {
-            Some(data) => protocol::AgentRequest::Stdin { id: session, data },
-            None => protocol::AgentRequest::StdinEof { id: session },
-        };
         agent
             .sender()
             .send(req)
             .map_err(|_| Error::Runtime("agent channel closed".into()))
+    }
+
+    /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
+    pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
+        let req = match data {
+            Some(data) => protocol::AgentRequest::Stdin { id: session, data },
+            None => protocol::AgentRequest::StdinEof { id: session },
+        };
+        self.send_to_agent(id_or_name, req)
     }
 
     // ---- internals -------------------------------------------------------

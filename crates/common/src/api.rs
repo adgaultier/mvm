@@ -9,6 +9,21 @@ pub struct ExecRequest {
     #[serde(default)]
     pub env: Vec<String>,
     pub workdir: Option<String>,
+    /// Allocate a pseudo-terminal for the process.
+    #[serde(default)]
+    pub tty: bool,
+    /// Initial terminal size (0 = unspecified).
+    #[serde(default)]
+    pub cols: u16,
+    #[serde(default)]
+    pub rows: u16,
+}
+
+/// POST /api/v1/sandboxes/{id}/exec/{session}/resize
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResizeRequest {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// POST /api/v1/images/pull

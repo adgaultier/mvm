@@ -172,11 +172,13 @@ design meeting:
   limited to host credentials.
 - Guest chowns land on host subuids: remove sandbox state via `mvm rm`, not
   manual `rm -rf` of the data dir (subuid-owned files resist deletion).
-- No pseudo-TTY for exec (`-t`); `-i` streams raw stdin without a terminal.
 - gvproxy/tap networking implemented but not e2e-tested here (no gvproxy
   binary on this host); `none` profile verified.
 
 Fixed since first E2E: exec streams are binary-safe (base64 frames);
 `start` blocks until the guest agent connects (no more exec-races-agent
 500s); `mvm run` waits on the log stream ending (daemon closes it on shim
-exit) instead of polling; `logs -f` terminates when the sandbox exits.
+exit) instead of polling; `logs -f` terminates when the sandbox exits;
+`exec -it` allocates a real pty (agent openpty + devpts, Resize protocol
+message, raw-mode CLI); client disconnect mid-exec kills the guest process
+(kill-on-drop guard around the API stream).
