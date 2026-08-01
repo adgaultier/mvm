@@ -1,6 +1,7 @@
 # TODO
 
-Prioritized backlog. See `implementation.md` for architecture.
+Prioritized backlog. See `README.md` for user-facing behavior and
+`AGENTS.md` for architecture notes and sharp edges.
 
 ## 1. Validate networking modes on real host
 `scripts/integration.sh` gained a networking section: `none` isolation
