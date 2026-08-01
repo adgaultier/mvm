@@ -9,6 +9,7 @@ name = "mvm"
 path = "src/main.rs"
 
 [dependencies]
+libc.workspace = true
 mvm-api = { path = "../api" }
 mvm-common = { path = "../common" }
 mvm-manager = { path = "../manager" }

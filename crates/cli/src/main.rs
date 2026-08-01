@@ -2,6 +2,7 @@
 
 mod client;
 mod run;
+mod userns;
 
 use clap::{Args, Parser, Subcommand};
 use client::Client;
@@ -123,7 +124,12 @@ fn main() {
         .init();
 
     let code = match cli.command {
-        Command::Serve { addr } => serve(addr),
+        Command::Serve { addr } => {
+            // Must run before the tokio runtime exists (single-threaded
+            // requirement of unshare) — may re-exec and never return.
+            userns::maybe_enter_userns();
+            serve(addr)
+        }
         Command::VmShim { config } => vm_shim(&config),
         other => {
             let client = Client::new(&cli.host);

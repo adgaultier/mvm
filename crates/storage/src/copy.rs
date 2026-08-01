@@ -48,7 +48,8 @@ impl StorageDriver for CopyDriver {
 }
 
 /// Recursive copy preserving modes and symlinks. Attempts reflink for
-/// regular files (btrfs/xfs), falling back to a plain copy.
+/// regular files (btrfs/xfs), falling back to a plain copy. As root
+/// (including userns namespace-root) ownership is preserved too.
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -58,24 +59,31 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
             copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
         }
         let _ = std::fs::set_permissions(dst, meta.permissions());
+        preserve_owner(dst, &meta);
     } else if meta.is_symlink() {
         let target = std::fs::read_link(src)?;
         if dst.exists() || dst.symlink_metadata().is_ok() {
             std::fs::remove_file(dst)?;
         }
         std::os::unix::fs::symlink(target, dst)?;
+        preserve_owner(dst, &meta);
     } else if meta.is_file() {
-        copy_file(src, dst)?;
+        copy_file(src, dst, &meta)?;
     }
     Ok(())
 }
 
-fn copy_file(src: &Path, dst: &Path) -> Result<()> {
+fn copy_file(src: &Path, dst: &Path, meta: &std::fs::Metadata) -> Result<()> {
     use std::process::Command;
     // cp --reflink=auto --preserve=mode gives us CoW where possible.
+    let preserve = if crate::is_root() {
+        "--preserve=mode,ownership"
+    } else {
+        "--preserve=mode"
+    };
     let status = Command::new("cp")
         .arg("--reflink=auto")
-        .arg("--preserve=mode")
+        .arg(preserve)
         .arg("--")
         .arg(src)
         .arg(dst)
@@ -86,8 +94,28 @@ fn copy_file(src: &Path, dst: &Path) -> Result<()> {
         std::fs::copy(src, dst)?;
         let perms = std::fs::metadata(src)?.permissions();
         let _ = std::fs::set_permissions(dst, perms);
+        preserve_owner(dst, meta);
+    }
+    // chown (by cp or us) clears setuid/setgid: restore.
+    if crate::is_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        if mode & 0o6000 != 0 {
+            let _ = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(mode));
+        }
     }
     Ok(())
+}
+
+/// Carry the source's uid/gid onto `dst` when running as root (best effort).
+fn preserve_owner(dst: &Path, src_meta: &std::fs::Metadata) {
+    if !crate::is_root() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    if let Ok(c_path) = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes()) {
+        unsafe { libc::lchown(c_path.as_ptr(), src_meta.uid(), src_meta.gid()) };
+    }
 }
 
 #[cfg(test)]

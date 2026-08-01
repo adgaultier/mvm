@@ -63,21 +63,30 @@ design meeting:
    resolution for the host platform, blob download with sha256 verification,
    gzip/zstd/tar layer decompression, and OCI whiteouts (`.wh.*` + opaque dirs).
    Device nodes are skipped when rootless (guest gets devtmpfs anyway).
-6. **Storage drivers** (rootless-first):
-   - `ext4` (rootless default): per-sandbox ext4 image built rootless with
-     `mkfs.ext4 -d <image-rootfs>`, attached via `krun_add_disk`. The guest
-     boots a tiny virtiofs bootstrap dir (agent + ownership manifest only);
-     the agent mounts `/dev/vda`, restores file owners recorded from the
-     layer tar headers (rootless unpack can't chown), `pivot_root`s, and
-     remounts proc/sys/dev. Fixes guest chown (virtiofs has no UID
-     translation) and persists the disk across stop/start.
-   - `copy`: full recursive copy of the image rootfs per sandbox
-     (`cp --reflink=auto --preserve=mode`, manual fallback), works as uid
-     1000. Fallback when mkfs.ext4 is missing; rootfs wiped on each start.
-   - `overlay`: real OverlayFS (image = lower, per-sandbox upper/work/merged)
-     via `mount -t overlay`, requires root. Selected by `MVM_STORAGE_DRIVER`
-     or auto (root → overlay, rootless → ext4, else copy).
-7. **Networking profiles**: `none` (default, no virtio-net device = isolated),
+6. **Rootless userns mode** (virtiofs-first chown fix). `mvm serve` re-execs
+   itself under `unshare(CLONE_NEWUSER)` before tokio starts (must be
+   single-threaded), the parent installs uid/gid maps via
+   `newuidmap`/`newgidmap` (0 → user, 1.. → /etc/subuid range) and stays as
+   a thin supervisor; the child gets a private mount namespace. Everything
+   downstream — unpack, storage, libkrun's in-process virtiofs server — runs
+   as namespace-root, so guest chown works through virtiofs (chowns land on
+   subuids). Unpack applies real tar-header ownership when euid==0; the
+   `copy` driver preserves it; device nodes are only unpacked as *init-ns*
+   root (namespace-root can't mknod). Degrades with a warning when
+   subuid/newuidmap are missing; `MVM_USERNS=0` opts out. See
+   `crates/cli/src/userns.rs`.
+7. **Storage drivers** (guest root always over virtiofs):
+   - `overlay` (default for root *and* userns mode, auto-probed): OverlayFS,
+     image = lower, per-sandbox upper/work/merged. Upper persists across
+     stop/start. Unprivileged overlayfs in a userns needs kernel ≥ 5.11.
+   - `copy`: full recursive copy per sandbox (`cp --reflink=auto`,
+     `--preserve` incl. ownership as ns-root). Fallback; wiped each start.
+   - `ext4` (opt-in via `MVM_STORAGE_DRIVER=ext4`): per-sandbox ext4 image
+     (`mkfs.ext4 -d`) attached via `krun_add_disk`; guest boots a bootstrap
+     virtiofs dir, agent restores ownership from the recorded manifest and
+     `pivot_root`s onto `/dev/vda`. Kept as an alternative for hosts without
+     subuid ranges.
+8. **Networking profiles**: `none` (default, no virtio-net device = isolated),
    `gvproxy` (userspace NAT via `krun_set_gvproxy_path` + `krun_set_port_map`),
    `tap:<dev>` (existing TAP via `krun_add_net_tap`). Validated by the network
    crate before use.
@@ -154,12 +163,15 @@ design meeting:
 
 ## Known limitations
 
-- Guest `chown` on **virtiofs** (volumes; root when using `copy`/`overlay`)
-  is limited to host credentials. The rootless-default `ext4` driver is not
-  affected: it boots from a block device and restores ownership from the
-  tar-header manifest. ext4 driver not yet validated on real KVM — re-run
-  `scripts/integration.sh` (new checks: chown, root-owned files, restart
-  persistence).
+- Userns mode + overlay-in-userns not yet validated on real KVM — re-run
+  `scripts/integration.sh` (checks: guest chown, root-owned files, restart
+  persistence). Expect `mvm: userns mode active` in the daemon log and
+  `storage driver: overlay`.
+- Without userns (no subuid/newuidmap — e.g. inside the CC sandbox, where
+  newuidmap fails with "Could not set caps"), guest chown over virtiofs is
+  limited to host credentials.
+- Guest chowns land on host subuids: remove sandbox state via `mvm rm`, not
+  manual `rm -rf` of the data dir (subuid-owned files resist deletion).
 - No pseudo-TTY for exec (`-t`); `-i` streams raw stdin without a terminal.
 - Exec streams are UTF-8-lossy (binary stdin/stdout corrupted) — TODO.md #2.
 - Sandbox state `running` precedes agent vsock connect by a moment; exec in

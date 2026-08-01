@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+libc.workspace = true
 mvm-common = { path = "../common" }
 chrono.workspace = true
 flate2.workspace = true

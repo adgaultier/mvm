@@ -137,10 +137,11 @@ pub fn unpack_layer(
             continue;
         }
 
-        // Skip device nodes when unprivileged: the guest gets a proper
-        // /dev from devtmpfs at boot anyway.
+        // Skip device nodes unless we're real (init-namespace) root: the
+        // guest gets a proper /dev from devtmpfs at boot anyway, and
+        // namespace-root cannot mknod.
         let header_type = entry.header().entry_type();
-        if !is_root()
+        if !mvm_common::is_init_ns_root()
             && (header_type == tar::EntryType::Char
                 || header_type == tar::EntryType::Block
                 || header_type == tar::EntryType::Fifo)
@@ -161,8 +162,31 @@ pub fn unpack_layer(
             continue;
         }
         manifest.record(&path, uid, gid, mode);
+
+        // As root — real or namespace-root with a mapped subid range —
+        // apply the recorded owner directly. Namespace-root chowns land on
+        // subuids, which virtiofs then presents back correctly.
+        if is_root() {
+            if let Ok(target) = safe_join(dest, &path) {
+                apply_owner(&target, uid, gid, mode);
+            }
+        }
     }
     Ok(())
+}
+
+/// Best-effort lchown + setuid/setgid restoration (chown clears those bits).
+fn apply_owner(path: &Path, uid: u32, gid: u32, mode: u32) {
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if rc == 0
+        && mode & 0o6000 != 0
+        && path.symlink_metadata().map(|m| !m.is_symlink()).unwrap_or(false)
+    {
+        unsafe { libc::chmod(c_path.as_ptr(), mode as libc::mode_t) };
+    }
 }
 
 fn remove_all(path: &Path) -> std::io::Result<()> {

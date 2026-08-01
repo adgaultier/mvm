@@ -101,6 +101,19 @@ pub fn is_root() -> bool {
     unsafe { libc_geteuid() == 0 }
 }
 
+/// True only for root in the *initial* user namespace. Namespace-root
+/// (rootless userns mode) passes `is_root` but lacks privileges the init
+/// namespace grants, e.g. mknod of device nodes.
+pub fn is_init_ns_root() -> bool {
+    is_root()
+        && std::fs::read_to_string("/proc/self/uid_map")
+            .map(|m| {
+                let fields: Vec<&str> = m.split_whitespace().collect();
+                fields == ["0", "0", "4294967295"]
+            })
+            .unwrap_or(false)
+}
+
 // Tiny direct syscall wrapper to avoid a libc dependency in common.
 unsafe fn libc_geteuid() -> u32 {
     #[cfg(target_os = "linux")]

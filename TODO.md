@@ -2,11 +2,13 @@
 
 Prioritized backlog after the initial implementation (see `implementation.md`).
 
-## 1. Re-run integration on real host (validates ext4 root disk)
+## 1. Re-run integration on real host (validates userns virtiofs mode)
 `scripts/integration.sh` must run in a normal shell (the Claude Code sandbox
-hides `/dev/kvm`). The suite now covers guest `chown`, manifest-restored file
-ownership, and rootfs persistence across stop/start — all exercising the new
-`ext4` storage driver, which is untested on real KVM.
+hides `/dev/kvm` and blocks `newuidmap`). The suite covers guest `chown`,
+root-owned files, and rootfs persistence across stop/start — all exercising
+the new rootless userns mode (virtiofs root + overlay driver), untested on
+real KVM. Expect `mvm: userns mode active` and `storage driver: overlay` in
+the daemon output.
 
 ## 2. Binary-safe exec streams
 `Stdin`/`Stdout`/`Stderr` protocol frames carry `String` after
@@ -39,12 +41,16 @@ concurrent pulls of the same reference. `daemon.pid` is defined but unused.
 ## Done
 
 - **E2E integration** — 12/12 passing on real KVM (2026-08-01).
-- **Rootless chown / virtiofs UID translation** — fixed by the `ext4` storage
-  driver (rootless default): per-sandbox ext4 image built with
-  `mkfs.ext4 -d`, booted as a virtio-blk root; the agent pivots onto it and
-  restores file ownership recorded from the layer tar headers at unpack time.
-- **Restart semantics** — `ext4` disks persist across stop/start
-  (docker-like); the `copy` fallback remains ephemeral and is documented as
-  such.
+- **Rootless chown / virtiofs UID translation** — fixed while keeping
+  virtiofs as the root filesystem: `mvm serve` re-execs into a user
+  namespace (podman-style, subuid ranges via newuidmap/newgidmap), so
+  libkrun's in-process virtiofs server has CAP_CHOWN over mapped uids.
+  Unpack applies real tar-header ownership as namespace-root. An `ext4`
+  block-root driver also exists (`MVM_STORAGE_DRIVER=ext4`, agent
+  pivot_root + ownership manifest) for hosts without subuid ranges.
+- **Restart semantics** — overlay upper layer (default driver) and ext4
+  disks persist across stop/start (docker-like); the `copy` fallback remains
+  ephemeral and is documented as such. Overlay `create` no longer wipes the
+  sandbox dir (which used to delete console.log on restart).
 - **Exec stdin** — `mvm exec -i` forwards local stdin over
   `POST /exec/{session}/stdin`.

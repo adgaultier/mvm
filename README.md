@@ -113,25 +113,32 @@ defined in `crates/common/src/protocol.rs`.
 
 ## Storage & networking
 
-- **Storage drivers** (auto-selected, override `MVM_STORAGE_DRIVER`):
-  - `ext4` (rootless default): per-sandbox ext4 image built with
-    `mkfs.ext4 -d`, booted as a virtio-blk root. Full chown/uid semantics
-    inside the guest (file owners are restored from the layer tar headers),
-    and the disk persists across `stop`/`start`. Writable slack defaults to
-    1 GiB sparse (`MVM_DISK_SLACK_MIB`).
-  - `copy`: per-sandbox rootfs copy over virtiofs; rootless-safe fallback
-    when `mkfs.ext4` is unavailable. Guest chown is limited to host
-    credentials, and the rootfs is rebuilt (wiped) on every start.
-  - `overlay` (root default): kernel OverlayFS over virtiofs; requires root.
+- **Rootless userns mode** (automatic): `mvm serve` re-execs itself inside a
+  user namespace mapping uid 0 to your user and uids 1..65535 to your
+  `/etc/subuid` range (podman-style). libkrun's in-process **virtiofs**
+  server then runs as namespace-root, so guest `chown`/ownership works with
+  full fidelity — image files appear root-owned, `apk`/`apt`/`useradd` work.
+  Requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`;
+  degrades gracefully (with a warning) when missing. Opt out: `MVM_USERNS=0`.
+- **Storage drivers** (auto-selected, override `MVM_STORAGE_DRIVER`) — the
+  guest root is always served over **virtiofs**:
+  - `overlay` (default for root and userns mode): kernel OverlayFS, image
+    rootfs as lower layer, per-sandbox upper. Changes persist across
+    `stop`/`start`. Auto-probed; falls back to `copy` if unsupported.
+  - `copy`: per-sandbox rootfs copy; universal fallback. Rootfs is rebuilt
+    (wiped) on every start.
+  - `ext4` (opt-in): per-sandbox ext4 image built with `mkfs.ext4 -d`,
+    booted as a virtio-blk root instead of virtiofs.
 - **Network profiles:** `none` (default — no NIC, strongest isolation),
   `gvproxy` (userspace NAT + `-p` port maps; needs a running gvproxy),
   `tap:<dev>` (pre-configured TAP device).
 
 ## Known limitations
 
-- Guest `chown` on **virtiofs** mounts (volumes, and the root when using the
-  `copy`/`overlay` drivers) is limited to host credentials — the default
-  rootless `ext4` driver is not affected.
+- Without userns mode (no subuid ranges / newuidmap), guest `chown` over
+  virtiofs is limited to host credentials.
+- Guest chowns land on subuids on the host; clean up sandbox state through
+  `mvm rm` (the daemon), not by deleting the data dir by hand.
 - No pseudo-TTY allocation for `exec` (no `-t`); `-i` streams raw stdin.
 - Exec streams are UTF-8-lossy (binary-unsafe) for now.
 - x86_64 Linux only (matches the vendored libkrun FFI subset).

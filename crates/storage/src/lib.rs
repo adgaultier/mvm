@@ -1,11 +1,13 @@
 //! Per-sandbox writable filesystem layers.
 //!
-//! Three drivers:
-//!  - `ext4`:    per-sandbox ext4 image built with mkfs.ext4 -d, booted as a
-//!               virtio-blk root (rootless-safe, full chown semantics).
-//!  - `copy`:    full recursive copy of the image rootfs (rootless-safe,
-//!               virtiofs root: guest chown is limited to host credentials).
-//!  - `overlay`: real OverlayFS (image = lower, per-sandbox upper), needs root.
+//! Three drivers (virtiofs-first; the daemon's userns mode gives virtiofs
+//! full chown semantics rootless):
+//!  - `overlay`: OverlayFS (image = lower, per-sandbox upper); default for
+//!               root and for namespace-root (rootless userns mode).
+//!  - `copy`:    full recursive copy of the image rootfs; fallback when
+//!               overlay is unavailable.
+//!  - `ext4`:    opt-in; per-sandbox ext4 image built with mkfs.ext4 -d,
+//!               booted as a virtio-blk root instead of virtiofs.
 
 use mvm_common::{DataDir, Error, Result, SandboxId};
 use std::path::{Path, PathBuf};
@@ -37,8 +39,9 @@ pub trait StorageDriver: Send + Sync {
     fn destroy(&self, id: &SandboxId) -> Result<()>;
 }
 
-/// Pick the default driver: $MVM_STORAGE_DRIVER, else overlay as root,
-/// else ext4 (falling back to copy when mkfs.ext4 is missing).
+/// Pick the default driver: $MVM_STORAGE_DRIVER, else overlay whenever the
+/// host supports it (real root, or namespace-root in the daemon's rootless
+/// userns mode), else copy.
 pub fn default_driver(data_dir: DataDir) -> Box<dyn StorageDriver> {
     let choice = std::env::var("MVM_STORAGE_DRIVER").unwrap_or_default();
     match choice.as_str() {
@@ -47,10 +50,8 @@ pub fn default_driver(data_dir: DataDir) -> Box<dyn StorageDriver> {
         "overlay" => return Box::new(OverlayDriver::new(data_dir)),
         _ => {}
     }
-    if is_root() {
+    if is_root() && data_dir.ensure().is_ok() && OverlayDriver::probe(&data_dir) {
         Box::new(OverlayDriver::new(data_dir))
-    } else if Ext4Driver::available() {
-        Box::new(Ext4Driver::new(data_dir))
     } else {
         Box::new(CopyDriver::new(data_dir))
     }
