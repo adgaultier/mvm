@@ -16,7 +16,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, PollUpdate, ResizeForm, Tab};
+use app::{App, DeleteConfirm, PollUpdate, ResizeForm, Tab};
 use client::Client;
 
 #[derive(Parser)]
@@ -86,9 +86,13 @@ fn run_loop(
                 if key.kind != crossterm::event::KeyEventKind::Press {
                     continue;
                 }
-                // The resize form owns the keyboard while it is open.
+                // Modals own the keyboard while they are open.
                 if app.resize.is_some() {
                     handle_resize_key(app, key, client, tx);
+                    continue;
+                }
+                if app.confirm_delete.is_some() {
+                    handle_confirm_key(app, key, client, tx);
                     continue;
                 }
                 match key.code {
@@ -131,15 +135,7 @@ fn run_loop(
                     }
                     KeyCode::Char('d') => {
                         if let Some(sb) = app.selected_sandbox() {
-                            let id = sb.id.to_string();
-                            let c = client.clone();
-                            let t = tx.clone();
-                            std::thread::spawn(move || {
-                                let _ = c.stop(&id);
-                                if let Err(e) = c.remove(&id) {
-                                    let _ = t.send(PollUpdate::Error(e));
-                                }
-                            });
+                            app.confirm_delete = Some(DeleteConfirm::new(sb));
                         }
                     }
                     KeyCode::Char('r') => {
@@ -157,6 +153,41 @@ fn run_loop(
 /// Console history the poller keeps around — more than the pane can show, so
 /// scrolling room is there without hauling the whole log every 1.5s.
 const CONSOLE_TAIL_LINES: usize = 200;
+
+/// Keys for the delete confirmation. Only `y` goes through; anything that is
+/// not an explicit yes or no leaves the prompt up rather than guessing.
+fn handle_confirm_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+) {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let Some(confirm) = app.confirm_delete.take() else { return };
+            let c = client.clone();
+            let t = tx.clone();
+            std::thread::spawn(move || {
+                let _ = c.stop(&confirm.id);
+                let notice = match c.remove(&confirm.id) {
+                    Ok(()) => PollUpdate::Notice {
+                        text: format!("{} deleted", confirm.label),
+                        error: false,
+                    },
+                    Err(e) => PollUpdate::Notice {
+                        text: format!("delete {}: {e}", confirm.label),
+                        error: true,
+                    },
+                };
+                let _ = t.send(notice);
+            });
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+            app.confirm_delete = None;
+        }
+        _ => {}
+    }
+}
 
 /// Keys for the modal resize form. Enter applies; ^R also reboots the VM,
 /// which is the only way a running one picks up the new size.

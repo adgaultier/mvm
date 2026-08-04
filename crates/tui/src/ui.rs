@@ -95,10 +95,60 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .wrap(Wrap { trim: true });
     f.render_widget(footer, chunks[3]);
 
-    // Modal last, so it sits on top of everything.
+    // Modals last, so they sit on top of everything.
     if app.resize.is_some() {
         draw_resize(f, app);
     }
+    if app.confirm_delete.is_some() {
+        draw_confirm_delete(f, app);
+    }
+}
+
+/// "Really delete this?" — removing a sandbox destroys its filesystem.
+fn draw_confirm_delete(f: &mut Frame, app: &App) {
+    let Some(confirm) = app.confirm_delete.as_ref() else { return };
+    let area = centered_rect(54, 9, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  delete sandbox "),
+            Span::styled(
+                &confirm.label,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("?"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  its filesystem goes with it — this cannot be undone",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    if confirm.running {
+        lines.push(Line::from(Span::styled(
+            "  it is running and will be stopped first",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("y", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::raw(" delete  "),
+        Span::styled("n", Style::default().fg(Color::Yellow)),
+        Span::raw(" / "),
+        Span::styled("esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel"),
+    ]));
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red))
+            .title(" confirm delete "),
+    );
+    f.render_widget(popup, area);
 }
 
 /// Modal vcpu/RAM editor for the selected sandbox.

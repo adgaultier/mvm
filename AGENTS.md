@@ -95,7 +95,7 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
 | `agent` | guest PID 1; std+libc only, poll(2) event loop, must stay static-friendly |
 | `api` | axum routes; streams = `Body::from_stream`; exec has a kill-on-drop guard |
 | `cli` | `mvm` binary incl. hidden `__vm-shim` subcommand + userns re-exec |
-| `tui` | ratatui dashboard; modal forms own the keyboard while open (`r` = resize) |
+| `tui` | ratatui dashboard; modal forms own the keyboard while open (`r` resize, `d` delete confirmation) |
 
 ## Sharp edges (learned the hard way)
 

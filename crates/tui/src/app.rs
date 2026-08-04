@@ -81,6 +81,26 @@ pub enum PollUpdate {
     Notice { text: String, error: bool },
 }
 
+/// Pending "really delete this?" prompt. Removing a sandbox destroys its
+/// filesystem and cannot be undone, so it does not happen on one keystroke —
+/// a mistyped key (or, before the console pane was sanitized, a byte the guest
+/// provoked) should not be able to take a VM with it.
+pub struct DeleteConfirm {
+    pub id: String,
+    pub label: String,
+    pub running: bool,
+}
+
+impl DeleteConfirm {
+    pub fn new(sb: &Sandbox) -> Self {
+        Self {
+            id: sb.id.to_string(),
+            label: sb.name().to_string(),
+            running: sb.state.is_alive(),
+        }
+    }
+}
+
 /// Which field the resize form is editing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeField {
@@ -177,6 +197,8 @@ pub struct App {
     pub should_quit: bool,
     /// Modal resize form; while it is open it owns the keyboard.
     pub resize: Option<ResizeForm>,
+    /// Modal delete confirmation; same rule.
+    pub confirm_delete: Option<DeleteConfirm>,
     notice: Option<(String, bool, std::time::Instant)>,
 }
 
@@ -194,6 +216,7 @@ impl App {
             daemon_ok: false,
             should_quit: false,
             resize: None,
+            confirm_delete: None,
             notice: None,
         }
     }
@@ -250,8 +273,17 @@ impl App {
         let len = self.current_len();
         if len == 0 {
             self.table_state.select(None);
-        } else if self.selected_index().map(|i| i >= len).unwrap_or(true) {
-            self.table_state.select(Some(len - 1));
+            return;
+        }
+        match self.selected_index() {
+            // The list shrank under the cursor: hold on to the last row.
+            Some(i) if i >= len => self.table_state.select(Some(len - 1)),
+            // Nothing was selected because the list was empty. Come back to
+            // the top: `s`/`x`/`d`/`r` act on the selected row, and the
+            // bottom one is not what someone who just opened the TUI (or
+            // whose sandboxes just reappeared) is looking at.
+            None => self.table_state.select(Some(0)),
+            Some(_) => {}
         }
     }
 
@@ -265,7 +297,51 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_console;
+    use super::{sanitize_console, App};
+    use mvm_common::{Sandbox, SandboxSpec};
+
+    fn sandbox(name: &str) -> Sandbox {
+        Sandbox::new(SandboxSpec {
+            name: Some(name.to_string()),
+            image: "alpine".into(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn selection_starts_on_the_first_row() {
+        let mut app = App::new();
+        assert_eq!(app.selected_index(), Some(0));
+        // A poll's worth of data arriving must not move it: whatever row the
+        // user is looking at is the row s/x/d/r act on.
+        app.sandboxes = vec![sandbox("newest"), sandbox("older")];
+        app.clamp_selection();
+        assert_eq!(app.selected_index(), Some(0));
+        assert_eq!(
+            app.selected_sandbox().map(|s| s.name().to_string()),
+            Some("newest".to_string())
+        );
+    }
+
+    #[test]
+    fn selection_recovers_when_the_list_shrinks() {
+        let mut app = App::new();
+        app.sandboxes = vec![sandbox("a"), sandbox("b"), sandbox("c")];
+        app.next();
+        app.next();
+        assert_eq!(app.selected_index(), Some(2));
+        app.sandboxes.truncate(1);
+        app.clamp_selection();
+        assert_eq!(app.selected_index(), Some(0));
+        // An empty list has nothing to act on.
+        app.sandboxes.clear();
+        app.clamp_selection();
+        assert_eq!(app.selected_index(), None);
+        // …and once sandboxes exist again, selection comes back to the top.
+        app.sandboxes = vec![sandbox("a"), sandbox("b")];
+        app.clamp_selection();
+        assert_eq!(app.selected_index(), Some(0));
+    }
 
     #[test]
     fn keeps_plain_text_and_newlines() {
