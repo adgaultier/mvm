@@ -509,10 +509,12 @@ impl Manager {
     /// A follow subscription ends (channel closes) when the shim exits; for
     /// a sandbox that is not running, only the backlog is returned so
     /// followers don't hang waiting for a future boot.
+    /// `tail` caps the backlog to that many trailing lines (`None` = all).
     pub fn logs(
         &self,
         id_or_name: &str,
         follow: bool,
+        tail: Option<usize>,
     ) -> Result<(Vec<u8>, Option<broadcast::Receiver<Bytes>>)> {
         let id = self.resolve(id_or_name)?;
         let sb_dir = self.inner.data_dir.sandbox_dir(&SandboxId::from(id.clone()));
@@ -529,7 +531,7 @@ impl Manager {
             None
         };
         let backlog = std::fs::read(sb_dir.join("console.log")).unwrap_or_default();
-        Ok((backlog, rx))
+        Ok((tail_lines(backlog, tail), rx))
     }
 
     /// Run a command inside a running sandbox via the guest agent.
@@ -908,6 +910,54 @@ impl SandboxEntry {
 
 fn pid_alive(pid: u32) -> bool {
     PathBuf::from(format!("/proc/{pid}")).exists()
+}
+
+/// Keep only the last `n` lines of console output. Console bytes are raw (a
+/// pty emits CRLF), so this splits on '\n' and keeps the separators.
+fn tail_lines(backlog: Vec<u8>, n: Option<usize>) -> Vec<u8> {
+    let Some(n) = n else { return backlog };
+    if n == 0 {
+        return Vec::new();
+    }
+    // Walk back over `n` line endings, ignoring one trailing newline.
+    let end = backlog.len().saturating_sub(1);
+    let mut seen = 0;
+    for (i, b) in backlog[..end].iter().enumerate().rev() {
+        if *b == b'\n' {
+            seen += 1;
+            if seen == n {
+                return backlog[i + 1..].to_vec();
+            }
+        }
+        if i == 0 {
+            break;
+        }
+    }
+    backlog
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail_lines;
+
+    #[test]
+    fn tail_keeps_the_last_lines() {
+        let log = b"a\nb\nc\n".to_vec();
+        assert_eq!(tail_lines(log.clone(), None), log);
+        assert_eq!(tail_lines(log.clone(), Some(0)), b"");
+        assert_eq!(tail_lines(log.clone(), Some(1)), b"c\n");
+        assert_eq!(tail_lines(log.clone(), Some(2)), b"b\nc\n");
+        // Asking for more lines than exist yields everything.
+        assert_eq!(tail_lines(log, Some(9)), b"a\nb\nc\n");
+    }
+
+    #[test]
+    fn tail_handles_a_partial_last_line() {
+        // A live shell's prompt has no trailing newline.
+        assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
+        assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
+        assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
+    }
 }
 
 /// SIGTERM, wait, then SIGKILL. Kills the whole process group (the shim is

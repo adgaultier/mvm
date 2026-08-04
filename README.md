@@ -87,16 +87,36 @@ libc you don't control.
 | `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` (`-i` attaches stdin to the console, `-t` gives the workload its own guest pty at your terminal's size, `-it` = interactive shell) |
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
-| `mvm start/stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |
+| `mvm start [-a] SANDBOX` | start a created/stopped sandbox (`-a` also attaches) |
+| `mvm attach [--no-stdin] SANDBOX` | attach the terminal to a running sandbox's console; detach with **ctrl-p ctrl-q** (the workload keeps running) |
+| `mvm stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |
 | `mvm resize SANDBOX [--cpus N] [-m MiB]` | change the VM's allocation; a microVM's size is fixed at boot, so this applies on next start (`--restart` reboots it now) |
 | `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
-| `mvm logs [-f] SANDBOX` | guest console output |
+| `mvm logs [-f] [-n N] SANDBOX` | guest console output (`-n` = last N lines) |
 | `mvm inspect SANDBOX` | full sandbox JSON |
 | `mvm-tui` | live dashboard (sandboxes, images, console); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts) |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
 `-w workdir`, `--keep`.
+
+Any command that takes a `SANDBOX` accepts its **id, a unique id prefix, or
+its `--name`** (names are unique; creating a second sandbox with a taken name
+is refused).
+
+`-i` and `-t` are properties of the sandbox, fixed at create time (as in
+docker) — `start` has no `-i`/`-t` of its own, it reuses what the sandbox was
+created with. So a long-lived interactive VM is:
+
+```console
+$ mvm create -it --name dev alpine sh    # or: mvm run -it --keep --name dev …
+$ mvm start dev                          # detached
+$ mvm attach dev                         # ctrl-p ctrl-q to leave it running
+```
+
+Note that **`mvm run` removes the sandbox when the workload exits** unless you
+pass `--keep` (the inverse of docker's `--rm` default), so `run --name foo`
+without `--keep` leaves nothing to `start` afterwards.
 
 ## HTTP API
 
@@ -106,7 +126,7 @@ GET    /api/v1/sandboxes                 POST   /api/v1/sandboxes
 GET    /api/v1/sandboxes/{id}            DELETE /api/v1/sandboxes/{id}
 POST   /api/v1/sandboxes/{id}/start      POST   /api/v1/sandboxes/{id}/stop
 POST   /api/v1/sandboxes/{id}/resize                  {"vcpus":N,"ram_mib":N}
-GET    /api/v1/sandboxes/{id}/logs?follow=bool        (raw console stream)
+GET    /api/v1/sandboxes/{id}/logs?follow=bool&tail=N (raw console stream)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]
 POST   /api/v1/sandboxes/{id}/exec/{session}/resize   {"cols":N,"rows":N}

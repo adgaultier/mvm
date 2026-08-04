@@ -44,8 +44,24 @@ enum Command {
         #[arg(short, long)]
         all: bool,
     },
-    /// Start a created/stopped sandbox.
-    Start { sandbox: String },
+    /// Start a created/stopped sandbox (by id, id prefix, or name).
+    Start {
+        sandbox: String,
+        /// Attach to the console after starting (like `mvm attach`).
+        #[arg(short, long)]
+        attach: bool,
+    },
+    /// Attach the terminal to a running sandbox's console.
+    ///
+    /// Detach with ctrl-p ctrl-q, which leaves the workload running; whether
+    /// stdin is forwarded and whether the workload has a pty were fixed when
+    /// the sandbox was created (`-i` / `-t`).
+    Attach {
+        sandbox: String,
+        /// Stream output only; don't forward local stdin.
+        #[arg(long)]
+        no_stdin: bool,
+    },
     /// Stop a running sandbox.
     Stop { sandbox: String },
     /// Change a sandbox's vcpu/RAM allocation (applies on next start).
@@ -76,6 +92,9 @@ enum Command {
         /// Follow log output.
         #[arg(short, long)]
         follow: bool,
+        /// Show only the last N lines.
+        #[arg(short = 'n', long)]
+        tail: Option<usize>,
     },
     /// Execute a command inside a running sandbox.
     Exec {
@@ -126,11 +145,12 @@ pub(crate) struct BoxArgs {
     /// Keep the sandbox after the workload exits (run only).
     #[arg(long)]
     keep: bool,
-    /// Attach local stdin to the guest console (run only).
+    /// Keep the guest console's stdin open and forward local stdin to it.
+    /// Recorded in the spec, so a `create`d sandbox stays attachable later.
     #[arg(short, long)]
     interactive: bool,
-    /// Treat the console as a terminal: raw mode locally (run only,
-    /// combine with -i).
+    /// Give the workload its own guest pty (and use raw mode locally while
+    /// attached). Combine with -i for a shell.
     #[arg(short, long)]
     tty: bool,
 }
@@ -220,11 +240,15 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             }
             Ok(0)
         }
-        Command::Start { sandbox } => {
+        Command::Start { sandbox, attach } => {
             let sb = client.start_sandbox(&sandbox)?;
+            if attach {
+                return run::attach(client, &sandbox, false);
+            }
             println!("{}", sb.id);
             Ok(0)
         }
+        Command::Attach { sandbox, no_stdin } => run::attach(client, &sandbox, no_stdin),
         Command::Stop { sandbox } => {
             let sb = client.stop_sandbox(&sandbox)?;
             println!("{}", sb.id);
@@ -272,8 +296,8 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             );
             Ok(0)
         }
-        Command::Logs { sandbox, follow } => {
-            let mut resp = client.logs(&sandbox, follow)?;
+        Command::Logs { sandbox, follow, tail } => {
+            let mut resp = client.logs(&sandbox, follow, tail)?;
             let mut out = std::io::stdout();
             std::io::copy(&mut resp, &mut out).map_err(|e| e.to_string())?;
             Ok(0)

@@ -79,9 +79,14 @@ temp file with incremental hashing instead — matters for images like
 
 ## Done
 
-- **E2E integration** — 42/42 on real KVM in rootless userns mode with the
+- **E2E integration** — 49/49 on real KVM in rootless userns mode with the
   overlay driver, gvproxy v0.8.9 installed (2026-08-04); 21/21 at the
   original pass (2026-08-01).
+- **Attach** — `mvm attach [--no-stdin] SANDBOX` and `mvm start -a`, so an
+  interactive sandbox no longer has to be driven by the `run` that created
+  it. `-i`/`-t` stay create-time properties (docker parity) and attach reads
+  them off the spec; ctrl-p ctrl-q detaches without sending EOF; the replayed
+  backlog is capped (`logs -n N` / `?tail=N` on the logs route).
 - **Networking validated end to end** — the gvproxy host-to-guest
   forwarding question is closed: one gvproxy vfkit datagram endpoint serves
   exactly one VM (it learns its peer from the first packet and never

@@ -59,6 +59,11 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
   `tap:<dev>` = pre-provisioned TAP.
 - **No CPU/RAM hot-plug.** `mvm resize` / the TUI's `r` form rewrite the
   spec; the allocation changes at the next boot, not live.
+- **`-i`/`-t` are create-time properties** (docker parity): `attach_stdin`
+  decides whether the daemon keeps the console's write end, `tty` whether the
+  workload gets a guest pty. `start` therefore takes no `-i`/`-t` — attaching
+  is the per-client choice (`mvm attach`, `mvm start -a`), and it reads both
+  flags off the spec so a client can never contradict the running VM.
 
 ## Data layout (`~/.local/share/mvm`, root: `/var/lib/mvm`, `$MVM_DATA_DIR`)
 
@@ -135,6 +140,11 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
   canonical adds an echo, buffers input until Enter, and steals ^C. Only
   the innermost pty — the workload's — should be cooked; the shim pty and
   the bridged console are `cfmakeraw`'d.
+- **A detach cannot unwind through the log stream.** The blocking read on the
+  follow stream can't be interrupted, so the stdin thread leaves the process
+  itself — which skips `RawTermGuard`'s `Drop`. The saved termios therefore
+  lives in a static that both paths restore from (`restore_terminal`);
+  forgetting that leaves the user's shell in raw mode.
 - **`std::io::stdout()` is a `LineWriter`.** `io::copy` into it holds
   anything without a trailing newline (shell prompts, raw-mode echo) until
   the next `\n` or process exit — which is exactly what a frozen terminal

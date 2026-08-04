@@ -92,6 +92,11 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
 
     if !keep {
         client.remove_sandbox(&id)?;
+        // A name only outlives the run with --keep. Say so, or `mvm start
+        // <name>` afterwards just reports "sandbox not found".
+        if let Some(name) = &spec.name {
+            eprintln!("mvm: sandbox '{name}' removed on exit (use --keep to start it again)");
+        }
     } else {
         println!("sandbox {id} kept (state: exited)");
     }
@@ -100,7 +105,69 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
 
 fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Result<i32, String> {
     client.start_sandbox(id)?;
+    // No detach keys here: `run` owns the sandbox's lifetime (it removes it
+    // unless --keep), so leaving the workload behind would orphan it. And no
+    // backlog cap — this console starts empty.
+    console_session(client, id, interactive, tty, None, None)
+}
 
+/// Attach to the console of an already-running sandbox, docker-attach style.
+///
+/// Whether stdin can be forwarded is fixed at creation (`-i` opens the
+/// console's write end in the daemon), as is whether the workload sits on a
+/// guest pty (`-t`); this reads both off the spec rather than taking flags
+/// that could contradict the VM it is attaching to.
+pub fn attach(client: &Client, sandbox: &str, no_stdin: bool) -> Result<i32, String> {
+    let sb = client.get_sandbox(sandbox)?;
+    let id = sb.id.to_string();
+    if !sb.state.is_alive() {
+        return Err(format!(
+            "sandbox {} is {} — start it first (`mvm start -a {sandbox}` does both)",
+            sb.name(),
+            sb.state
+        ));
+    }
+
+    let interactive = !no_stdin && sb.spec.attach_stdin;
+    if !no_stdin && !sb.spec.attach_stdin {
+        eprintln!(
+            "mvm: {} was created without -i, so its console stdin is closed; attaching read-only",
+            sb.name()
+        );
+    }
+    // The escape sequence only works when we own a raw local terminal and can
+    // actually send keys; otherwise ^C is the only way out and saying
+    // "ctrl-p ctrl-q" would be a lie.
+    let local_tty = unsafe { libc::isatty(0) == 1 };
+    let detach = (interactive && sb.spec.tty && local_tty).then_some(DETACH_KEYS);
+    eprintln!(
+        "mvm: attached to {} — detach with {}",
+        sb.name(),
+        if detach.is_some() { "ctrl-p ctrl-q" } else { "ctrl-c" }
+    );
+    console_session(
+        client,
+        &id,
+        interactive,
+        sb.spec.tty,
+        detach,
+        Some(ATTACH_TAIL_LINES),
+    )
+}
+
+/// ^P ^Q — docker's default detach sequence.
+const DETACH_KEYS: [u8; 2] = [0x10, 0x11];
+
+/// Bridge the local terminal to a running sandbox's console until the VM
+/// exits (or the user types `detach`, when set), then report the exit code.
+fn console_session(
+    client: &Client,
+    id: &str,
+    interactive: bool,
+    tty: bool,
+    detach: Option<[u8; 2]>,
+    backlog_tail: Option<usize>,
+) -> Result<i32, String> {
     // Raw mode while attached (interactive tty runs); restored by Drop.
     // The guest console is a tty with echo, so keystrokes render from the
     // guest side, docker-style.
@@ -109,22 +176,49 @@ fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Resu
     } else {
         None
     };
+    let raw_active = _raw.is_some();
 
     // Pump local stdin into the guest console.
     if interactive {
         let stdin_client = Client::new(client.base());
         let sid = id.to_string();
+        let name = id.to_string();
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin();
             let mut chunk = [0u8; 4096];
+            // Detach scanning only makes sense on a raw tty; a pipe must stay
+            // byte-exact (binaries travel through here).
+            let mut scanner = detach
+                .filter(|_| raw_active)
+                .map(|keys| DetachScanner::new(keys));
             loop {
-                match stdin.read(&mut chunk) {
+                let n = match stdin.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdin_client.sandbox_stdin(&sid, chunk[..n].to_vec()).is_err() {
-                            break;
+                    Ok(n) => n,
+                };
+                let payload = match scanner.as_mut() {
+                    None => chunk[..n].to_vec(),
+                    Some(scanner) => match scanner.feed(&chunk[..n]) {
+                        Scanned::Pass(bytes) => bytes,
+                        Scanned::Detached(bytes) => {
+                            if !bytes.is_empty() {
+                                let _ = stdin_client.sandbox_stdin(&name, bytes);
+                            }
+                            // The log stream blocks in the main thread and
+                            // cannot be interrupted, so leave from here —
+                            // after putting the terminal back by hand, since
+                            // exiting skips the guard's Drop.
+                            restore_terminal();
+                            eprintln!("\r\nmvm: detached (sandbox still running)");
+                            std::process::exit(0);
                         }
-                    }
+                    },
+                };
+                if payload.is_empty() {
+                    continue;
+                }
+                if stdin_client.sandbox_stdin(&name, payload).is_err() {
+                    break;
                 }
             }
             let _ = stdin_client.sandbox_stdin_eof(&sid);
@@ -139,7 +233,10 @@ fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Resu
     // hold anything not ending in '\n' — including shell prompts and, in
     // raw mode where there is no local echo, every keystroke echoed back by
     // the guest. That looks exactly like a hung terminal.
-    let mut resp = client.logs(id, true)?;
+    //
+    // An attach replays only the last screenful of console: enough to land on
+    // a prompt without dumping the whole history of a long-lived sandbox.
+    let mut resp = client.logs(id, true, backlog_tail)?;
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 8192];
     loop {
@@ -163,8 +260,68 @@ fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Resu
     Err("sandbox still running after log stream ended".into())
 }
 
+/// How much console history an `attach` replays before going live.
+const ATTACH_TAIL_LINES: usize = 40;
+
+/// Watches stdin for the detach sequence, holding back a partial match so the
+/// first key never reaches the guest on its own. A doubled first key (^P^P)
+/// passes one literal through, as docker does.
+struct DetachScanner {
+    keys: [u8; 2],
+    pending: bool,
+}
+
+enum Scanned {
+    /// Bytes to forward.
+    Pass(Vec<u8>),
+    /// Detach requested; forward these bytes first, then leave.
+    Detached(Vec<u8>),
+}
+
+impl DetachScanner {
+    fn new(keys: [u8; 2]) -> Self {
+        Self { keys, pending: false }
+    }
+
+    fn feed(&mut self, input: &[u8]) -> Scanned {
+        let mut out = Vec::with_capacity(input.len() + 1);
+        for &b in input {
+            if self.pending {
+                self.pending = false;
+                if b == self.keys[1] {
+                    return Scanned::Detached(out);
+                }
+                out.push(self.keys[0]);
+                if b == self.keys[0] {
+                    continue; // ^P^P -> one literal ^P
+                }
+                out.push(b);
+            } else if b == self.keys[0] {
+                self.pending = true;
+            } else {
+                out.push(b);
+            }
+        }
+        Scanned::Pass(out)
+    }
+}
+
+/// The terminal settings to put back, shared because a detach leaves from a
+/// helper thread and never runs the guard's `Drop`.
+static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+
+/// Undo raw mode, once, whoever gets there first.
+fn restore_terminal() {
+    let Ok(mut saved) = ORIGINAL_TERMIOS.lock() else { return };
+    if let Some(term) = saved.take() {
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &term);
+        }
+    }
+}
+
 /// Restores the local terminal on drop (raw mode for `exec -it`).
-struct RawTermGuard(libc::termios);
+struct RawTermGuard;
 
 impl RawTermGuard {
     /// Put the local terminal into raw mode; None when stdin isn't a tty.
@@ -186,16 +343,15 @@ impl RawTermGuard {
             if libc::tcsetattr(0, libc::TCSANOW, &term) != 0 {
                 return None;
             }
-            Some(Self(orig))
+            *ORIGINAL_TERMIOS.lock().ok()? = Some(orig);
+            Some(Self)
         }
     }
 }
 
 impl Drop for RawTermGuard {
     fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.0);
-        }
+        restore_terminal();
     }
 }
 

@@ -101,7 +101,7 @@ async fn logs(
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
 ) -> Result<Response, ApiError> {
-    let (backlog, rx) = state.manager.logs(&id, q.follow)?;
+    let (backlog, rx) = state.manager.logs(&id, q.follow, q.tail)?;
 
     let backlog_stream = stream::once(async move { Ok::<Bytes, Infallible>(Bytes::from(backlog)) });
 

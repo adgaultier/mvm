@@ -103,13 +103,21 @@ impl Client {
     }
 
     /// Streaming logs.
-    pub fn logs(&self, id: &str, follow: bool) -> Result<reqwest::blocking::Response, String> {
-        let resp = self
+    /// `tail` caps the replayed backlog to that many trailing lines.
+    pub fn logs(
+        &self,
+        id: &str,
+        follow: bool,
+        tail: Option<usize>,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let mut req = self
             .http
             .get(format!("{}/api/v1/sandboxes/{id}/logs", self.base))
-            .query(&[("follow", follow.to_string())])
-            .send()
-            .map_err(|e| e.to_string())?;
+            .query(&[("follow", follow.to_string())]);
+        if let Some(tail) = tail {
+            req = req.query(&[("tail", tail.to_string())]);
+        }
+        let resp = req.send().map_err(|e| e.to_string())?;
         Self::expect(resp, &[200])
     }
 

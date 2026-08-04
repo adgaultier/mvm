@@ -52,6 +52,9 @@ pub struct ErrorResponse {
 pub struct LogsQuery {
     #[serde(default)]
     pub follow: bool,
+    /// Cap the backlog to this many trailing lines (absent = the whole log).
+    #[serde(default)]
+    pub tail: Option<usize>,
 }
 
 /// Query for the exec stdin endpoint.
