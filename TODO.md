@@ -61,7 +61,84 @@ sentinels and the host injects at the network boundary.
 
 Non-goals for now: console-log secret redaction; Windows/macOS keychains.
 
-## 3. Live window resize for `mvm run -it` / `mvm attach`
+## 3. Agent gateway — knative-style activation in front of mvm
+Internal company tool (not client-facing): one long-lived agent per
+user/project, reachable at a stable URL, woken on demand and stopped when
+idle. Traefik does ingress/TLS/auth-forwarding only; the gateway owns compute
+lifecycle. Separate crate, one host to start with.
+
+```
+client -> Traefik (*.agents.corp, TLS, forward-auth)
+       -> agent gateway :8080  (activation + reverse proxy)
+       -> 127.0.0.1:<agent port> -> mvm sandbox -> opencode :4096
+```
+
+**Decisions taken.** One host: gateway and `mvm serve` colocated, daemon on
+loopback, ports allocated locally — a 64 GB box holds 30–60 agents at
+512 MiB–1 GiB. Going multi-host turns the gateway into a scheduler (capacity,
+workspace placement) and needs auth on mvm's API, so treat it as a separate
+project, not a config flag. A host port per agent is accepted: allocate at
+*create* (mvm's `ports` are create-time only), store it on the agent record,
+own it for the agent's life, release on delete. `agent_id` **is** the mvm
+sandbox name — names are unique and resolvable by name/id/prefix, so no
+mapping table. mvm owns lifecycle state (`GET /sandboxes/{id}`); the gateway's
+DB holds only what mvm cannot know: owner, viewers, host port, `last_used_at`,
+quotas, image pin. Reconcile against mvm on startup.
+
+**Where knative's model does not fit, and it matters.** Knative assumes
+request-scoped work: no traffic means nothing is happening. An agent can spend
+ten minutes editing files and running tests with no HTTP traffic at all, so
+idle-by-traffic kills working agents and looks random. Idle must mean *no HTTP
+activity **and** no active work*, with "active work" coming from the workload
+(an opencode `/status`) or from `mvm exec <id>` inspecting the guest. Likewise
+`last_used_at` must be bumped when a stream *completes*, or a 20-minute SSE
+response gets its VM shut out from under it.
+
+**Phases.**
+1. Stable URL + forward-auth; proxy to an already-running agent; agent
+   registry with port allocation. Streaming, WebSockets, long requests,
+   cancellation, no response buffering.
+2. Activation: per-agent startup lock so concurrent requests coalesce onto one
+   start; wait for the workload's own health endpoint; explicit activation
+   budget with 503 + `Retry-After` past it. Measure workload-ready time from
+   day one — VM boot is ~250 ms, the workload is the real cost, and activation
+   latency is the SLA.
+3. `agentctl shell|logs|status` — mvm's `exec -it`/`attach` over vsock work
+   even with `--net none`, and console/exit-code/uptime are already in the
+   API. This is the feature that makes the platform supportable, and no
+   competitor to it has anything comparable; do not leave it for last.
+4. Admission control: per-user concurrent cap, global memory budget, queue
+   with a visible "waiting for capacity" state, per-agent size via
+   `mvm resize`. Then idle shutdown (per the work-detection rule above),
+   crash-loop backoff, and metrics: activation count/latency histogram,
+   per-agent memory.
+5. `agentctl upgrade <id> --image X` as a first-class verb: create a new
+   sandbox with the same workspace volume, verify healthy, delete the old.
+   mvm specs are immutable apart from cpu/ram, so done ad hoc this loses work.
+
+**Networking.** Start with `--net tsi`: zero setup, `-p` maps work, one less
+process per VM. Switch to `--net gvproxy` (one per sandbox) when egress policy
+matters — inside a corp network a hallucinating agent reaching internal
+services is the real risk, and only gvproxy can hold an allowlist.
+
+**Secrets.** Depends on item 2. Cheapest large win first: per-agent GitHub App
+installation tokens (hour-scoped) instead of long-lived PATs. LLM-generated
+code inside the VM can read its own environment, so item 2's Milestone B
+(sentinel + host proxy over vsock) is the real answer for API keys — and it
+shares the vsock bridge with everything else here.
+
+**Deliberately not doing.** A multi-backend `VMManager` abstraction
+(Firecracker/Cloud Hypervisor/Docker): one runtime exists, and a lowest-common
+-denominator interface would forfeit exec-over-vsock and per-sandbox gvproxy.
+Keep the four operations as a module boundary; extract a trait if a second
+backend ever appears. Also no separate `status` column duplicating mvm's.
+
+**Blocked on / related:** item 1 (the opencode image runs as `agent`, mvm runs
+everything as root), item 2 (secrets), item 7 (a 750 MB image spikes RAM by
+its layer size on a box also running 40 VMs). A watch/SSE endpoint on
+`/sandboxes` would beat polling once agent counts grow.
+
+## 4. Live window resize for `mvm run -it` / `mvm attach`
 The workload pty boots at the client's size and TERM is forwarded, but the
 size is fixed for the session: resizing the terminal mid-run leaves the guest
 on the old geometry (exec -it has full resize). `attach` is worse — it uses
@@ -71,7 +148,7 @@ Resize message (the protocol's is keyed to an exec session) plus TIOCSWINSZ on
 the workload pty in the agent, with `run`/`attach` polling `term_size()` the
 way `exec` does.
 
-## 4. Guest ptys are not reachable by path (`ttyname` fails)
+## 5. Guest ptys are not reachable by path (`ttyname` fails)
 Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
 workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
 `/dev/pts/0`: three devpts instances end up stacked on `/dev/pts` (libkrun's
@@ -81,7 +158,7 @@ shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
 a usable existing instance instead of stacking another; check what ptmxmode
 that leaves for non-root workloads before changing it.
 
-## 5. Decide `run`'s lifetime default
+## 6. Decide `run`'s lifetime default
 `mvm run` removes the sandbox when the workload exits unless `--keep`, the
 inverse of docker (`run` keeps; `--rm` removes). It reads as "naming does not
 work": `run --name foo …` then `mvm start foo` says not found, which is why
@@ -89,13 +166,13 @@ the CLI now prints a notice when it removes a named sandbox. Either keep the
 current default and leave the notice, or flip to docker semantics with `--rm`
 (`--keep` staying as a no-op alias) — a breaking change for scripts.
 
-## 6. Pull memory usage
+## 7. Pull memory usage
 Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
 unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## 7. TUI: render guest colours in the console pane
+## 8. TUI: render guest colours in the console pane
 The pane is plain text since escapes are stripped at the edge. Showing colours
 means parsing SGR into ratatui spans (`ansi-to-tui`-style) — never by passing
 escapes through, which is what let the guest drive the user's terminal.
