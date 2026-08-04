@@ -45,8 +45,7 @@ impl Client {
         self.action(id, "stop")
     }
 
-    /// Change the sandbox's vcpu/RAM allocation. Unlike start/stop this
-    /// surfaces the daemon's error body: the values come from user input.
+    /// Change the sandbox's vcpu/RAM allocation.
     pub fn resize(&self, id: &str, vcpus: u8, ram_mib: u32) -> Result<Sandbox, String> {
         let resp = self
             .http()
@@ -57,30 +56,42 @@ impl Client {
             })
             .send()
             .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(resp
-                .json::<mvm_common::api::ErrorResponse>()
-                .map(|e| e.error)
-                .unwrap_or_else(|_| format!("resize failed ({status})")));
-        }
-        resp.json().map_err(|e| e.to_string())
+        Self::check(resp, "resize")?.json().map_err(|e| e.to_string())
     }
 
     pub fn remove(&self, id: &str) -> Result<(), String> {
-        self.http()
+        let resp = self
+            .http()
             .delete(format!("{}/api/v1/sandboxes/{id}", self.base))
             .send()
             .map_err(|e| e.to_string())?;
-        Ok(())
+        Self::check(resp, "remove").map(|_| ())
+    }
+
+    /// Turn a non-2xx response into the daemon's own message. Swallowing these
+    /// let the TUI report success for work that never happened — a refused
+    /// start would still have said "restarted".
+    fn check(
+        resp: reqwest::blocking::Response,
+        what: &str,
+    ) -> Result<reqwest::blocking::Response, String> {
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        let status = resp.status();
+        Err(resp
+            .json::<mvm_common::api::ErrorResponse>()
+            .map(|e| e.error)
+            .unwrap_or_else(|_| format!("{what} failed ({status})")))
     }
 
     fn action(&self, id: &str, action: &str) -> Result<(), String> {
-        self.http()
+        let resp = self
+            .http()
             .post(format!("{}/api/v1/sandboxes/{id}/{action}", self.base))
             .send()
             .map_err(|e| e.to_string())?;
-        Ok(())
+        Self::check(resp, action).map(|_| ())
     }
 
     /// Non-following log fetch (periodic refresh approach). Only the tail is

@@ -231,6 +231,12 @@ fn apply_resize(
     let label = form.label.clone();
     let running = form.running;
     app.resize = None;
+    if running && restart {
+        // The VM is only down for ~100ms, far less than the 1.5s poll, so the
+        // table never shows "stopped" — without this the reboot is invisible
+        // and looks like nothing happened.
+        app.set_notice(format!("restarting {label}…"), false);
+    }
 
     let c = client.clone();
     let t = tx.clone();
