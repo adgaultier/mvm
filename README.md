@@ -94,7 +94,7 @@ libc you don't control.
 | `mvm-tui` | live dashboard (sandboxes, images, console) |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
-`-p host:guest`, `--net none|gvproxy|tap:<dev>`, `--cpus N`, `-m MiB`,
+`-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
 `-w workdir`, `--keep`.
 
 ## HTTP API
@@ -142,16 +142,32 @@ defined in `crates/common/src/protocol.rs`.
     setup** (no proxy, no NIC, no root), plus `-p` port maps. The guest
     shares the host's network identity; use `gvproxy` when you want NAT
     separation.
-  - `gvproxy[:<socket>]`: rootless userspace NAT (the same stack podman
-    machine uses). Outbound internet plus `-p host:guest` port forwards.
-    Needs a gvproxy listening in **vfkit** mode (libkrun speaks the vfkit
-    datagram protocol — not `-listen-qemu`):
+  - `gvproxy`: rootless userspace NAT (the same stack podman machine uses).
+    Outbound internet plus `-p host:guest` port forwards, with no setup
+    beyond having the `gvproxy` binary on `PATH` (`MVM_GVPROXY_BIN`
+    overrides): the daemon starts a **private gvproxy per sandbox** and
+    stops it with the sandbox.
+
+    ```console
+    $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
+    ```
+
+    One per sandbox is not a luxury — a gvproxy vfkit datagram endpoint
+    learns its peer from the first packet and never re-learns, so a shared
+    socket serves the first VM and silently leaves every later one with no
+    route at all (and all guests boot on the same static address anyway).
+
+    `gvproxy:<socket>` attaches to a gvproxy you run yourself instead — one
+    sandbox per instance, listening in **vfkit** mode (libkrun speaks the
+    vfkit datagram protocol — not `-listen-qemu`), with
+    `MVM_GVPROXY_CONTROL` pointing at its `-listen` socket if you want port
+    forwards:
 
     ```console
     $ gvproxy -listen unix:///run/gvproxy/control.sock \
         -listen-vfkit unixgram:///run/gvproxy/gvproxy.sock &
     $ export MVM_GVPROXY_CONTROL=/run/gvproxy/control.sock
-    $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
+    $ mvm run --net gvproxy:/run/gvproxy/gvproxy.sock alpine ...
     ```
 
     Port mappings are registered through gvproxy's HTTP control API. On Linux,

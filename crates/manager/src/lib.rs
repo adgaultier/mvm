@@ -38,6 +38,9 @@ struct SandboxEntry {
     /// Write end of the guest console (attach_stdin sandboxes only).
     /// Shared so writes happen outside the registry lock.
     console_stdin: Option<Arc<Mutex<File>>>,
+    /// gvproxy started by us for this sandbox (`--net gvproxy` without an
+    /// explicit socket); lives exactly as long as the VM.
+    gvproxy: Option<gvproxy::Gvproxy>,
     stop_requested: bool,
 }
 
@@ -50,6 +53,7 @@ impl SandboxEntry {
             agent: None,
             exec_sessions: HashMap::new(),
             console_stdin: None,
+            gvproxy: None,
             stop_requested: false,
         }
     }
@@ -92,6 +96,14 @@ impl Manager {
                         Some(pid) if pid_alive(pid) => SandboxState::Failed,
                         _ => SandboxState::Stopped,
                     };
+                }
+                // A gvproxy outlives the daemon that spawned it; without the
+                // VM it serves it is just a process holding host ports.
+                if let Some(pid) = sb.gvproxy_pid.take() {
+                    if pid_alive(pid) {
+                        tracing::info!(sandbox = %sb.id, pid, "reaping orphaned gvproxy");
+                        gvproxy::kill(pid);
+                    }
                 }
                 sandboxes.insert(sb.id.to_string(), SandboxEntry::new(sb));
             }
@@ -205,7 +217,29 @@ impl Manager {
             None => None,
         };
 
-        // 4. Build the shim config.
+        // 4. Networking: `--net gvproxy` without a socket means we own the
+        // gvproxy. One vfkit datagram socket only ever serves one VM, so it
+        // has to be per-sandbox and torn down with it.
+        let gvproxy = match &spec.network {
+            mvm_common::NetworkMode::Gvproxy { socket: None } => Some(gvproxy::spawn(&sb_dir)?),
+            _ => None,
+        };
+        let network = match (&spec.network, &gvproxy) {
+            (mvm_common::NetworkMode::Gvproxy { socket: None }, Some(gv)) => {
+                mvm_common::NetworkMode::Gvproxy {
+                    socket: Some(gv.vfkit.clone()),
+                }
+            }
+            (other, _) => other.clone(),
+        };
+        // Port forwards go through the gvproxy that actually carries this
+        // sandbox's traffic: ours if we started one, else the caller's.
+        let gvproxy_control = match &gvproxy {
+            Some(gv) => Some(gv.control.clone()),
+            None => self.inner.gvproxy_control.clone(),
+        };
+
+        // 5. Build the shim config.
         let exec = image.config.resolve_command(&spec.command);
         let mut env = image.config.env.clone();
         env.extend(spec.env.iter().cloned());
@@ -219,7 +253,7 @@ impl Manager {
             workdir,
             vcpus: spec.vcpus,
             ram_mib: spec.ram_mib,
-            network: spec.network.clone(),
+            network,
             ports: spec.ports.clone(),
             mounts: spec.mounts.clone(),
             agent_socket: agent_socket.clone(),
@@ -227,14 +261,29 @@ impl Manager {
             console_size: spec.tty_size,
         };
 
-        // 5. Register gvproxy port forwards before booting the guest.
-        let gvproxy_ports = self.configure_gvproxy_ports(&spec).await?;
+        // 6. Register gvproxy port forwards before booting the guest.
+        let gvproxy_ports = match self
+            .configure_gvproxy_ports(&spec, gvproxy_control.as_deref())
+            .await
+        {
+            Ok(ports) => ports,
+            Err(error) => {
+                if let Some(gv) = gvproxy {
+                    tokio::task::spawn_blocking(move || gv.shutdown());
+                }
+                return Err(error);
+            }
+        };
 
-        // 6. Spawn the shim.
+        // 7. Spawn the shim.
         let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin) {
             Ok(handle) => handle,
             Err(error) => {
-                self.remove_gvproxy_ports(gvproxy_ports).await;
+                self.remove_gvproxy_ports(gvproxy_ports, gvproxy_control.as_deref())
+                    .await;
+                if let Some(gv) = gvproxy {
+                    tokio::task::spawn_blocking(move || gv.shutdown());
+                }
                 return Err(error);
             }
         };
@@ -272,10 +321,12 @@ impl Manager {
             let entry = sandboxes.get_mut(&id).unwrap();
             entry.info.state = SandboxState::Running;
             entry.info.pid = Some(pid);
+            entry.info.gvproxy_pid = gvproxy.as_ref().map(|gv| gv.pid());
             entry.info.started_at = Some(chrono::Utc::now());
             entry.info.finished_at = None;
             entry.info.exit_code = None;
             entry.console_stdin = console_stdin;
+            entry.gvproxy = gvproxy;
             entry.stop_requested = false;
         }
         self.persist()?;
@@ -597,10 +648,12 @@ impl Manager {
 
     /// Called by the watcher task when the shim process exits.
     fn on_shim_exit(&self, id: &str, status: Option<std::process::ExitStatus>) {
+        // Only a gvproxy we don't own needs its forwards unwound by hand; ours
+        // takes them with it when it dies.
         let ports = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             sandboxes.get(id).and_then(|entry| {
-                if matches!(entry.info.spec.network, mvm_common::NetworkMode::Gvproxy { .. })
+                if matches!(entry.info.spec.network, mvm_common::NetworkMode::Gvproxy { socket: Some(_) })
                     && !entry.info.spec.ports.is_empty()
                 {
                     Some(entry.info.spec.ports.clone())
@@ -610,7 +663,10 @@ impl Manager {
             })
         };
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
+        let mut dead_gvproxy = None;
         if let Some(entry) = sandboxes.get_mut(id) {
+            dead_gvproxy = entry.gvproxy.take();
+            entry.info.gvproxy_pid = None;
             let code = status.and_then(|s| s.code());
             entry.info.pid = None;
             entry.info.finished_at = Some(chrono::Utc::now());
@@ -633,22 +689,33 @@ impl Manager {
             tracing::info!(sandbox = %id, state = %entry.info.state, "shim exited");
         }
         drop(sandboxes);
+        // Outside the registry lock: shutdown waits for the process to go.
+        if let Some(gv) = dead_gvproxy {
+            tokio::task::spawn_blocking(move || gv.shutdown());
+        }
         let _ = self.persist();
         if let Some(ports) = ports {
             let mgr = self.clone();
-            tokio::spawn(async move { mgr.remove_gvproxy_ports(Some(ports)).await });
+            let control = self.inner.gvproxy_control.clone();
+            tokio::spawn(async move {
+                mgr.remove_gvproxy_ports(Some(ports), control.as_deref()).await
+            });
         }
     }
 
-    async fn configure_gvproxy_ports(&self, spec: &SandboxSpec) -> Result<Option<Vec<String>>> {
+    async fn configure_gvproxy_ports(
+        &self,
+        spec: &SandboxSpec,
+        control: Option<&std::path::Path>,
+    ) -> Result<Option<Vec<String>>> {
         if !matches!(spec.network, mvm_common::NetworkMode::Gvproxy { .. })
             || spec.ports.is_empty()
         {
             return Ok(None);
         }
-        let control = self.inner.gvproxy_control.clone().ok_or_else(|| {
+        let control = control.map(|c| c.to_path_buf()).ok_or_else(|| {
             Error::Network(
-                "gvproxy port mappings require MVM_GVPROXY_CONTROL pointing to gvproxy's --listen Unix socket".into(),
+                "gvproxy port mappings need a control socket: use `--net gvproxy` (daemon-managed) or set MVM_GVPROXY_CONTROL for your own gvproxy".into(),
             )
         })?;
         let ports = spec
@@ -662,9 +729,13 @@ impl Manager {
         Ok(Some(spec.ports.clone()))
     }
 
-    async fn remove_gvproxy_ports(&self, mappings: Option<Vec<String>>) {
+    async fn remove_gvproxy_ports(
+        &self,
+        mappings: Option<Vec<String>>,
+        control: Option<&std::path::Path>,
+    ) {
         let Some(mappings) = mappings else { return };
-        let Some(control) = self.inner.gvproxy_control.clone() else { return };
+        let Some(control) = control.map(|c| c.to_path_buf()) else { return };
         let ports = mappings
             .iter()
             .filter_map(|p| mvm_network::parse_port_map(p).ok())

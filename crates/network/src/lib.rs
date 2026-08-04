@@ -12,7 +12,33 @@ pub fn validate(mode: &NetworkMode) -> Result<()> {
         NetworkMode::None => Ok(()),
         // TSI is provided by the libkrunfw kernel; nothing to check host-side.
         NetworkMode::Tsi => Ok(()),
-        NetworkMode::Gvproxy { socket } => {
+        // No socket given: the daemon starts a private gvproxy per sandbox, so
+        // all that must hold is that the binary is runnable.
+        NetworkMode::Gvproxy { socket: None } => {
+            let bin = std::env::var_os("MVM_GVPROXY_BIN")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("gvproxy"));
+            if bin.components().count() > 1 {
+                return if bin.exists() {
+                    Ok(())
+                } else {
+                    Err(Error::Network(format!(
+                        "MVM_GVPROXY_BIN points at {}, which does not exist",
+                        bin.display()
+                    )))
+                };
+            }
+            if in_path(&bin) {
+                Ok(())
+            } else {
+                Err(Error::Network(
+                    "gvproxy not found in PATH; install it (containers/gvisor-tap-vsock), \
+                     set MVM_GVPROXY_BIN, or point --net gvproxy:<socket> at a running one"
+                        .into(),
+                ))
+            }
+        }
+        NetworkMode::Gvproxy { socket: Some(socket) } => {
             if socket.exists() {
                 Ok(())
             } else {
@@ -35,6 +61,12 @@ pub fn validate(mode: &NetworkMode) -> Result<()> {
             }
         }
     }
+}
+
+/// Is `name` an executable somewhere on PATH?
+fn in_path(name: &std::path::Path) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
 }
 
 /// Parse a "hostPort:guestPort[/proto]" mapping (docker -p syntax, subset).

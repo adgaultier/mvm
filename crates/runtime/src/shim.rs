@@ -91,6 +91,11 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             ctx.set_port_map(&config.ports)?;
         }
         NetworkMode::Gvproxy { socket } => {
+            // The daemon resolves managed gvproxy to a concrete socket before
+            // writing shim.json; nothing else can boot this VM's NIC.
+            let socket = socket.as_ref().ok_or_else(|| {
+                mvm_common::Error::Network("gvproxy socket missing from shim config".into())
+            })?;
             ctx.set_gvproxy(socket)?;
         }
         NetworkMode::Tap { name } => {

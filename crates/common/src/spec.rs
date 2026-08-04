@@ -14,8 +14,15 @@ pub enum NetworkMode {
     /// libkrun's native TSI backend: transparent socket impersonation —
     /// guest sockets are serviced by the host, no NIC, no extra setup.
     Tsi,
-    /// Userspace NAT via gvproxy (requires gvproxy binary).
-    Gvproxy { socket: PathBuf },
+    /// Userspace NAT via gvproxy (requires the gvproxy binary). `None` = the
+    /// daemon runs a private gvproxy for this sandbox; `Some(path)` = attach
+    /// to a gvproxy the caller started. One gvproxy vfkit socket serves
+    /// exactly one VM (see the Gvproxy docs in `manager::gvproxy`), so the
+    /// managed form is the one that composes.
+    Gvproxy {
+        #[serde(default)]
+        socket: Option<PathBuf>,
+    },
     /// Attach to a pre-existing TAP device (requires privileges).
     Tap { name: String },
 }
@@ -37,11 +44,9 @@ impl std::str::FromStr for NetworkMode {
         match s {
             "none" => Ok(NetworkMode::None),
             "tsi" => Ok(NetworkMode::Tsi),
-            "gvproxy" => Ok(NetworkMode::Gvproxy {
-                socket: PathBuf::from("/run/gvproxy/gvproxy.sock"),
-            }),
+            "gvproxy" => Ok(NetworkMode::Gvproxy { socket: None }),
             _ if s.starts_with("gvproxy:") => Ok(NetworkMode::Gvproxy {
-                socket: PathBuf::from(s.trim_start_matches("gvproxy:")),
+                socket: Some(PathBuf::from(s.trim_start_matches("gvproxy:"))),
             }),
             _ if s.starts_with("tap:") => Ok(NetworkMode::Tap {
                 name: s.trim_start_matches("tap:").to_string(),
@@ -185,6 +190,10 @@ pub struct Sandbox {
     pub exit_code: Option<i32>,
     /// PID of the VM shim process on the host.
     pub pid: Option<u32>,
+    /// PID of the gvproxy the daemon started for this sandbox, if any.
+    /// Persisted so a restarted daemon can still reap it.
+    #[serde(default)]
+    pub gvproxy_pid: Option<u32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -198,6 +207,7 @@ impl Sandbox {
             state: SandboxState::Created,
             exit_code: None,
             pid: None,
+            gvproxy_pid: None,
             created_at: chrono::Utc::now(),
             started_at: None,
             finished_at: None,
