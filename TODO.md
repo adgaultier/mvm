@@ -61,26 +61,46 @@ sentinels and the host injects at the network boundary.
 
 Non-goals for now: console-log secret redaction; Windows/macOS keychains.
 
-## 3. Live window resize for `mvm run -it`
-The workload pty now boots at the client's size and TERM is forwarded, but
-the size is fixed for the session: resizing the terminal mid-run leaves the
-guest on the old geometry (exec -it has full resize). Needs a console-level
-resize path — a sandbox-keyed Resize message (the protocol's is keyed to an
-exec session) plus TIOCSWINSZ on the workload pty in the agent, and the
-`run` client polling `term_size()` the way `exec` does.
+## 3. Live window resize for `mvm run -it` / `mvm attach`
+The workload pty boots at the client's size and TERM is forwarded, but the
+size is fixed for the session: resizing the terminal mid-run leaves the guest
+on the old geometry (exec -it has full resize). `attach` is worse — it uses
+`tty_size` as recorded at *create* time, so attaching from a differently sized
+terminal starts out wrong. Needs a console-level resize path: a sandbox-keyed
+Resize message (the protocol's is keyed to an exec session) plus TIOCSWINSZ on
+the workload pty in the agent, with `run`/`attach` polling `term_size()` the
+way `exec` does.
 
-## 4. Pull memory usage
+## 4. Guest ptys are not reachable by path (`ttyname` fails)
+Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
+workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
+`/dev/pts/0`: three devpts instances end up stacked on `/dev/pts` (libkrun's
+init, then the agent's), and the pty is allocated in one that a later mount
+shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
+`os.ttyname` — sees an inconsistent world. Fix is for `ensure_devpts` to reuse
+a usable existing instance instead of stacking another; check what ptmxmode
+that leaves for non-root workloads before changing it.
+
+## 5. Decide `run`'s lifetime default
+`mvm run` removes the sandbox when the workload exits unless `--keep`, the
+inverse of docker (`run` keeps; `--rm` removes). It reads as "naming does not
+work": `run --name foo …` then `mvm start foo` says not found, which is why
+the CLI now prints a notice when it removes a named sandbox. Either keep the
+current default and leave the notice, or flip to docker semantics with `--rm`
+(`--keep` staying as a no-op alias) — a breaking change for scripts.
+
+## 6. Pull memory usage
 Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
 unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
----
-
-## 5. TUI: render guest colours in the console pane
+## 7. TUI: render guest colours in the console pane
 The pane is plain text since escapes are stripped at the edge. Showing colours
 means parsing SGR into ratatui spans (`ansi-to-tui`-style) — never by passing
 escapes through, which is what let the guest drive the user's terminal.
+
+---
 
 ## Done
 
