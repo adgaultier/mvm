@@ -79,6 +79,25 @@ check "run console is a tty" "CONSOLE-TTY" \
 if command -v script >/dev/null 2>&1; then
     check "run -it raw mode" "found" \
         "$(printf 'exit\n' | timeout 60 script -qec "$MVM run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK'" /dev/null | grep -q RAW-TTY-OK && echo found)"
+
+    # The workload gets its own guest pty, so its output is CRLF-terminated
+    # like any terminal session (the client runs raw and adds nothing).
+    check "run -t emits crlf" "found" \
+        "$(timeout 60 "$MVM" run -t alpine printf 'A\n' | grep -q "$(printf 'A\r')" && echo found)"
+
+    # A live -it session must show output that does not end in a newline —
+    # a shell prompt, or in raw mode every echoed keystroke. Buffered client
+    # output flushes only on '\n' (and at exit), so this has to be sampled
+    # while the session is still open: that blank window *is* the freeze.
+    PROMPT_OUT=$(mktemp /tmp/mvm-itest-prompt.XXXXXX)
+    timeout 40 script -qec "$MVM run -it alpine sh" /dev/null \
+        < <(sleep 20; printf 'exit\n') > "$PROMPT_OUT" 2>&1 &
+    PROMPT_PID=$!
+    sleep 12
+    check "run -it prompt arrives unbuffered" "found" \
+        "$(grep -q '#' "$PROMPT_OUT" && echo found)"
+    wait "$PROMPT_PID" 2>/dev/null || true
+    rm -f "$PROMPT_OUT"
 else
     echo "skip: script(1) not available (run -it raw-mode check)"
 fi

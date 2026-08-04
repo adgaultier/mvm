@@ -29,6 +29,12 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     let (master, slave) = openpty()?;
+    // This pty is plumbing, not a terminal anyone types on: it exists so the
+    // guest console is a tty. Its default line discipline (ICANON + ECHO)
+    // would buffer host keystrokes until a newline, echo them a second time
+    // on top of the guest's own echo, and turn ^C into a signal for the shim
+    // instead of a byte for the guest. Raw = transparent conduit.
+    make_raw(slave, config.console_size);
     let stdin_fd = dup_fd(slave)?;
     let stdout_fd = dup_fd(slave)?;
     unsafe { libc::close(slave) };
@@ -100,14 +106,27 @@ fn openpty() -> Result<(RawFd, RawFd)> {
     if rc == -1 {
         return Err(std::io::Error::last_os_error().into());
     }
+    Ok((master, slave))
+}
+
+/// Raw termios (and, when known, a window size) on one end of a pty pair.
+fn make_raw(fd: RawFd, size: Option<(u16, u16)>) {
     unsafe {
         let mut term = std::mem::zeroed();
-        if libc::tcgetattr(slave, &mut term) == 0 {
-            term.c_oflag &= !libc::ONLCR;
-            libc::tcsetattr(slave, libc::TCSANOW, &term);
+        if libc::tcgetattr(fd, &mut term) == 0 {
+            libc::cfmakeraw(&mut term);
+            libc::tcsetattr(fd, libc::TCSANOW, &term);
+        }
+        if let Some((cols, rows)) = size {
+            let ws = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            libc::ioctl(fd, libc::TIOCSWINSZ, &ws);
         }
     }
-    Ok((master, slave))
 }
 
 fn dup_fd(fd: RawFd) -> Result<RawFd> {

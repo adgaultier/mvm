@@ -223,7 +223,8 @@ impl Manager {
             ports: spec.ports.clone(),
             mounts: spec.mounts.clone(),
             agent_socket: agent_socket.clone(),
-            console_tty: spec.attach_stdin,
+            console_tty: spec.tty,
+            console_size: spec.tty_size,
         };
 
         // 5. Register gvproxy port forwards before booting the guest.

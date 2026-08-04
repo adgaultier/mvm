@@ -89,6 +89,15 @@ pub struct SandboxSpec {
     /// immediate EOF instead of blocking forever.
     #[serde(default)]
     pub attach_stdin: bool,
+    /// Run the workload on a dedicated guest pty instead of directly on the
+    /// guest console (`mvm run -t`). The console itself is always a tty, but
+    /// it is a shared byte stream: only a private pty gives the workload its
+    /// own line discipline (echo, ^C, window size).
+    #[serde(default)]
+    pub tty: bool,
+    /// Size (cols, rows) for that pty; without it the guest sees 0x0.
+    #[serde(default)]
+    pub tty_size: Option<(u16, u16)>,
     /// Network profile.
     #[serde(default)]
     pub network: NetworkMode,
@@ -121,6 +130,8 @@ impl Default for SandboxSpec {
             vcpus: default_vcpus(),
             ram_mib: default_ram(),
             attach_stdin: false,
+            tty: false,
+            tty_size: None,
             network: NetworkMode::None,
             ports: vec![],
             mounts: vec![],

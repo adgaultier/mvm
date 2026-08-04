@@ -96,6 +96,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
     }
 
     let console_tty = std::env::var_os("MVM_CONSOLE_TTY").is_some();
+    let console_size = std::env::var("MVM_CONSOLE_SIZE").ok().and_then(|s| {
+        let (cols, rows) = s.split_once(',')?;
+        Some((cols.parse::<u16>().ok()?, rows.parse::<u16>().ok()?))
+    });
 
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
@@ -105,6 +109,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_NET_CONFIG",
         "MVM_NET_TSI",
         "MVM_CONSOLE_TTY",
+        "MVM_CONSOLE_SIZE",
     ] {
         std::env::remove_var(var);
     }
@@ -115,14 +120,21 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // Keep console output byte-oriented. The host owns the terminal display
     // policy; ONLCR here would turn every workload newline into CRLF in logs.
-    normalize_console_termios();
+    // When we bridge to a workload pty the console must be fully raw: its own
+    // line discipline would otherwise hold input until a newline and echo it
+    // on top of the pty's echo.
+    if console_tty {
+        raw_console_termios();
+    } else {
+        normalize_console_termios();
+    }
 
     // 4. Spawn the workload. The guest console is a byte stream, so an
     // interactive workload needs a real guest PTY of its own.
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
-        match spawn_tty_workload(workload_argv) {
+        match spawn_tty_workload(workload_argv, console_size) {
             Some(child) => Some(child),
             None => return 127,
         }
@@ -183,7 +195,16 @@ fn real_main(workload_argv: &[String]) -> i32 {
     agent.run(selfpipe_r)
 }
 
-fn spawn_tty_workload(workload_argv: &[String]) -> Option<std::process::Child> {
+fn spawn_tty_workload(
+    workload_argv: &[String],
+    size: Option<(u16, u16)>,
+) -> Option<std::process::Child> {
+    let winsize = size.map(|(cols, rows)| libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    });
     let mut fds = [-1; 2];
     let rc = unsafe {
         libc::openpty(
@@ -191,13 +212,22 @@ fn spawn_tty_workload(workload_argv: &[String]) -> Option<std::process::Child> {
             &mut fds[1],
             std::ptr::null_mut(),
             std::ptr::null(),
-            std::ptr::null(),
+            winsize
+                .as_ref()
+                .map(|w| w as *const libc::winsize)
+                .unwrap_or(std::ptr::null()),
         )
     };
     if rc != 0 {
         eprintln!("mvm-agent: openpty failed: {}", std::io::Error::last_os_error());
         return None;
     }
+    // Don't trust the guest kernel's pty defaults: this VM's fresh slaves come
+    // up with ONLCR clear, which would send bare LFs to a client in raw mode
+    // (every line starting where the last one ended). The workload's pty is
+    // the only line discipline left in the chain, so spell out the terminal
+    // behaviour it must provide.
+    interactive_pty_termios(fds[1]);
     let master = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let slave = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     let slave_out = slave.try_clone().ok()?;
@@ -239,6 +269,40 @@ fn spawn_tty_workload(workload_argv: &[String]) -> Option<std::process::Child> {
         let _ = std::io::copy(&mut output_master, &mut output);
     });
     Some(child)
+}
+
+/// Sane interactive defaults on a pty slave: CR/LF translation both ways,
+/// echo, line editing, and ^C/^Z signalling.
+fn interactive_pty_termios(slave: RawFd) {
+    unsafe {
+        let mut term: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(slave, &mut term) != 0 {
+            return;
+        }
+        term.c_iflag |= libc::ICRNL | libc::IXON | libc::BRKINT;
+        term.c_oflag |= libc::OPOST | libc::ONLCR;
+        term.c_lflag |= libc::ISIG
+            | libc::ICANON
+            | libc::ECHO
+            | libc::ECHOE
+            | libc::ECHOK
+            | libc::ECHOCTL
+            | libc::ECHOKE
+            | libc::IEXTEN;
+        let _ = libc::tcsetattr(slave, libc::TCSANOW, &term);
+    }
+}
+
+/// Fully transparent console: no echo, no canonical buffering, no signal
+/// generation — every byte belongs to the workload's own pty.
+fn raw_console_termios() {
+    unsafe {
+        let mut term = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut term) == 0 {
+            libc::cfmakeraw(&mut term);
+            let _ = libc::tcsetattr(0, libc::TCSANOW, &term);
+        }
+    }
 }
 
 fn normalize_console_termios() {

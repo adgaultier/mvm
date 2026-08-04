@@ -284,15 +284,25 @@ impl BoxArgs {
             .iter()
             .map(|v| parse_volume(v))
             .collect::<Result<Vec<_>, _>>()?;
+        // With a terminal, carry our TERM into the guest (libkrun's init would
+        // otherwise leave it at "linux"); an explicit -e TERM=... still wins.
+        let mut env = self.env.clone();
+        if self.tty && !env.iter().any(|kv| kv.starts_with("TERM=")) {
+            if let Ok(term) = std::env::var("TERM") {
+                env.push(format!("TERM={term}"));
+            }
+        }
         Ok(SandboxSpec {
             name: self.name.clone(),
             image: self.image.clone(),
             command: self.command.clone(),
-            env: self.env.clone(),
+            env,
             workdir: self.workdir.clone(),
             vcpus: self.cpus,
             ram_mib: self.memory,
             attach_stdin: self.interactive,
+            tty: self.tty,
+            tty_size: if self.tty { run::term_size() } else { None },
             network,
             ports: self.publish.clone(),
             mounts,

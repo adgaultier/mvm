@@ -134,10 +134,22 @@ fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Resu
     // The follow stream carries the whole console and ends when the VM
     // exits (the daemon closes the channel on shim exit), so streaming it
     // to EOF *is* waiting for the workload — no polling, no lost tail.
+    //
+    // Flush after every chunk: stdout is a LineWriter, so `io::copy` would
+    // hold anything not ending in '\n' — including shell prompts and, in
+    // raw mode where there is no local echo, every keystroke echoed back by
+    // the guest. That looks exactly like a hung terminal.
     let mut resp = client.logs(id, true)?;
-    let mut out = std::io::stdout();
-    std::io::copy(&mut resp, &mut out).map_err(|e| e.to_string())?;
-    let _ = out.flush();
+    let mut out = std::io::stdout().lock();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+    }
 
     // The daemon's child watcher records the exit code at roughly the same
     // moment the stream ends; allow it a bounded beat to land.
@@ -166,11 +178,11 @@ impl RawTermGuard {
                 return None;
             }
             let orig = term;
-            let output_flags = term.c_oflag;
+            // Fully raw, both directions: raw mode only engages with `-t`,
+            // and then the guest workload runs on a guest pty whose line
+            // discipline already emits CRLF. Leaving OPOST/ONLCR on here
+            // would translate that '\n' a second time.
             libc::cfmakeraw(&mut term);
-            // Keep host newline/output translation so guest LF output remains
-            // readable while input is still passed through raw.
-            term.c_oflag = output_flags;
             if libc::tcsetattr(0, libc::TCSANOW, &term) != 0 {
                 return None;
             }
@@ -188,7 +200,7 @@ impl Drop for RawTermGuard {
 }
 
 /// Local terminal size, if any std fd is a tty.
-fn term_size() -> Option<(u16, u16)> {
+pub fn term_size() -> Option<(u16, u16)> {
     for fd in [0, 1, 2] {
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
         if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {

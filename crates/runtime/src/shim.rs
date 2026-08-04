@@ -36,6 +36,9 @@ pub struct ShimConfig {
     /// Allocate a guest PTY for the initial workload and bridge the console.
     #[serde(default)]
     pub console_tty: bool,
+    /// Size (cols, rows) for that PTY.
+    #[serde(default)]
+    pub console_size: Option<(u16, u16)>,
 }
 
 impl ShimConfig {
@@ -112,12 +115,20 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
     if let Some(agent_sock) = &config.agent_socket {
         // Host listens on the unix socket; the guest agent connects out.
         ctx.add_vsock_port(protocol::AGENT_VSOCK_PORT, agent_sock, false)?;
-        let mut argv = vec![protocol::GUEST_AGENT_PATH.to_string()];
-        argv.extend(config.exec.iter().cloned());
+        // libkrun's init execs KRUN_INIT with the exec path already prepended
+        // as argv[0], so argv here is *just* the workload command. Repeating
+        // the agent path would make the agent run itself as its own workload:
+        // the outer instance consumed every MVM_* var (and scrubbed it from
+        // the environment) before the inner one, the one that actually spawns
+        // the workload and serves exec, ever saw it.
+        let argv: Vec<String> = config.exec.clone();
         // Tell the agent which virtiofs tags to mount where.
         let mut env = config.env.clone();
         if config.console_tty {
             env.push("MVM_CONSOLE_TTY=1".to_string());
+            if let Some((cols, rows)) = config.console_size {
+                env.push(format!("MVM_CONSOLE_SIZE={cols},{rows}"));
+            }
         }
         if config.root_disk.is_some() {
             env.push("MVM_ROOT_DISK=/dev/vda".to_string());
