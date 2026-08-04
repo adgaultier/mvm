@@ -98,7 +98,7 @@ pub(crate) struct BoxArgs {
     /// Port mappings (hostPort:guestPort).
     #[arg(short, long)]
     publish: Vec<String>,
-    /// Network mode: none | gvproxy | tap:<dev>.
+    /// Network mode: none | tsi | gvproxy[:<socket>] | tap:<dev>.
     #[arg(long, default_value = "none")]
     net: String,
     /// Number of vCPUs.

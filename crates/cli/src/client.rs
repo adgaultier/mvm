@@ -2,6 +2,7 @@
 
 use mvm_common::api::{ErrorResponse, ExecRequest, PullRequest};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
+use std::time::Duration;
 
 pub struct Client {
     base: String,
@@ -12,7 +13,12 @@ impl Client {
     pub fn new(base: &str) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
-            http: reqwest::blocking::Client::new(),
+            // Large images using the copy storage driver can take longer than
+            // reqwest's 30-second default while a sandbox rootfs is prepared.
+            http: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .build()
+                .expect("build blocking HTTP client"),
         }
     }
 

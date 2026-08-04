@@ -166,7 +166,11 @@ impl RawTermGuard {
                 return None;
             }
             let orig = term;
+            let output_flags = term.c_oflag;
             libc::cfmakeraw(&mut term);
+            // Keep host newline/output translation so guest LF output remains
+            // readable while input is still passed through raw.
+            term.c_oflag = output_flags;
             if libc::tcsetattr(0, libc::TCSANOW, &term) != 0 {
                 return None;
             }

@@ -5,7 +5,7 @@
 //! as PID 1. Built statically (crt-static) so it runs in any rootfs.
 
 use std::collections::{HashMap, VecDeque};
-use std::os::unix::io::{IntoRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -95,6 +95,8 @@ fn real_main(workload_argv: &[String]) -> i32 {
         let _ = std::fs::write("/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
     }
 
+    let console_tty = std::env::var_os("MVM_CONSOLE_TTY").is_some();
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_ROOT_DISK",
@@ -102,6 +104,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_MOUNTS",
         "MVM_NET_CONFIG",
         "MVM_NET_TSI",
+        "MVM_CONSOLE_TTY",
     ] {
         std::env::remove_var(var);
     }
@@ -114,9 +117,15 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // policy; ONLCR here would turn every workload newline into CRLF in logs.
     normalize_console_termios();
 
-    // 4. Spawn the workload inheriting our stdio (= guest console).
+    // 4. Spawn the workload. The guest console is a byte stream, so an
+    // interactive workload needs a real guest PTY of its own.
     let workload = if workload_argv.is_empty() {
         None
+    } else if console_tty {
+        match spawn_tty_workload(workload_argv) {
+            Some(child) => Some(child),
+            None => return 127,
+        }
     } else {
         match Command::new(&workload_argv[0])
             .args(&workload_argv[1..])
@@ -172,6 +181,64 @@ fn real_main(workload_argv: &[String]) -> i32 {
     });
 
     agent.run(selfpipe_r)
+}
+
+fn spawn_tty_workload(workload_argv: &[String]) -> Option<std::process::Child> {
+    let mut fds = [-1; 2];
+    let rc = unsafe {
+        libc::openpty(
+            &mut fds[0],
+            &mut fds[1],
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if rc != 0 {
+        eprintln!("mvm-agent: openpty failed: {}", std::io::Error::last_os_error());
+        return None;
+    }
+    let master = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let slave = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    let slave_out = slave.try_clone().ok()?;
+    let slave_err = slave.try_clone().ok()?;
+    let mut cmd = Command::new(&workload_argv[0]);
+    cmd.args(&workload_argv[1..])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err));
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
+            return None;
+        }
+    };
+
+    let input_fd = unsafe { libc::dup(0) };
+    let output_fd = unsafe { libc::dup(1) };
+    if input_fd < 0 || output_fd < 0 {
+        return Some(child);
+    }
+    let mut input = unsafe { std::fs::File::from_raw_fd(input_fd) };
+    let mut input_master = master.try_clone().ok()?;
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut input, &mut input_master);
+    });
+    let mut output = unsafe { std::fs::File::from_raw_fd(output_fd) };
+    let mut output_master = master;
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut output_master, &mut output);
+    });
+    Some(child)
 }
 
 fn normalize_console_termios() {
@@ -933,6 +1000,16 @@ fn ensure_devpts() {
             0,
             c_data.as_ptr() as *const libc::c_void,
         );
+    }
+
+    // devpts creates guest PTYs only when /dev/ptmx points at this instance.
+    // Some minimal roots provide a stale devtmpfs /dev/ptmx character node.
+    let needs_ptmx_link = std::fs::symlink_metadata("/dev/ptmx")
+        .map(|m| !m.file_type().is_symlink())
+        .unwrap_or(true);
+    if needs_ptmx_link {
+        let _ = std::fs::remove_file("/dev/ptmx");
+        let _ = std::os::unix::fs::symlink("/dev/pts/ptmx", "/dev/ptmx");
     }
 }
 

@@ -33,6 +33,9 @@ pub struct ShimConfig {
     /// the guest is booted with the agent as PID 1 and the workload as its
     /// child (enables `exec`).
     pub agent_socket: Option<PathBuf>,
+    /// Allocate a guest PTY for the initial workload and bridge the console.
+    #[serde(default)]
+    pub console_tty: bool,
 }
 
 impl ShimConfig {
@@ -113,6 +116,9 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         argv.extend(config.exec.iter().cloned());
         // Tell the agent which virtiofs tags to mount where.
         let mut env = config.env.clone();
+        if config.console_tty {
+            env.push("MVM_CONSOLE_TTY=1".to_string());
+        }
         if config.root_disk.is_some() {
             env.push("MVM_ROOT_DISK=/dev/vda".to_string());
             if let Some(workdir) = &config.workdir {

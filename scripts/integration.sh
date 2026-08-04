@@ -78,7 +78,7 @@ check "run console is a tty" "CONSOLE-TTY" \
 # raw-mode path (termios guard enable/restore) actually engages.
 if command -v script >/dev/null 2>&1; then
     check "run -it raw mode" "found" \
-        "$(printf 'exit\n' | timeout 60 script -qec "$MVM run -it alpine sh -c 'echo RAW-OK'" /dev/null | grep -q RAW-OK && echo found)"
+        "$(printf 'exit\n' | timeout 60 script -qec "$MVM run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK'" /dev/null | grep -q RAW-TTY-OK && echo found)"
 else
     echo "skip: script(1) not available (run -it raw-mode check)"
 fi
