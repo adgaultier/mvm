@@ -84,7 +84,7 @@ libc you don't control.
 | `mvm serve [--addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
-| `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` (`-i` attaches stdin to the console, `-it` = interactive) |
+| `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` (`-i` attaches stdin to the console, `-t` gives the workload its own guest pty at your terminal's size, `-it` = interactive shell) |
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
 | `mvm start/stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |
@@ -196,3 +196,7 @@ defined in `crates/common/src/protocol.rs`.
 - Guest chowns land on subuids on the host; clean up sandbox state through
   `mvm rm` (the daemon), not by deleting the data dir by hand.
 - x86_64 Linux only (matches the vendored libkrun FFI subset).
+- No CPU/RAM hot-plug: `mvm resize` (and the TUI's `r` form) change the
+  spec, and the VM picks the new size up when it next boots.
+- `run -it` sizes the guest pty once, at start; resizing your terminal
+  mid-session does not propagate (`exec -it` does track resizes).

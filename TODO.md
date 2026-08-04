@@ -3,15 +3,7 @@
 Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
-## 1. Validate networking modes on real host
-`scripts/integration.sh` now exercises these on real KVM: `none` isolation
-(TSI must be off), `tsi` outbound+DNS, and gvproxy outbound/DNS. The gvproxy
-control API registers `-p` mappings, but host-to-guest forwarding still needs
-investigation; the current compatible gvproxy run is 28 passed, 1 failed.
-The guest-side static config (192.168.127.2/24 via agent ioctls) and vfkit
-socket wiring otherwise work for outbound traffic.
-
-## 2. Honor the image USER directive
+## 1. Honor the image USER directive
 `ImageConfig.user` is parsed and ignored — every workload runs as root.
 Faithful behavior (docker parity, needed by e.g.
 `docker/sandbox-templates:opencode`, which runs as `agent`): the guest
@@ -22,7 +14,7 @@ container user by default, `-u` overrides). The OpenCode image now pulls
 successfully after hard-link replacement handling was added, but its VM
 startup still stops before this identity behavior can be tested.
 
-## 3. Credentials injection (design plan)
+## 2. Credentials injection (design plan)
 Modeled on Docker Sandboxes' credential handling
 (https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
 mvm's daemon + vsock architecture. Guiding principle: **real secrets never
@@ -69,13 +61,15 @@ sentinels and the host injects at the network boundary.
 
 Non-goals for now: console-log secret redaction; Windows/macOS keychains.
 
-## 4. Console polish for `mvm run -it`
-No winsize propagation to the guest console (exec -it has full resize),
-and TERM isn't injected on the console path (`-e TERM=xterm-256color`
-works around it). Agent-side: TIOCSWINSZ on the console + a resize
-message keyed to the sandbox rather than an exec session.
+## 3. Live window resize for `mvm run -it`
+The workload pty now boots at the client's size and TERM is forwarded, but
+the size is fixed for the session: resizing the terminal mid-run leaves the
+guest on the old geometry (exec -it has full resize). Needs a console-level
+resize path — a sandbox-keyed Resize message (the protocol's is keyed to an
+exec session) plus TIOCSWINSZ on the workload pty in the agent, and the
+`run` client polling `term_size()` the way `exec` does.
 
-## 5. Pull memory usage
+## 4. Pull memory usage
 Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
 unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
@@ -85,8 +79,29 @@ temp file with incremental hashing instead — matters for images like
 
 ## Done
 
-- **E2E integration** — 21/21 on real KVM in rootless userns mode with
-  the overlay driver (2026-08-01).
+- **E2E integration** — 42/42 on real KVM in rootless userns mode with the
+  overlay driver, gvproxy v0.8.9 installed (2026-08-04); 21/21 at the
+  original pass (2026-08-01).
+- **Networking validated end to end** — the gvproxy host-to-guest
+  forwarding question is closed: one gvproxy vfkit datagram endpoint serves
+  exactly one VM (it learns its peer from the first packet and never
+  re-learns), so bare `--net gvproxy` now spawns a *private* gvproxy per
+  sandbox, registers `-p` maps on that instance's control socket, and
+  SIGTERMs + reaps it with the VM (pid persisted for post-restart cleanup).
+  `gvproxy:<socket>` still attaches to an external one. Sequential and
+  concurrent sandboxes both have working forwards.
+- **`mvm run -it`** — was frozen: `io::copy` into `stdout`'s LineWriter held
+  prompts and raw-mode echo until a newline; `krun_set_exec` argv repeated
+  the agent path, so a second agent instance ate the `MVM_*` vars and no
+  workload pty was ever allocated; and three stacked line disciplines
+  double-echoed and buffered keystrokes. Now: flush per chunk, argv without
+  the exec path, raw shim pty + raw bridged console + explicit interactive
+  termios on the workload pty, plus client winsize and TERM.
+- **Resize CPU/memory** — `mvm resize SANDBOX [--cpus N] [-m MiB]
+  [--restart]`, `POST /sandboxes/{id}/resize`, and the TUI's `r` form
+  (tab/digits/+- , enter applies, ^r applies and restarts). No hot-plug in
+  libkrun, so it rewrites the spec and the next boot picks it up; the form
+  and CLI both say when a restart is pending.
 - **Rootless chown / virtiofs UID translation** — `mvm serve` re-execs
   into a user namespace (subuid ranges via newuidmap/newgidmap, two-stage
   SIGSTOP handshake so the daemon keeps capabilities after exec); the

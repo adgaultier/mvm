@@ -90,7 +90,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Color::Green
             }),
         ),
-    ]));
+    ]))
+    // The hints must not fall off a narrow terminal; the footer has 2 rows.
+    .wrap(Wrap { trim: true });
     f.render_widget(footer, chunks[3]);
 
     // Modal last, so it sits on top of everything.
