@@ -140,6 +140,16 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
   canonical adds an echo, buffers input until Enter, and steals ^C. Only
   the innermost pty — the workload's — should be cooked; the shim pty and
   the bridged console are `cfmakeraw`'d.
+- **Never render guest console bytes verbatim in the TUI.** The console pane
+  used to pass them through, so the guest's escape sequences drove the user's
+  terminal — and the ones that *ask* it something (every shell prompt emits
+  `ESC [ 6 n`; TUIs query colours with `ESC ] 11 ; ?`) make the terminal answer
+  on the TUI's stdin. crossterm parses `ESC ]` as Alt+`]` and then the rest of
+  the reply as ordinary keys, so `ESC ] 11 ; rgb:2d2d/…` types `r`, `g`, `b`,
+  `d`… into the app: the resize form opened by itself and `d` was one hex digit
+  away from deleting a sandbox. `app::sanitize_console` strips CSI/OSC/DCS/nF
+  escapes and control bytes at the poller edge; keep it that way, and never
+  feed raw console text to a widget.
 - **A detach cannot unwind through the log stream.** The blocking read on the
   follow stream can't be interrupted, so the stdin thread leaves the process
   itself — which skips `RawTermGuard`'s `Drop`. The saved termios therefore

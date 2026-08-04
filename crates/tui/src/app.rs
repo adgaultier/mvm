@@ -3,6 +3,66 @@
 use mvm_common::{ImageInfo, Sandbox};
 use ratatui::widgets::TableState;
 
+/// Strip terminal control sequences from guest console output.
+///
+/// The console pane renders bytes the *guest* chose. Passing them through hands
+/// the guest our terminal — and sequences that ask the terminal a question are
+/// worse than cosmetic: the terminal answers on our stdin, where crossterm
+/// parses the reply as keys. An `ESC ] 1 1 ; r g b : 2 d 2 d …` colour report
+/// arrives as Alt+`]` followed by plain `1 1 ; r g b : 2 d …`, so the `r` opens
+/// the resize form, `g` moves the selection and `d` would delete a sandbox.
+/// Every shell prompt asks for the cursor position (`ESC [ 6 n`), which is why
+/// this fires as soon as a sandbox with a shell starts.
+pub fn sanitize_console(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // CSI: parameters, then a final byte in 0x40..=0x7e.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC / DCS / SOS / PM / APC: a string terminated by BEL or ST.
+                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // nF escapes (charset selection, `ESC ( B`): intermediate
+                // bytes, then a final byte in 0x30..=0x7e.
+                Some(c) if ('\x20'..='\x2f').contains(&c) => {
+                    for c in chars.by_ref() {
+                        if ('\x30'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // Two-character escapes (`ESC c`, `ESC 7`, …) and a trailing
+                // ESC at the end of a chunk: drop.
+                _ => {}
+            },
+            // The guest pty emits CRLF; the pane splits on '\n' itself.
+            '\r' => {}
+            '\n' | '\t' => out.push(c),
+            // Remaining C0/C1 controls and DEL would move the cursor or worse.
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Sandboxes,
@@ -200,5 +260,49 @@ impl App {
             Tab::Sandboxes => self.sandboxes.len(),
             Tab::Images => self.images.len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_console;
+
+    #[test]
+    fn keeps_plain_text_and_newlines() {
+        assert_eq!(sanitize_console("hello\nworld\n"), "hello\nworld\n");
+        assert_eq!(sanitize_console("a\tb"), "a\tb");
+        // A pty's CRLF becomes a plain LF.
+        assert_eq!(sanitize_console("a\r\nb"), "a\nb");
+    }
+
+    #[test]
+    fn strips_csi_sequences() {
+        assert_eq!(sanitize_console("\x1b[31mred\x1b[0m"), "red");
+        // The cursor-position query every shell prompt emits.
+        assert_eq!(sanitize_console("~ # \x1b[6n"), "~ # ");
+        assert_eq!(sanitize_console("\x1b[2J\x1b[1;1Hclear"), "clear");
+    }
+
+    #[test]
+    fn strips_osc_and_dcs_strings() {
+        // BEL-terminated and ST-terminated forms of the colour query/report.
+        assert_eq!(sanitize_console("a\x1b]11;?\x07b"), "ab");
+        assert_eq!(sanitize_console("a\x1b]11;rgb:2d2d/2d2d/2d2d\x1b\\b"), "ab");
+        assert_eq!(sanitize_console("a\x1bP1+r544e\x1b\\b"), "ab");
+        // Nothing that could open a form or delete a sandbox survives.
+        let out = sanitize_console("\x1b]11;rgb:2d2d/2d2d/2d2d\x07");
+        assert!(!out.contains('r') && !out.contains('d'), "{out:?}");
+    }
+
+    #[test]
+    fn drops_lone_and_truncated_escapes() {
+        // A chunk can end mid-sequence; never emit the tail as text.
+        assert_eq!(sanitize_console("a\x1b[3"), "a");
+        assert_eq!(sanitize_console("a\x1b"), "a");
+        assert_eq!(sanitize_console("a\x1b]11;?"), "a");
+        // Two-character escapes, e.g. charset selection.
+        assert_eq!(sanitize_console("a\x1b(Bb"), "ab");
+        // Bare control bytes.
+        assert_eq!(sanitize_console("a\x07\x08\x7fb"), "ab");
     }
 }

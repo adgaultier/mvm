@@ -154,6 +154,10 @@ fn run_loop(
     }
 }
 
+/// Console history the poller keeps around — more than the pane can show, so
+/// scrolling room is there without hauling the whole log every 1.5s.
+const CONSOLE_TAIL_LINES: usize = 200;
+
 /// Keys for the modal resize form. Enter applies; ^R also reboots the VM,
 /// which is the only way a running one picks up the new size.
 fn handle_resize_key(
@@ -236,10 +240,12 @@ fn spawn_poller(client: Client, tx: mpsc::Sender<PollUpdate>) {
         match client.list_sandboxes() {
             Ok(sandboxes) => {
                 let images = client.list_images().unwrap_or_default();
-                // Fetch logs for the newest running sandbox, if any.
+                // Fetch logs for the newest running sandbox, if any. Sanitize
+                // here, at the edge: nothing downstream should ever hold guest
+                // control sequences (see `sanitize_console`).
                 if let Some(running) = sandboxes.iter().find(|s| s.state.is_alive()) {
-                    if let Ok(logs) = client.logs(&running.id.to_string()) {
-                        let _ = tx.send(PollUpdate::Logs(logs));
+                    if let Ok(logs) = client.logs(&running.id.to_string(), CONSOLE_TAIL_LINES) {
+                        let _ = tx.send(PollUpdate::Logs(app::sanitize_console(&logs)));
                     }
                 }
                 let _ = tx.send(PollUpdate::Data { sandboxes, images });

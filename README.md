@@ -17,6 +17,9 @@ $ printf 'stdin works\n' | mvm exec -i dev cat
 stdin works
 $ mvm exec -it dev sh          # interactive shell on a pty (vi/top work)
 $ mvm run -it alpine sh        # one-shot interactive sandbox (console attach)
+$ mvm create -it --name box alpine sh && mvm start -a box
+                               # long-lived one; ctrl-p ctrl-q detaches,
+                               # mvm attach box comes back to it
 $ mvm stop dev && mvm rm dev
 ```
 
@@ -46,10 +49,11 @@ $ mvm stop dev && mvm rm dev
   calling process, so the daemon spawns a detached `mvm __vm-shim` per
   sandbox; its stdout/stderr is the guest console, pumped to
   `console.log` and live log followers.
-- **Guest agent as PID 1.** A static musl binary is injected at
-  `/.mvm/agent`; it spawns the workload, reaps zombies, and serves
-  `exec` (with stdin/stdout/stderr streaming and exit codes) over
-  **vsock** — no networking required in the guest.
+- **Guest agent as the guest's init.** A static musl binary is injected at
+  `/.mvm/agent` (libkrun's own `/init.krun` is PID 1 and execs it); it spawns
+  the workload — on its own pty with `-t` — reaps zombies, and serves `exec`
+  (with stdin/stdout/stderr streaming and exit codes) over **vsock** — no
+  networking required in the guest.
 - **Pure-Rust image pulls.** Registry auth, manifest resolution, blob
   verification, layer unpack and OCI whiteouts are implemented in-tree; later
   layers can replace existing paths, including hard-link destinations; no
@@ -94,7 +98,7 @@ libc you don't control.
 | `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
 | `mvm logs [-f] [-n N] SANDBOX` | guest console output (`-n` = last N lines) |
 | `mvm inspect SANDBOX` | full sandbox JSON |
-| `mvm-tui` | live dashboard (sandboxes, images, console); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts) |
+| `mvm-tui` | live dashboard (sandboxes, images, console); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts). The console pane shows guest output as plain text — escape sequences are stripped, so colours don't render (and the guest can't drive your terminal) |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,

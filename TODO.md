@@ -77,11 +77,25 @@ temp file with incremental hashing instead — matters for images like
 
 ---
 
+## 5. TUI: confirm destructive keys, and consider rendering colours
+`d` deletes the selected sandbox on one keypress, which is also all a stray
+byte on stdin needs (the console-sanitizing fix removed the mechanism that
+produced those bytes, but a fat finger is enough). A `y/n` confirmation would
+bound it. Separately, the console pane is now plain text; rendering guest
+colours would mean parsing SGR into ratatui spans (`ansi-to-tui`-style) rather
+than passing escapes through, which must never come back.
+
 ## Done
 
 - **E2E integration** — 49/49 on real KVM in rootless userns mode with the
   overlay driver, gvproxy v0.8.9 installed (2026-08-04); 21/21 at the
   original pass (2026-08-01).
+- **TUI console sanitizing** — the pane rendered guest bytes verbatim, so a
+  guest's escape sequences drove the user's terminal; the ones that query it
+  (shell prompts emit `ESC [ 6 n`) made the terminal reply on the TUI's stdin,
+  where crossterm parses `ESC ]` + reply as Alt+`]` plus plain keys — `r` from
+  `rgb:` opened the resize form by itself. Stripped at the poller edge, with
+  the tail capped so a long console isn't refetched whole every poll.
 - **Attach** — `mvm attach [--no-stdin] SANDBOX` and `mvm start -a`, so an
   interactive sandbox no longer has to be driven by the `run` that created
   it. `-i`/`-t` stay create-time properties (docker parity) and attach reads

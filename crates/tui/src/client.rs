@@ -83,13 +83,15 @@ impl Client {
         Ok(())
     }
 
-    /// Non-following log fetch (periodic refresh approach).
-    pub fn logs(&self, id: &str) -> Result<String, String> {
+    /// Non-following log fetch (periodic refresh approach). Only the tail is
+    /// requested: the pane shows a screenful, and re-reading a long-lived
+    /// sandbox's whole console every poll would be wasted work both ends.
+    pub fn logs(&self, id: &str, tail: usize) -> Result<String, String> {
         use std::io::Read;
         let mut resp = self
             .http()
             .get(format!("{}/api/v1/sandboxes/{id}/logs", self.base))
-            .query(&[("follow", "false")])
+            .query(&[("follow", "false"), ("tail", &tail.to_string())])
             .send()
             .map_err(|e| e.to_string())?;
         let mut s = String::new();
