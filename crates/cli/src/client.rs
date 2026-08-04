@@ -54,6 +54,19 @@ impl Client {
         self.post_json(&format!("/api/v1/sandboxes/{id}/stop"), &serde_json::json!({}))
     }
 
+    /// Change the sandbox's vcpu/RAM allocation (takes effect on next boot).
+    pub fn resize_sandbox(
+        &self,
+        id: &str,
+        vcpus: Option<u8>,
+        ram_mib: Option<u32>,
+    ) -> Result<Sandbox, String> {
+        self.post_json(
+            &format!("/api/v1/sandboxes/{id}/resize"),
+            &mvm_common::api::SandboxResizeRequest { vcpus, ram_mib },
+        )
+    }
+
     pub fn remove_sandbox(&self, id: &str) -> Result<(), String> {
         let resp = self
             .http

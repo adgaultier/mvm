@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -16,7 +16,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, PollUpdate, Tab};
+use app::{App, PollUpdate, ResizeForm, Tab};
 use client::Client;
 
 #[derive(Parser)]
@@ -73,6 +73,7 @@ fn run_loop(
                     app.daemon_ok = false;
                     app.status = format!("daemon: {e}");
                 }
+                PollUpdate::Notice { text, error } => app.set_notice(text, error),
             }
         }
 
@@ -83,6 +84,11 @@ fn run_loop(
         if event::poll(Duration::from_millis(150))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
+                // The resize form owns the keyboard while it is open.
+                if app.resize.is_some() {
+                    handle_resize_key(app, key, client, tx);
                     continue;
                 }
                 match key.code {
@@ -136,11 +142,91 @@ fn run_loop(
                             });
                         }
                     }
+                    KeyCode::Char('r') => {
+                        if let Some(sb) = app.selected_sandbox() {
+                            app.resize = Some(ResizeForm::new(sb));
+                        }
+                    }
                     _ => {}
                 }
             }
         }
     }
+}
+
+/// Keys for the modal resize form. Enter applies; ^R also reboots the VM,
+/// which is the only way a running one picks up the new size.
+fn handle_resize_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let Some(form) = app.resize.as_mut() else { return };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.resize = None,
+        KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::BackTab => form.toggle_field(),
+        KeyCode::Char(c @ '0'..='9') => form.type_digit(c),
+        KeyCode::Backspace => form.backspace(),
+        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Right => form.step(true),
+        KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Left => form.step(false),
+        KeyCode::Char('r') if ctrl => apply_resize(app, client, tx, true),
+        KeyCode::Enter => apply_resize(app, client, tx, false),
+        _ => {}
+    }
+}
+
+fn apply_resize(
+    app: &mut App,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+    restart: bool,
+) {
+    let Some(form) = app.resize.as_ref() else { return };
+    let (vcpus, ram_mib) = match form.values() {
+        Ok(values) => values,
+        Err(message) => {
+            app.set_notice(message, true);
+            return;
+        }
+    };
+    let id = form.id.clone();
+    let label = form.label.clone();
+    let running = form.running;
+    app.resize = None;
+
+    let c = client.clone();
+    let t = tx.clone();
+    std::thread::spawn(move || {
+        let notice = match c.resize(&id, vcpus, ram_mib) {
+            Err(e) => PollUpdate::Notice { text: format!("resize {label}: {e}"), error: true },
+            Ok(sb) => {
+                let size = format!("{} vcpu / {} MiB", sb.spec.vcpus, sb.spec.ram_mib);
+                if !running {
+                    PollUpdate::Notice { text: format!("{label} resized to {size}"), error: false }
+                } else if !restart {
+                    PollUpdate::Notice {
+                        text: format!("{label} resized to {size} — restart to apply (^r does both)"),
+                        error: false,
+                    }
+                } else {
+                    match c.stop(&id).and_then(|_| c.start(&id)) {
+                        Ok(()) => PollUpdate::Notice {
+                            text: format!("{label} restarted with {size}"),
+                            error: false,
+                        },
+                        Err(e) => PollUpdate::Notice {
+                            text: format!("{label} resized to {size} but restart failed: {e}"),
+                            error: true,
+                        },
+                    }
+                }
+            }
+        };
+        let _ = t.send(notice);
+    });
 }
 
 /// Periodically fetch sandboxes/images (+ logs of the selected sandbox is

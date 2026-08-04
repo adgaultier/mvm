@@ -48,6 +48,19 @@ enum Command {
     Start { sandbox: String },
     /// Stop a running sandbox.
     Stop { sandbox: String },
+    /// Change a sandbox's vcpu/RAM allocation (applies on next start).
+    Resize {
+        sandbox: String,
+        /// Number of vCPUs.
+        #[arg(long)]
+        cpus: Option<u8>,
+        /// Memory in MiB.
+        #[arg(short, long)]
+        memory: Option<u32>,
+        /// Restart the sandbox now so the new size takes effect.
+        #[arg(long)]
+        restart: bool,
+    },
     /// Remove a sandbox.
     Rm {
         sandbox: String,
@@ -215,6 +228,32 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         Command::Stop { sandbox } => {
             let sb = client.stop_sandbox(&sandbox)?;
             println!("{}", sb.id);
+            Ok(0)
+        }
+        Command::Resize {
+            sandbox,
+            cpus,
+            memory,
+            restart,
+        } => {
+            let sb = client.resize_sandbox(&sandbox, cpus, memory)?;
+            let was_running = sb.state.is_alive();
+            if was_running && restart {
+                client.stop_sandbox(&sandbox)?;
+                client.start_sandbox(&sandbox)?;
+            }
+            println!(
+                "{} resized to {} vcpu / {} MiB{}",
+                sb.id,
+                sb.spec.vcpus,
+                sb.spec.ram_mib,
+                match (was_running, restart) {
+                    // A microVM's allocation is fixed at boot.
+                    (true, false) => " (restart to apply)",
+                    (true, true) => " (restarted)",
+                    _ => "",
+                }
+            );
             Ok(0)
         }
         Command::Rm { sandbox, force } => {

@@ -16,6 +16,94 @@ pub enum PollUpdate {
     },
     Logs(String),
     Error(String),
+    /// Result of an action the user triggered; shown briefly in the footer so
+    /// the next poll's "connected — N sandboxes" doesn't swallow it.
+    Notice { text: String, error: bool },
+}
+
+/// Which field the resize form is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeField {
+    Vcpus,
+    Ram,
+}
+
+/// Editable vcpu/RAM values for one sandbox. Kept as text so typing digits
+/// behaves the way it looks; parsed when applied.
+pub struct ResizeForm {
+    pub id: String,
+    pub label: String,
+    pub vcpus: String,
+    pub ram_mib: String,
+    pub field: ResizeField,
+    /// A running VM keeps its allocation until it reboots.
+    pub running: bool,
+}
+
+impl ResizeForm {
+    pub fn new(sb: &Sandbox) -> Self {
+        Self {
+            id: sb.id.to_string(),
+            label: sb.name().to_string(),
+            vcpus: sb.spec.vcpus.to_string(),
+            ram_mib: sb.spec.ram_mib.to_string(),
+            field: ResizeField::Vcpus,
+            running: sb.state.is_alive(),
+        }
+    }
+
+    pub fn buffer(&mut self) -> &mut String {
+        match self.field {
+            ResizeField::Vcpus => &mut self.vcpus,
+            ResizeField::Ram => &mut self.ram_mib,
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        self.field = match self.field {
+            ResizeField::Vcpus => ResizeField::Ram,
+            ResizeField::Ram => ResizeField::Vcpus,
+        };
+    }
+
+    pub fn type_digit(&mut self, c: char) {
+        let buf = self.buffer();
+        if buf.len() < 7 {
+            buf.push(c);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        self.buffer().pop();
+    }
+
+    /// Nudge the active field: vcpus by 1, memory by 256 MiB.
+    pub fn step(&mut self, up: bool) {
+        let (step, min) = match self.field {
+            ResizeField::Vcpus => (1u32, 1u32),
+            ResizeField::Ram => (256, 64),
+        };
+        let current: u32 = self.buffer().parse().unwrap_or(min);
+        let next = if up {
+            current.saturating_add(step)
+        } else {
+            current.saturating_sub(step).max(min)
+        };
+        *self.buffer() = next.to_string();
+    }
+
+    /// Parsed values, or a message naming what is wrong.
+    pub fn values(&self) -> Result<(u8, u32), String> {
+        let vcpus: u8 = self
+            .vcpus
+            .parse()
+            .map_err(|_| format!("'{}' is not a vcpu count (1-255)", self.vcpus))?;
+        let ram: u32 = self
+            .ram_mib
+            .parse()
+            .map_err(|_| format!("'{}' is not a memory size in MiB", self.ram_mib))?;
+        Ok((vcpus, ram))
+    }
 }
 
 pub struct App {
@@ -27,6 +115,9 @@ pub struct App {
     pub status: String,
     pub daemon_ok: bool,
     pub should_quit: bool,
+    /// Modal resize form; while it is open it owns the keyboard.
+    pub resize: Option<ResizeForm>,
+    notice: Option<(String, bool, std::time::Instant)>,
 }
 
 impl App {
@@ -42,6 +133,24 @@ impl App {
             status: "connecting…".into(),
             daemon_ok: false,
             should_quit: false,
+            resize: None,
+            notice: None,
+        }
+    }
+
+    /// How long an action's result stays in the footer.
+    const NOTICE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    pub fn set_notice(&mut self, text: String, error: bool) {
+        self.notice = Some((text, error, std::time::Instant::now()));
+    }
+
+    /// The footer message: a recent action result if there is one, else the
+    /// connection status. `true` = render it as an error.
+    pub fn footer_message(&self) -> (&str, bool) {
+        match &self.notice {
+            Some((text, error, at)) if at.elapsed() < Self::NOTICE_TTL => (text, *error),
+            _ => (self.status.as_str(), !self.daemon_ok),
         }
     }
 

@@ -88,10 +88,11 @@ libc you don't control.
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
 | `mvm start/stop/rm SANDBOX` | lifecycle (`rm -f` force-removes running) |
+| `mvm resize SANDBOX [--cpus N] [-m MiB]` | change the VM's allocation; a microVM's size is fixed at boot, so this applies on next start (`--restart` reboots it now) |
 | `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
 | `mvm logs [-f] SANDBOX` | guest console output |
 | `mvm inspect SANDBOX` | full sandbox JSON |
-| `mvm-tui` | live dashboard (sandboxes, images, console) |
+| `mvm-tui` | live dashboard (sandboxes, images, console); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts) |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
@@ -104,6 +105,7 @@ GET    /health
 GET    /api/v1/sandboxes                 POST   /api/v1/sandboxes
 GET    /api/v1/sandboxes/{id}            DELETE /api/v1/sandboxes/{id}
 POST   /api/v1/sandboxes/{id}/start      POST   /api/v1/sandboxes/{id}/stop
+POST   /api/v1/sandboxes/{id}/resize                  {"vcpus":N,"ram_mib":N}
 GET    /api/v1/sandboxes/{id}/logs?follow=bool        (raw console stream)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]

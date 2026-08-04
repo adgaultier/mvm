@@ -3,10 +3,10 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Tab};
+use crate::app::{App, ResizeField, Tab};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -66,6 +66,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(logs, chunks[2]);
 
     // Footer.
+    let (message, message_is_error) = app.footer_message();
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(" q", Style::default().fg(Color::Yellow)),
         Span::raw(" quit  "),
@@ -77,15 +78,107 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Span::raw(" start  "),
         Span::styled("x", Style::default().fg(Color::Yellow)),
         Span::raw(" stop  "),
+        Span::styled("r", Style::default().fg(Color::Yellow)),
+        Span::raw(" resize  "),
         Span::styled("d", Style::default().fg(Color::Yellow)),
         Span::raw(" delete   "),
-        Span::styled(&app.status, Style::default().fg(if app.daemon_ok {
-            Color::Green
-        } else {
-            Color::Red
-        })),
+        Span::styled(
+            message,
+            Style::default().fg(if message_is_error {
+                Color::Red
+            } else {
+                Color::Green
+            }),
+        ),
     ]));
     f.render_widget(footer, chunks[3]);
+
+    // Modal last, so it sits on top of everything.
+    if app.resize.is_some() {
+        draw_resize(f, app);
+    }
+}
+
+/// Modal vcpu/RAM editor for the selected sandbox.
+fn draw_resize(f: &mut Frame, app: &App) {
+    let Some(form) = app.resize.as_ref() else { return };
+    let area = centered_rect(52, 11, f.area());
+    f.render_widget(Clear, area);
+
+    let field = |label: &str, value: &str, active: bool| {
+        let value_style = if active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Line::from(vec![
+            Span::raw(format!("  {label:8}")),
+            Span::styled(format!(" {value:>7} "), value_style),
+        ])
+    };
+
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            format!("  {}", form.label),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )]),
+        Line::raw(""),
+        field("vCPUs", &form.vcpus, form.field == ResizeField::Vcpus),
+        field("MiB RAM", &form.ram_mib, form.field == ResizeField::Ram),
+        Line::raw(""),
+    ];
+    if form.running {
+        lines.push(Line::from(Span::styled(
+            "  running — the VM keeps its size until reboot",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  applies on next start",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("tab", Style::default().fg(Color::Yellow)),
+        Span::raw(" field  "),
+        Span::styled("+/-", Style::default().fg(Color::Yellow)),
+        Span::raw(" adjust  "),
+        Span::styled("digits", Style::default().fg(Color::Yellow)),
+        Span::raw(" type"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" apply  "),
+        Span::styled("^r", Style::default().fg(Color::Yellow)),
+        Span::raw(" apply+restart  "),
+        Span::styled("esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel"),
+    ]));
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" resize microVM "),
+    );
+    f.render_widget(popup, area);
+}
+
+/// A `width` x `height` rect centred in `area` (clamped to it).
+fn centered_rect(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    ratatui::layout::Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 fn state_color(state: mvm_common::SandboxState) -> Color {

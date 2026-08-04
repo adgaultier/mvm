@@ -7,7 +7,8 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use mvm_common::api::{
-    ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest, StdinQuery,
+    ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest, SandboxResizeRequest,
+    StdinQuery,
 };
 use mvm_common::protocol::{encode_frame, AgentEvent};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
@@ -22,6 +23,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
         .route("/sandboxes/{id}/start", post(start_sandbox))
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
+        .route("/sandboxes/{id}/resize", post(resize_sandbox))
         .route("/sandboxes/{id}/logs", get(logs))
         .route("/sandboxes/{id}/stdin", post(console_stdin))
         .route("/sandboxes/{id}/exec", post(exec))
@@ -81,6 +83,15 @@ async fn stop_sandbox(
     Path(id): Path<String>,
 ) -> Result<Json<Sandbox>, ApiError> {
     Ok(Json(state.manager.stop(&id).await?))
+}
+
+/// Change the VM's vcpu/RAM allocation (applies on next boot).
+async fn resize_sandbox(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SandboxResizeRequest>,
+) -> Result<Json<Sandbox>, ApiError> {
+    Ok(Json(state.manager.resize(&id, req.vcpus, req.ram_mib)?))
 }
 
 // ---- logs ----------------------------------------------------------------

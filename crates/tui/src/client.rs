@@ -45,6 +45,28 @@ impl Client {
         self.action(id, "stop")
     }
 
+    /// Change the sandbox's vcpu/RAM allocation. Unlike start/stop this
+    /// surfaces the daemon's error body: the values come from user input.
+    pub fn resize(&self, id: &str, vcpus: u8, ram_mib: u32) -> Result<Sandbox, String> {
+        let resp = self
+            .http()
+            .post(format!("{}/api/v1/sandboxes/{id}/resize", self.base))
+            .json(&mvm_common::api::SandboxResizeRequest {
+                vcpus: Some(vcpus),
+                ram_mib: Some(ram_mib),
+            })
+            .send()
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(resp
+                .json::<mvm_common::api::ErrorResponse>()
+                .map(|e| e.error)
+                .unwrap_or_else(|_| format!("resize failed ({status})")));
+        }
+        resp.json().map_err(|e| e.to_string())
+    }
+
     pub fn remove(&self, id: &str) -> Result<(), String> {
         self.http()
             .delete(format!("{}/api/v1/sandboxes/{id}", self.base))

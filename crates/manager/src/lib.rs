@@ -406,6 +406,58 @@ impl Manager {
         Ok(self.get(&id)?)
     }
 
+    /// Change a sandbox's CPU/RAM allocation. libkrun has no CPU or memory
+    /// hot-plug, so this rewrites the spec: a running VM keeps the allocation
+    /// it booted with until it is restarted (the returned record's state tells
+    /// the caller whether that is pending).
+    pub fn resize(
+        &self,
+        id_or_name: &str,
+        vcpus: Option<u8>,
+        ram_mib: Option<u32>,
+    ) -> Result<Sandbox> {
+        const MIN_RAM_MIB: u32 = 64;
+        if let Some(0) = vcpus {
+            return Err(Error::InvalidState("a sandbox needs at least 1 vcpu".into()));
+        }
+        if let Some(ram) = ram_mib {
+            if ram < MIN_RAM_MIB {
+                return Err(Error::InvalidState(format!(
+                    "{ram} MiB is below the {MIN_RAM_MIB} MiB minimum"
+                )));
+            }
+        }
+        if vcpus.is_none() && ram_mib.is_none() {
+            return Err(Error::InvalidState(
+                "nothing to resize: pass vcpus and/or ram_mib".into(),
+            ));
+        }
+
+        let id = self.resolve(id_or_name)?;
+        let info = {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            let entry = sandboxes
+                .get_mut(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
+            if let Some(vcpus) = vcpus {
+                entry.info.spec.vcpus = vcpus;
+            }
+            if let Some(ram) = ram_mib {
+                entry.info.spec.ram_mib = ram;
+            }
+            entry.info.clone()
+        };
+        self.persist()?;
+        tracing::info!(
+            sandbox = %id,
+            vcpus = info.spec.vcpus,
+            ram_mib = info.spec.ram_mib,
+            pending_restart = info.state.is_alive(),
+            "sandbox resized"
+        );
+        Ok(info)
+    }
+
     /// Remove a sandbox (stopping it first if needed) and its filesystem.
     pub async fn remove(&self, id_or_name: &str) -> Result<()> {
         let id = self.resolve(id_or_name)?;

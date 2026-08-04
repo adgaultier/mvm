@@ -26,6 +26,15 @@ pub struct ResizeRequest {
     pub rows: u16,
 }
 
+/// POST /api/v1/sandboxes/{id}/resize — change the VM's CPU/RAM allocation.
+/// Omitted fields keep their current value. A microVM cannot be resized while
+/// it runs, so this rewrites the spec and the next boot picks it up.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxResizeRequest {
+    pub vcpus: Option<u8>,
+    pub ram_mib: Option<u32>,
+}
+
 /// POST /api/v1/images/pull
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequest {
