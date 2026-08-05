@@ -2,6 +2,7 @@
 
 mod client;
 mod run;
+#[cfg(target_os = "linux")]
 mod userns;
 
 use clap::{Args, Parser, Subcommand};
@@ -178,6 +179,7 @@ fn main() {
         Command::Serve { addr } => {
             // Must run before the tokio runtime exists (single-threaded
             // requirement of unshare) — may re-exec and never return.
+            #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
             serve(addr)
         }

@@ -914,7 +914,17 @@ impl SandboxEntry {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{pid}")).exists()
+    #[cfg(target_os = "linux")]
+    {
+        PathBuf::from(format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No /proc on macOS; signal 0 probes existence. EPERM means the
+        // process exists but is not ours — still alive.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 /// Keep only the last `n` lines of console output. Console bytes are raw (a
