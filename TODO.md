@@ -172,10 +172,64 @@ unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## 8. TUI: render guest colours in the console pane
-The pane is plain text since escapes are stripped at the edge. Showing colours
-means parsing SGR into ratatui spans (`ansi-to-tui`-style) — never by passing
-escapes through, which is what let the guest drive the user's terminal.
+## 5. Apple Silicon port (aarch64-apple-darwin)
+Make mvm build and run on macOS Apple Silicon. libkrun officially
+supports macOS/ARM64 via Hypervisor.framework (same 1.x C API, single
+header, identical `krun_start_enter` semantics; the generic build uses
+the same `/init.krun` blob, so the agent-as-PID-1 design carries over),
+so this is a full runtime port, not compile-only. HVF is same-arch:
+guests are aarch64, OCI images must be arm64 (`registry.rs` already
+resolves arm64 manifests).
+
+**Prerequisites (machine):** rustup + `rustup target add
+aarch64-unknown-linux-musl` (Tier 2); `brew install zig` + `cargo
+install cargo-zigbuild` for the agent cross-compile (std+libc, zig is
+just the linker → fully static, no Docker); `brew tap libkrun/krun &&
+brew install libkrun gvproxy` (libkrun 1.19.4, arm64 bottles incl. macOS
+26; gvproxy alternative: podman's bundled one at
+`/opt/homebrew/opt/podman/libexec/gvproxy`, universal binary, vfkit
+unixgram works on macOS).
+
+**Compile port (all additive `#[cfg]`; Linux behavior unchanged):**
+- `krun-sys`: add `build.rs` — darwin: link-search `$(brew --prefix)/lib`
+  + rpath link-arg (dylib install-name workaround, same as krunkit);
+  linux: unchanged (`#[link(name = "krun")]`).
+- `cli/userns.rs`: gate the module to `target_os = "linux"`; no-op on
+  darwin (macOS has no user namespaces; guest chown limited — same as
+  Linux without userns mode).
+- `crates/agent`: gate the body to linux + stub main elsewhere, so
+  `cargo build/test --workspace` stays green on darwin (the agent only
+  ever runs inside Linux guests; `SOCK_CLOEXEC`/`mount`/`MNT_DETACH`
+  don't exist in darwin libc).
+- `manager::pid_alive`: `kill(pid, 0)` instead of `/proc/{pid}` on
+  darwin.
+- `common::agent_binary()`: pick the musl target dir by host arch
+  (`aarch64-unknown-linux-musl` on arm hosts); reject non-ELF
+  candidates — the PT_INTERP check currently treats Mach-O as "static"
+  and would inject a host build into a Linux guest.
+- `storage`: gate overlay to linux explicitly; darwin default = `copy`.
+  ext4 stays opt-in (needs e2fsprogs).
+- `network`: `tap:` refused on darwin with a clear error;
+  none/tsi/gvproxy port as-is.
+
+**Build port:** `scripts/build.sh` picks the musl target by host arch;
+darwin uses `cargo zigbuild`, linux keeps plain `cargo build`.
+
+**Runtime validation:** `nm` the installed `libkrun.dylib` for the
+symbols mvm actually calls (all present in the 1.19.4 header; the five
+declared-but-never-called ones emit no relocations, harmless); boot test
+`serve` + `pull alpine` + `run`; `integration.sh` portability fixes (BSD
+`script(1)` flags, `shasum -a 256` for `sha256sum`, no `timeout` by
+default).
+
+**Docs:** README requirements + limitations (macOS support; no
+userns/chown fidelity, no tap, storage=copy), AGENTS.md sharp edges
+(dylib rpath, Mach-O agent rejection), Done entry here.
+
+**Verify empirically during the port:** `krun_set_gvproxy_path` symbol
+(deprecated in 1.19.4 but present; fallback: `krun_add_net_unixgram` +
+NET_FLAG_VFKIT), TSI behavior on HVF, and the MVM_* env channel through
+the macOS init blob.
 
 ---
 
