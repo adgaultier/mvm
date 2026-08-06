@@ -2,6 +2,7 @@
 //! persistence, and the host side of the guest-agent control channel.
 
 mod agent_conn;
+mod console_filter;
 mod gvproxy;
 
 use std::collections::HashMap;
@@ -284,13 +285,22 @@ impl Manager {
                 .append(true)
                 .open(&log_path)
                 .expect("console.log");
+            // The recording drops terminal queries (see console_filter): it
+            // gets replayed by `logs` and attach's backlog, and a replayed
+            // question makes the reader's terminal answer into its own input.
+            // The broadcast stays byte-exact — a live interactive shell asks
+            // for the cursor column and reads the reply.
+            let mut filter = console_filter::QueryFilter::default();
             let mut buf = [0u8; 8192];
             loop {
                 match console.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = file.write_all(&buf[..n]);
-                        let _ = file.flush();
+                        let recorded = filter.filter(&buf[..n]);
+                        if !recorded.is_empty() {
+                            let _ = file.write_all(&recorded);
+                            let _ = file.flush();
+                        }
                         let _ = pump_tx.send(Bytes::copy_from_slice(&buf[..n]));
                     }
                     Err(_) => break,

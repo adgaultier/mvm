@@ -172,6 +172,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   zombie holding host ports.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
+- **Never record a terminal *query* in `console.log`.** A tty session's
+  output contains sequences that ask the terminal to answer — DSR
+  (`ESC[6n`, "where is the cursor?") and Device Attributes (`ESC[c`).
+  `logs` and attach's backlog replay the recording verbatim, so a replayed
+  question makes the *reader's* terminal answer into its own input buffer:
+  stray `^[[1;5R` in their shell (the alpine prompt `~ # ` is 4 columns
+  wide, hence column 5). The log pump filters queries out of the file
+  (`manager::console_filter`) but leaves the **broadcast byte-exact** — a
+  live interactive shell really does ask for the cursor column and read the
+  reply, so `attach`/`run -it` must pass them through. Colours, cursor
+  motion and erases are real output and stay in both.
 - **macOS: no hypervisor entitlement, no VMs.** Hypervisor.framework
   refuses binaries that don't carry `com.apple.security.hypervisor`;
   `krun_start_enter` fails with `EINVAL` and no better hint. `build.sh`
