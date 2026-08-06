@@ -14,7 +14,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Percentage(35),
             Constraint::Length(2),
         ])
         .split(f.area());
@@ -49,22 +48,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Images => draw_images(f, app, chunks[1]),
     }
 
-    // Logs pane.
-    let log_lines: Vec<Line> = app
-        .logs
-        .lines()
-        .rev()
-        .take(chunks[2].height.saturating_sub(2) as usize)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(Line::from)
-        .collect();
-    let logs = Paragraph::new(log_lines)
-        .block(Block::default().borders(Borders::ALL).title(" console "))
-        .wrap(Wrap { trim: false });
-    f.render_widget(logs, chunks[2]);
-
     // Footer.
     let (message, message_is_error) = app.footer_message();
     let footer = Paragraph::new(Line::from(vec![
@@ -93,7 +76,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     ]))
     // The hints must not fall off a narrow terminal; the footer has 2 rows.
     .wrap(Wrap { trim: true });
-    f.render_widget(footer, chunks[3]);
+    f.render_widget(footer, chunks[2]);
 
     // Modals last, so they sit on top of everything.
     if app.resize.is_some() {

@@ -111,7 +111,7 @@ libc you don't control.
 | `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
 | `mvm logs [-f] [-n N] SANDBOX` | guest console output (`-n` = last N lines) |
 | `mvm inspect SANDBOX` | full sandbox JSON |
-| `mvm-tui` | live dashboard (sandboxes, images, console); `s` start, `x` stop, `d` delete (asks `y`/`n` — it destroys the filesystem), `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts). The console pane shows guest output as plain text — escape sequences are stripped, so colours don't render (and the guest can't drive your terminal) |
+| `mvm-tui` | live dashboard (sandboxes, images); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts). Console output is `mvm logs` |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
