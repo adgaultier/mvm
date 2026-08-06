@@ -13,13 +13,8 @@ use crate::vm::KrunContext;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimConfig {
     pub sandbox_id: String,
-    /// Prepared root filesystem for the guest (writable). With `root_disk`
-    /// set this is only a bootstrap dir holding the agent; the real root is
-    /// the disk image.
+    /// Prepared root filesystem for the guest (writable), served over virtiofs.
     pub rootfs: PathBuf,
-    /// Raw ext4 image to attach as virtio-blk; the agent pivots onto it.
-    #[serde(default)]
-    pub root_disk: Option<PathBuf>,
     /// Workload argv (already resolved from image config + user override).
     pub exec: Vec<String>,
     pub env: Vec<String>,
@@ -107,17 +102,7 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         }
     }
 
-    // A block-device root only works with the agent aboard (it performs the
-    // pivot), and the workdir must then be entered after the pivot — not by
-    // libkrun's init, whose cwd would be the bootstrap rootfs.
-    if let Some(disk) = &config.root_disk {
-        if config.agent_socket.is_none() {
-            return Err(mvm_common::Error::Runtime(
-                "root disk requires the guest agent".into(),
-            ));
-        }
-        ctx.add_disk("root", disk, false)?;
-    } else if let Some(workdir) = &config.workdir {
+    if let Some(workdir) = &config.workdir {
         ctx.set_workdir(workdir)?;
     }
 
@@ -137,15 +122,6 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             env.push("MVM_CONSOLE_TTY=1".to_string());
             if let Some((cols, rows)) = config.console_size {
                 env.push(format!("MVM_CONSOLE_SIZE={cols},{rows}"));
-            }
-        }
-        if let Some(user) = &config.user {
-            env.push(format!("MVM_USER={user}"));
-        }
-        if config.root_disk.is_some() {
-            env.push("MVM_ROOT_DISK=/dev/vda".to_string());
-            if let Some(workdir) = &config.workdir {
-                env.push(format!("MVM_WORKDIR={workdir}"));
             }
         }
         match config.network {

@@ -190,7 +190,7 @@ fn console_session(
             // byte-exact (binaries travel through here).
             let mut scanner = detach
                 .filter(|_| raw_active)
-                .map(|keys| DetachScanner::new(keys));
+                .map(DetachScanner::new);
             loop {
                 let n = match stdin.read(&mut chunk) {
                     Ok(0) | Err(_) => break,

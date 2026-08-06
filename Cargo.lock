@@ -1070,8 +1070,6 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mvm-common",
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -99,10 +99,7 @@ impl StorageDriver for OverlayDriver {
         std::fs::create_dir_all(&merged)?;
 
         mount_overlay(image_rootfs, &upper, &work, &merged)?;
-        Ok(PreparedRootfs {
-            rootfs: merged,
-            root_disk: None,
-        })
+        Ok(PreparedRootfs { rootfs: merged })
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<()> {

@@ -172,68 +172,41 @@ unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## 5. Apple Silicon port (aarch64-apple-darwin)
-Make mvm build and run on macOS Apple Silicon. libkrun officially
-supports macOS/ARM64 via Hypervisor.framework (same 1.x C API, single
-header, identical `krun_start_enter` semantics; the generic build uses
-the same `/init.krun` blob, so the agent-as-PID-1 design carries over),
-so this is a full runtime port, not compile-only. HVF is same-arch:
-guests are aarch64, OCI images must be arm64 (`registry.rs` already
-resolves arm64 manifests).
-
-**Prerequisites (machine):** rustup + `rustup target add
-aarch64-unknown-linux-musl` (Tier 2); `brew install zig` + `cargo
-install cargo-zigbuild` for the agent cross-compile (std+libc, zig is
-just the linker → fully static, no Docker); `brew tap libkrun/krun &&
-brew install libkrun gvproxy` (libkrun 1.19.4, arm64 bottles incl. macOS
-26; gvproxy alternative: podman's bundled one at
-`/opt/homebrew/opt/podman/libexec/gvproxy`, universal binary, vfkit
-unixgram works on macOS).
-
-**Compile port (all additive `#[cfg]`; Linux behavior unchanged):**
-- `krun-sys`: add `build.rs` — darwin: link-search `$(brew --prefix)/lib`
-  + rpath link-arg (dylib install-name workaround, same as krunkit);
-  linux: unchanged (`#[link(name = "krun")]`).
-- `cli/userns.rs`: gate the module to `target_os = "linux"`; no-op on
-  darwin (macOS has no user namespaces; guest chown limited — same as
-  Linux without userns mode).
-- `crates/agent`: gate the body to linux + stub main elsewhere, so
-  `cargo build/test --workspace` stays green on darwin (the agent only
-  ever runs inside Linux guests; `SOCK_CLOEXEC`/`mount`/`MNT_DETACH`
-  don't exist in darwin libc).
-- `manager::pid_alive`: `kill(pid, 0)` instead of `/proc/{pid}` on
-  darwin.
-- `common::agent_binary()`: pick the musl target dir by host arch
-  (`aarch64-unknown-linux-musl` on arm hosts); reject non-ELF
-  candidates — the PT_INTERP check currently treats Mach-O as "static"
-  and would inject a host build into a Linux guest.
-- `storage`: gate overlay to linux explicitly; darwin default = `copy`.
-  ext4 stays opt-in (needs e2fsprogs).
-- `network`: `tap:` refused on darwin with a clear error;
-  none/tsi/gvproxy port as-is.
-
-**Build port:** `scripts/build.sh` picks the musl target by host arch;
-darwin uses `cargo zigbuild`, linux keeps plain `cargo build`.
-
-**Runtime validation:** `nm` the installed `libkrun.dylib` for the
-symbols mvm actually calls (all present in the 1.19.4 header; the five
-declared-but-never-called ones emit no relocations, harmless); boot test
-`serve` + `pull alpine` + `run`; `integration.sh` portability fixes (BSD
-`script(1)` flags, `shasum -a 256` for `sha256sum`, no `timeout` by
-default).
-
-**Docs:** README requirements + limitations (macOS support; no
-userns/chown fidelity, no tap, storage=copy), AGENTS.md sharp edges
-(dylib rpath, Mach-O agent rejection), Done entry here.
-
-**Verify empirically during the port:** `krun_set_gvproxy_path` symbol
-(deprecated in 1.19.4 but present; fallback: `krun_add_net_unixgram` +
-NET_FLAG_VFKIT), TSI behavior on HVF, and the MVM_* env channel through
-the macOS init blob.
-
 ---
 
 ## Done
+
+- **Dropped the `ext4` storage driver** (2026-08-06) — removed the
+  opt-in block-device root and everything that existed only to serve it:
+  `mkfs.ext4 -d` image building, the agent's `pivot_root` onto /dev/vda
+  (plus `apply_ownership` and the `mount` helper), the `root_disk`
+  plumbing through `PreparedRootfs`/`ShimConfig`/the shim's virtio-blk
+  attach, `MVM_ROOT_DISK`/`MVM_WORKDIR`, and the whole ownership-manifest
+  pipeline (`OwnershipManifest`, `ownership.jsonl`, `OwnershipEntry`,
+  `GUEST_OWNERSHIP_PATH`). Rationale: it was added to fix rootless guest
+  chown, which the userns mode later solved properly for the default
+  virtiofs path; it was opt-in, never exercised by `integration.sh`, and
+  needed e2fsprogs (absent on macOS). Storage is now `overlay` + `copy`.
+- **`run -t` lost the workload's last output** — the agent bridges the
+  workload's guest pty to the console on a detached thread, but nothing
+  waited for it: once the workload exited, `real_main` returned and
+  `process::exit` tore the process down mid-drain, so a short-lived `-t`
+  workload raced its own final bytes. Reproduced at ~8/15 (`run -t alpine
+  printf 'A\n'` losing its CRLF); the agent now keeps the thread's
+  JoinHandle and joins it before reporting `WorkloadExit` → 20/20.
+
+- **Apple Silicon port** — mvm builds, boots and passes the integration
+  suite 46/46 on aarch64-apple-darwin (2026-08-06). libkrun 1.19.4 from
+  the `libkrun/krun` Homebrew tap (Hypervisor.framework, same-arch arm64
+  guests); `scripts/install-darwin.sh` provisions the machine. Mechanism:
+  Linux-only code cfg-gated (userns, agent body, `/proc`, tap); Homebrew
+  lib dir baked into every binary as rpath via `.cargo/config.toml`
+  (libkrun dlopens libkrunfw by bare name); `dist/mvm` codesigned with
+  the hypervisor entitlement (without it `krun_start_enter` → EINVAL);
+  agent cross-compiled with `cargo zigbuild` (host-arch musl target,
+  `agent_binary()` now rejects non-ELF candidates); copy driver uses
+  `clonefile(2)` on APFS. macOS limits: no userns/chown fidelity, storage
+  = copy (wiped per start), no tap profile.
 
 - **E2E integration** — 49/49 on real KVM in rootless userns mode with the
   overlay driver, gvproxy v0.8.9 installed (2026-08-04); 21/21 at the
@@ -278,7 +251,7 @@ the macOS init blob.
   into a user namespace (subuid ranges via newuidmap/newgidmap, two-stage
   SIGSTOP handshake so the daemon keeps capabilities after exec); the
   in-process virtiofs server chowns to mapped uids. Unpack applies real
-  tar-header ownership. `ext4` block-root driver kept as opt-in.
+  tar-header ownership.
 - **Overlay storage rootless** — `userxattr` mounts inside the userns;
   upper layer persists across stop/start; probe with labeled fallback.
 - **Network isolation + modes** — `none` now really is isolated (dead

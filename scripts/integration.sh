@@ -261,8 +261,8 @@ rm -rf "$VOLDIR"
 
 echo "==> ownership + persistence"
 # Guest chown fidelity and rootfs persistence need an ownership-capable,
-# persistent driver (userns/overlay or ext4 on Linux). The macOS copy
-# driver provides neither, so those checks are Linux-only.
+# persistent driver (userns/overlay on Linux). The macOS copy driver
+# provides neither, so those checks are Linux-only.
 if [ "$(uname -s)" = Linux ]; then
     check "guest chown" "daemon" "$("$MVM" exec itest sh -c 'chown daemon:daemon /tmp && stat -c %U /tmp')"
     check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"

@@ -184,27 +184,8 @@ impl Manager {
         // 1. Writable rootfs.
         let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
 
-        // 2. Inject the guest agent (enables exec). Not fatal if missing —
-        // except for block-device roots, where the agent performs the pivot.
+        // 2. Inject the guest agent (enables exec). Not fatal if missing.
         let injected = self.inject_agent(&prepared.rootfs);
-        if prepared.root_disk.is_some() {
-            injected.as_ref().map_err(|e| {
-                Error::Runtime(format!(
-                    "the '{}' storage driver requires the mvm-agent binary: {e}",
-                    self.inner.storage.name()
-                ))
-            })?;
-            // Stage the image's ownership manifest next to the agent so it
-            // can restore real file owners on the disk at first boot.
-            if let Some(manifest) = &image.ownership {
-                std::fs::copy(
-                    manifest,
-                    prepared
-                        .rootfs
-                        .join(protocol::GUEST_OWNERSHIP_PATH.trim_start_matches('/')),
-                )?;
-            }
-        }
         let agent_socket = injected.ok().map(|_| {
             let sock = sb_dir.join("agent.sock");
             let _ = std::fs::remove_file(&sock);
@@ -249,7 +230,6 @@ impl Manager {
         let config = ShimConfig {
             sandbox_id: id.clone(),
             rootfs: prepared.rootfs,
-            root_disk: prepared.root_disk,
             exec,
             env,
             workdir,
@@ -383,7 +363,7 @@ impl Manager {
             }
         }
 
-        Ok(self.get(&id)?)
+        self.get(&id)
     }
 
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
@@ -406,7 +386,7 @@ impl Manager {
         }
 
         self.persist()?;
-        Ok(self.get(&id)?)
+        self.get(&id)
     }
 
     /// Change a sandbox's CPU/RAM allocation. libkrun has no CPU or memory
@@ -504,7 +484,7 @@ impl Manager {
     pub fn list(&self) -> Vec<Sandbox> {
         let sandboxes = self.inner.sandboxes.read().unwrap();
         let mut out: Vec<_> = sandboxes.values().map(|e| e.info.clone()).collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
         out
     }
 
@@ -951,30 +931,6 @@ fn tail_lines(backlog: Vec<u8>, n: Option<usize>) -> Vec<u8> {
     backlog
 }
 
-#[cfg(test)]
-mod tests {
-    use super::tail_lines;
-
-    #[test]
-    fn tail_keeps_the_last_lines() {
-        let log = b"a\nb\nc\n".to_vec();
-        assert_eq!(tail_lines(log.clone(), None), log);
-        assert_eq!(tail_lines(log.clone(), Some(0)), b"");
-        assert_eq!(tail_lines(log.clone(), Some(1)), b"c\n");
-        assert_eq!(tail_lines(log.clone(), Some(2)), b"b\nc\n");
-        // Asking for more lines than exist yields everything.
-        assert_eq!(tail_lines(log, Some(9)), b"a\nb\nc\n");
-    }
-
-    #[test]
-    fn tail_handles_a_partial_last_line() {
-        // A live shell's prompt has no trailing newline.
-        assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
-        assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
-        assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
-    }
-}
-
 /// SIGTERM, wait, then SIGKILL. Kills the whole process group (the shim is
 /// a session leader).
 async fn terminate(pid: u32, escalate: bool) {
@@ -999,5 +955,29 @@ async fn terminate(pid: u32, escalate: bool) {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail_lines;
+
+    #[test]
+    fn tail_keeps_the_last_lines() {
+        let log = b"a\nb\nc\n".to_vec();
+        assert_eq!(tail_lines(log.clone(), None), log);
+        assert_eq!(tail_lines(log.clone(), Some(0)), b"");
+        assert_eq!(tail_lines(log.clone(), Some(1)), b"c\n");
+        assert_eq!(tail_lines(log.clone(), Some(2)), b"b\nc\n");
+        // Asking for more lines than exist yields everything.
+        assert_eq!(tail_lines(log, Some(9)), b"a\nb\nc\n");
+    }
+
+    #[test]
+    fn tail_handles_a_partial_last_line() {
+        // A live shell's prompt has no trailing newline.
+        assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
+        assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
+        assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
     }
 }

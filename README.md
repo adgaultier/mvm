@@ -61,11 +61,19 @@ $ mvm stop dev && mvm rm dev
 
 ## Requirements
 
-- Linux x86_64 with **KVM** (`/dev/kvm` read-write for your user)
-- **libkrun** and **libkrunfw** installed (`libkrun.so.1`, headers for building)
-- Rust toolchain + `x86_64-unknown-linux-musl` target (for the guest agent)
+- **Linux x86_64** with KVM (`/dev/kvm` read-write for your user), or
+  **macOS on Apple Silicon** (macOS 14+, Hypervisor.framework)
+- **libkrun** and **libkrunfw** (`libkrun.so.1` / `libkrun.dylib`, headers
+  for building). On macOS: `scripts/install-darwin.sh` installs everything
+  (rustup, zig, libkrun + gvproxy from the `libkrun/krun` Homebrew tap).
+- Rust toolchain + the musl target matching your host arch (guests are
+  same-arch: `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`)
+  for the guest agent
 - Optional: [gvproxy](https://github.com/containers/gvisor-tap-vsock) for
   outbound networking / port forwarding
+
+Guests run your host's architecture — on Apple Silicon pull arm64 images
+(`mvm pull` resolves the matching platform manifest automatically).
 
 Rootless operation is fully supported (state lives in
 `~/.local/share/mvm`; as root: `/var/lib/mvm`; override: `MVM_DATA_DIR`).
@@ -74,8 +82,13 @@ Rootless operation is fully supported (state lives in
 
 ```console
 $ scripts/build.sh        # release binaries + static agent → dist/
-$ scripts/integration.sh  # end-to-end test: boots real VMs (needs KVM + network)
+$ scripts/integration.sh  # end-to-end test: boots real VMs (needs KVM/libkrun + network)
 ```
+
+On macOS run `scripts/install-darwin.sh` once first; `build.sh` then
+cross-compiles the agent with `cargo zigbuild` and codesigns `dist/mvm`
+with the Hypervisor.framework entitlement (without it macOS refuses to
+start VMs).
 
 `mvm` looks for `mvm-agent` next to its own binary, or at `MVM_AGENT_PATH`.
 The agent **must** be the static musl build — it runs inside guests whose
@@ -150,15 +163,15 @@ defined in `crates/common/src/protocol.rs`.
   full fidelity — image files appear root-owned, `apk`/`apt`/`useradd` work.
   Requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`;
   degrades gracefully (with a warning) when missing. Opt out: `MVM_USERNS=0`.
+  Linux-only — on macOS the daemon runs with host credentials.
 - **Storage drivers** (auto-selected, override `MVM_STORAGE_DRIVER`) — the
   guest root is always served over **virtiofs**:
   - `overlay` (default for root and userns mode): kernel OverlayFS, image
     rootfs as lower layer, per-sandbox upper. Changes persist across
     `stop`/`start`. Auto-probed; falls back to `copy` if unsupported.
-  - `copy`: per-sandbox rootfs copy; universal fallback. Rootfs is rebuilt
+  - `copy`: per-sandbox rootfs copy; universal fallback (and the macOS
+    default — APFS copies are clonefile(2), cheap). Rootfs is rebuilt
     (wiped) on every start.
-  - `ext4` (opt-in): per-sandbox ext4 image built with `mkfs.ext4 -d`,
-    booted as a virtio-blk root instead of virtiofs.
 - **Network profiles** (`--net`, placed before the image):
   - `none` (default): fully isolated — loopback only. (mvm attaches a
     dead NIC to switch off libkrun's default TSI backend, which would
@@ -205,7 +218,7 @@ defined in `crates/common/src/protocol.rs`.
     Throughput is modest (userspace TCP/IP) — fine for package installs
     and API calls.
   - `tap:<dev>`: attach to an existing TAP device for near-native
-    performance; you own the plumbing (and the guest needs its own IP
+    performance (Linux-only); you own the plumbing (and the guest needs its own IP
     config — mvm does no addressing):
 
     ```console
@@ -219,7 +232,9 @@ defined in `crates/common/src/protocol.rs`.
   virtiofs is limited to host credentials.
 - Guest chowns land on subuids on the host; clean up sandbox state through
   `mvm rm` (the daemon), not by deleting the data dir by hand.
-- x86_64 Linux only (matches the vendored libkrun FFI subset).
+- Guests are same-arch as the host (x86_64 on Linux/KVM, arm64 on Apple
+  Silicon). On macOS additionally: no userns mode, storage is `copy`
+  (rootfs wiped on each start), and no `tap:` profile.
 - No CPU/RAM hot-plug: `mvm resize` (and the TUI's `r` form) change the
   spec, and the VM picks the new size up when it next boots.
 - `run -it` sizes the guest pty once, at start; resizing your terminal

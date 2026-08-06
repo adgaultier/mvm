@@ -54,6 +54,14 @@ struct Agent {
     sessions: HashMap<u32, Session>,
     workload_pid: i32,
     workload_code: Option<i32>,
+    /// Bridges the workload's guest pty to the console (`-t` only). Joined
+    /// once the workload exits, before the agent reports it: the workload
+    /// closing its pty slave doesn't mean this thread has finished draining
+    /// buffered pty output to the console yet, and `process::exit` doesn't
+    /// wait for other threads — without the join, a short-lived `-t`
+    /// workload can race its own exit against its last bytes ever reaching
+    /// the host.
+    console_output: Option<std::thread::JoinHandle<()>>,
 }
 
 pub fn main() {
@@ -62,27 +70,8 @@ pub fn main() {
     std::process::exit(code);
 }
 fn real_main(workload_argv: &[String]) -> i32 {
-    // 1. Block-device root: pivot from the bootstrap virtiofs onto the ext4
-    // disk before anything else touches the filesystem.
-    if let Ok(dev) = std::env::var("MVM_ROOT_DISK") {
-        if let Err(e) = switch_to_root_disk(&dev) {
-            eprintln!("mvm-agent: root disk setup failed: {e}");
-            return 125;
-        }
-    }
-
-    // 2. Mount any virtiofs bind mounts passed via MVM_MOUNTS (after the
-    // pivot, so they land in the final root).
+    // 1. Mount any virtiofs bind mounts passed via MVM_MOUNTS.
     mount_bind_shares();
-
-    // 3. Enter the image workdir (only set with a disk root; virtiofs roots
-    // get it from libkrun's init).
-    if let Ok(dir) = std::env::var("MVM_WORKDIR") {
-        if std::env::set_current_dir(&dir).is_err() {
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::env::set_current_dir(&dir);
-        }
-    }
 
     // Static IPv4 bootstrap for NIC-backed modes (gvproxy defaults).
     configure_network();
@@ -102,8 +91,6 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
-        "MVM_ROOT_DISK",
-        "MVM_WORKDIR",
         "MVM_MOUNTS",
         "MVM_NET_CONFIG",
         "MVM_NET_TSI",
@@ -130,11 +117,15 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // 4. Spawn the workload. The guest console is a byte stream, so an
     // interactive workload needs a real guest PTY of its own.
+    let mut console_output = None;
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
         match spawn_tty_workload(workload_argv, console_size) {
-            Some(child) => Some(child),
+            Some((child, handle)) => {
+                console_output = Some(handle);
+                Some(child)
+            }
             None => return 127,
         }
     } else {
@@ -175,6 +166,9 @@ fn real_main(workload_argv: &[String]) -> i32 {
             unsafe {
                 libc::waitpid(workload_pid, &mut status, 0);
             }
+            if let Some(handle) = console_output {
+                let _ = handle.join();
+            }
             return exit_status_to_code(status);
         }
     };
@@ -186,6 +180,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         sessions: HashMap::new(),
         workload_pid,
         workload_code: None,
+        console_output,
     };
     agent.send(&AgentEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
@@ -197,7 +192,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
 fn spawn_tty_workload(
     workload_argv: &[String],
     size: Option<(u16, u16)>,
-) -> Option<std::process::Child> {
+) -> Option<(std::process::Child, std::thread::JoinHandle<()>)> {
     let winsize = size.map(|(cols, rows)| libc::winsize {
         ws_row: rows,
         ws_col: cols,
@@ -255,19 +250,23 @@ fn spawn_tty_workload(
     let input_fd = unsafe { libc::dup(0) };
     let output_fd = unsafe { libc::dup(1) };
     if input_fd < 0 || output_fd < 0 {
-        return Some(child);
+        // No bridging possible either way; hand back an already-finished
+        // handle so the caller can still unconditionally join it.
+        return Some((child, std::thread::spawn(|| {})));
     }
     let mut input = unsafe { std::fs::File::from_raw_fd(input_fd) };
-    let mut input_master = master.try_clone().ok()?;
+    let Ok(mut input_master) = master.try_clone() else {
+        return Some((child, std::thread::spawn(|| {})));
+    };
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut input, &mut input_master);
     });
     let mut output = unsafe { std::fs::File::from_raw_fd(output_fd) };
     let mut output_master = master;
-    std::thread::spawn(move || {
+    let output_handle = std::thread::spawn(move || {
         let _ = std::io::copy(&mut output_master, &mut output);
     });
-    Some(child)
+    Some((child, output_handle))
 }
 
 /// Sane interactive defaults on a pty slave: CR/LF translation both ways,
@@ -468,8 +467,14 @@ impl Agent {
                 });
             }
 
-            // Workload finished and everything reported: we're done.
+            // Workload finished and everything reported: we're done. Drain
+            // the console-bridging thread first (see `console_output`) so a
+            // short-lived `-t` workload's last bytes reach the host before
+            // the process exits.
             if let Some(code) = self.workload_code {
+                if let Some(handle) = self.console_output.take() {
+                    let _ = handle.join();
+                }
                 self.send(&AgentEvent::WorkloadExit { code });
                 let _ = self.flush_out();
                 self.kill_all_sessions();
@@ -849,94 +854,6 @@ fn connect_vsock_retry(cid: u32, port: u32, attempts: u32) -> Option<RawFd> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     None
-}
-
-/// Pivot from the bootstrap virtiofs root onto the ext4 root disk.
-///
-/// Sequence: read the ownership manifest (still on the bootstrap root),
-/// mount the disk, restore file owners (rootless hosts could not chown at
-/// unpack time), pivot_root, remount the API filesystems, drop the old root.
-/// Our own binary lives on the discarded bootstrap root, but the mapped
-/// pages stay valid; we never re-exec.
-fn switch_to_root_disk(dev: &str) -> Result<(), String> {
-    let manifest = std::fs::read_to_string(mvm_common::protocol::GUEST_OWNERSHIP_PATH)
-        .unwrap_or_default();
-
-    const NEWROOT: &str = "/newroot";
-    std::fs::create_dir_all(NEWROOT).map_err(|e| format!("mkdir {NEWROOT}: {e}"))?;
-    mount(dev, NEWROOT, Some("ext4"), 0).map_err(|e| format!("mount {dev}: {e}"))?;
-
-    apply_ownership(NEWROOT, &manifest);
-
-    // pivot_root(2): new_root and put_old must both be mount points /
-    // directories under new_root.
-    let old = format!("{NEWROOT}/.mvm-oldroot");
-    std::fs::create_dir_all(&old).map_err(|e| format!("mkdir put_old: {e}"))?;
-    std::env::set_current_dir(NEWROOT).map_err(|e| format!("chdir: {e}"))?;
-    let c_new = std::ffi::CString::new(NEWROOT).unwrap();
-    let c_old = std::ffi::CString::new(old).unwrap();
-    let rc = unsafe { libc::syscall(libc::SYS_pivot_root, c_new.as_ptr(), c_old.as_ptr()) };
-    if rc != 0 {
-        return Err(format!(
-            "pivot_root: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    std::env::set_current_dir("/").map_err(|e| format!("chdir /: {e}"))?;
-
-    // Fresh API filesystems in the new root, then drop the old one.
-    for dir in ["/proc", "/sys", "/dev", "/tmp", "/run"] {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = mount("proc", "/proc", Some("proc"), 0);
-    let _ = mount("sysfs", "/sys", Some("sysfs"), 0);
-    let _ = mount("devtmpfs", "/dev", Some("devtmpfs"), 0);
-    let c_old = std::ffi::CString::new("/.mvm-oldroot").unwrap();
-    unsafe { libc::umount2(c_old.as_ptr(), libc::MNT_DETACH) };
-    let _ = std::fs::remove_dir("/.mvm-oldroot");
-    Ok(())
-}
-
-fn mount(src: &str, target: &str, fstype: Option<&str>, flags: libc::c_ulong) -> Result<(), String> {
-    let c_src = std::ffi::CString::new(src).map_err(|_| "bad src")?;
-    let c_target = std::ffi::CString::new(target).map_err(|_| "bad target")?;
-    let c_type = fstype.map(|t| std::ffi::CString::new(t).unwrap());
-    let rc = unsafe {
-        libc::mount(
-            c_src.as_ptr(),
-            c_target.as_ptr(),
-            c_type.as_ref().map_or(std::ptr::null(), |t| t.as_ptr()),
-            flags,
-            std::ptr::null(),
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    Ok(())
-}
-
-/// Restore file owners recorded at image-unpack time (JSON-lines of
-/// `OwnershipEntry`). Best effort: files whited out later or paths that
-/// don't exist are silently skipped. chown clears setuid/setgid, so modes
-/// carrying those bits are re-applied afterwards.
-fn apply_ownership(root: &str, manifest: &str) {
-    use mvm_common::protocol::OwnershipEntry;
-    for line in manifest.lines() {
-        let Ok(e) = serde_json::from_str::<OwnershipEntry>(line) else {
-            continue;
-        };
-        let path = format!("{root}/{}", e.p);
-        let Ok(c_path) = std::ffi::CString::new(path) else {
-            continue;
-        };
-        let rc = unsafe { libc::lchown(c_path.as_ptr(), e.u, e.g) };
-        if rc == 0 && e.m & 0o6000 != 0 {
-            // Not a symlink follow risk: setuid bits never appear on
-            // symlink entries in image layers.
-            unsafe { libc::chmod(c_path.as_ptr(), e.m as libc::mode_t) };
-        }
-    }
 }
 
 /// Configure eth0 statically from MVM_NET_CONFIG="<ip>/<prefix>,<gateway>"
