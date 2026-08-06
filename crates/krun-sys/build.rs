@@ -2,9 +2,8 @@
 //!
 //! Linux: libkrun.so.1 lives in the default loader paths; nothing to add.
 //! macOS: Homebrew (libkrun/krun tap) installs it under a prefix the
-//! linker does not search by default, and the dylib's install name is not
-//! absolute — so add the prefix to the search path and bake it into the
-//! binary's rpath (the same workaround krunkit's Makefile applies).
+//! linker does not search by default. The runtime side (libkrun dlopening
+//! libkrunfw by bare name) needs an rpath, which .cargo/config.toml adds.
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
@@ -21,7 +20,6 @@ fn main() {
             })
             .unwrap_or_else(|| "/opt/homebrew".to_string());
         println!("cargo:rustc-link-search=native={prefix}/lib");
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{prefix}/lib");
         println!("cargo:rerun-if-env-changed=HOMEBREW_PREFIX");
     }
 }
