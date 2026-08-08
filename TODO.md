@@ -145,9 +145,10 @@ process per VM. Switch to `--net gvproxy` (one per sandbox) when egress policy
 matters — inside a corp network a hallucinating agent reaching internal
 services is the real risk, and only gvproxy can hold an allowlist.
 
-**Secrets.** Depends on item 2. Cheapest large win first: per-agent GitHub App
-installation tokens (hour-scoped) instead of long-lived PATs. LLM-generated
-code inside the VM can read its own environment, so item 2's Milestone B
+**Secrets.** Depends on credentials injection. Cheapest large win first:
+per-agent GitHub App installation tokens (hour-scoped) instead of long-lived
+PATs. LLM-generated code inside the VM can read its own environment, so its
+Milestone B
 (sentinel + host proxy over vsock) is the real answer for API keys — and it
 shares the vsock bridge with everything else here.
 
@@ -157,10 +158,11 @@ shares the vsock bridge with everything else here.
 Keep the four operations as a module boundary; extract a trait if a second
 backend ever appears. Also no separate `status` column duplicating mvm's.
 
-**Blocked on / related:** item 1 (the opencode image runs as `agent`, mvm runs
-everything as root), item 2 (secrets), item 7 (a 750 MB image spikes RAM by
-its layer size on a box also running 40 VMs). A watch/SSE endpoint on
-`/sandboxes` would beat polling once agent counts grow.
+**Blocked on / related:** credentials injection, and pull memory usage (a
+750 MB image spikes RAM by its layer size on a box also running 40 VMs). The
+image-USER blocker is gone — the opencode image runs as `agent`, and mvm now
+honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
+agent counts grow.
 ---
 
 ## Done
