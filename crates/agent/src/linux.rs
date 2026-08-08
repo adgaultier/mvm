@@ -589,7 +589,7 @@ impl Agent {
     fn handle_request(&mut self, req: AgentRequest) {
         match req {
             AgentRequest::Ping => self.send(&AgentEvent::Pong),
-            AgentRequest::Exec { id, argv, env, workdir, tty, cols, rows } => {
+            AgentRequest::Exec { id, argv, env, workdir, tty, cols, rows,user: _ } => {
                 self.spawn_exec(id, argv, env, workdir, tty, cols, rows)
             }
             AgentRequest::Stdin { id, data } => {

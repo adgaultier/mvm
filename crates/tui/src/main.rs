@@ -149,9 +149,6 @@ fn run_loop(
     }
 }
 
-/// Console history the poller keeps around — more than the pane can show, so
-/// scrolling room is there without hauling the whole log every 1.5s.
-const CONSOLE_TAIL_LINES: usize = 200;
 
 /// Keys for the delete confirmation. Only `y` goes through; anything that is
 /// not an explicit yes or no leaves the prompt up rather than guessing.

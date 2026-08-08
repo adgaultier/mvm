@@ -65,7 +65,7 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -
         });
     }
 
-    let mut child = cmd.spawn()?;
+    let child = cmd.spawn()?;
     let console = unsafe { File::from_raw_fd(master) };
     let console_stdin = if attach_stdin {
         Some(unsafe { File::from_raw_fd(dup_fd(master)?) })
