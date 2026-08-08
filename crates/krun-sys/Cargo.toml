@@ -3,6 +3,7 @@ name = "krun-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+links = "krun"
 
 [dependencies]
 libc.workspace = true

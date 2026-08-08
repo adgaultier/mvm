@@ -3,13 +3,11 @@
 use mvm_common::{DataDir, Error, ImageConfig, ImageInfo, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::reference::ImageReference;
 use crate::registry::{PullEvent, PullOutcome, RegistryClient};
-
-const OWNERSHIP_FILE: &str = "ownership.jsonl";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ImageMeta {
@@ -106,10 +104,6 @@ impl ImageStore {
             }
         };
 
-        if !pulled.ownership.is_empty() {
-            pulled.ownership.save(&staging.join(OWNERSHIP_FILE))?;
-        }
-
         let meta = ImageMeta {
             reference: reference.familiar(),
             digest: pulled.digest,
@@ -163,10 +157,9 @@ impl ImageStore {
         }
     }
 
-    fn load(&self, dir: &PathBuf) -> Result<StoredImage> {
+    fn load(&self, dir: &Path) -> Result<StoredImage> {
         let meta: ImageMeta =
             serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json"))?)?;
-        let ownership = dir.join(OWNERSHIP_FILE);
         Ok(StoredImage {
             info: ImageInfo {
                 reference: meta.reference,
@@ -176,7 +169,6 @@ impl ImageStore {
             },
             config: meta.config,
             rootfs: dir.join("rootfs"),
-            ownership: ownership.exists().then_some(ownership),
         })
     }
 
@@ -225,8 +217,4 @@ pub struct StoredImage {
     pub info: ImageInfo,
     pub config: ImageConfig,
     pub rootfs: PathBuf,
-    /// Ownership manifest recorded from tar headers at unpack time. Needed
-    /// for block-device roots built from a rootless unpack (chown was
-    /// impossible on the host); applying it is idempotent otherwise.
-    pub ownership: Option<PathBuf>,
 }

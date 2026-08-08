@@ -68,7 +68,6 @@ fn run_loop(
                     app.images = images;
                     app.clamp_selection();
                 }
-                PollUpdate::Logs(logs) => app.logs = logs,
                 PollUpdate::Error(e) => {
                     app.daemon_ok = false;
                     app.status = format!("daemon: {e}");
@@ -270,21 +269,12 @@ fn apply_resize(
     });
 }
 
-/// Periodically fetch sandboxes/images (+ logs of the selected sandbox is
-/// fetched in a second lightweight loop via the same channel).
+/// Periodically fetch sandboxes/images.
 fn spawn_poller(client: Client, tx: mpsc::Sender<PollUpdate>) {
     std::thread::spawn(move || loop {
         match client.list_sandboxes() {
             Ok(sandboxes) => {
                 let images = client.list_images().unwrap_or_default();
-                // Fetch logs for the newest running sandbox, if any. Sanitize
-                // here, at the edge: nothing downstream should ever hold guest
-                // control sequences (see `sanitize_console`).
-                if let Some(running) = sandboxes.iter().find(|s| s.state.is_alive()) {
-                    if let Ok(logs) = client.logs(&running.id.to_string(), CONSOLE_TAIL_LINES) {
-                        let _ = tx.send(PollUpdate::Logs(app::sanitize_console(&logs)));
-                    }
-                }
                 let _ = tx.send(PollUpdate::Data { sandboxes, images });
             }
             Err(e) => {

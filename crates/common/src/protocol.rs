@@ -12,23 +12,6 @@ pub const AGENT_VSOCK_PORT: u32 = 1024;
 /// Path of the agent inside the guest rootfs.
 pub const GUEST_AGENT_PATH: &str = "/.mvm/agent";
 
-/// Path of the ownership manifest inside the boot (virtiofs) rootfs.
-/// Present when the sandbox boots from a block-device root: rootless layer
-/// unpacking cannot chown, so the tar headers' owners are recorded here and
-/// the agent re-applies them on the writable root disk at first boot.
-pub const GUEST_OWNERSHIP_PATH: &str = "/.mvm/ownership.jsonl";
-
-/// One line of the ownership manifest (JSON-lines format).
-/// `p` is the path relative to the rootfs, `m` the full tar mode — needed
-/// because chown clears setuid/setgid bits, which must be restored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OwnershipEntry {
-    pub p: String,
-    pub u: u32,
-    pub g: u32,
-    pub m: u32,
-}
-
 /// Maximum frame size (1 MiB) — guards against corrupt streams.
 pub const MAX_FRAME: u32 = 1 << 20;
 
@@ -133,7 +116,7 @@ pub mod b64 {
             }
         }
         let s = s.as_bytes();
-        if s.len() % 4 != 0 {
+        if !s.len().is_multiple_of(4) {
             return Err("base64 length not a multiple of 4".into());
         }
         let mut out = Vec::with_capacity(s.len() / 4 * 3);

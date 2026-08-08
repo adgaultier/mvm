@@ -18,14 +18,22 @@ cargo build -p mvm-agent --target x86_64-unknown-linux-musl --release
                                  # target/debug/mvm-agent will NOT run in guests
                                  # (and the daemon refuses to inject it).
 scripts/build.sh                 # all of the above, release, into dist/
-scripts/integration.sh           # boots real VMs; needs /dev/kvm, libkrun, network
+scripts/integration.sh           # boots real VMs; needs /dev/kvm (Linux) or
+                                 # libkrun (macOS), plus network
 ```
+
+Hosts: Linux x86_64 (KVM) and macOS Apple Silicon (Hypervisor.framework,
+via Homebrew libkrun — `scripts/install-darwin.sh` sets the machine up).
+Guests are same-arch as the host, so the agent's musl target follows the
+host arch; on macOS the cross-link goes through `cargo zigbuild` and the
+`mvm` binary must carry the hypervisor entitlement (build.sh codesigns
+dist/; a bare `cargo build` binary needs it too — see Sharp edges).
 
 The guest agent is musl-only because `-C target-feature=+crt-static` on the
 gnu target breaks proc-macro crates (`serde_derive`). `agent_binary()`
 resolution: `MVM_AGENT_PATH` → next to the executable → the dev tree's
-`target/x86_64-unknown-linux-musl/release/` → `PATH`, skipping any
-candidate with an ELF `PT_INTERP` (dynamically linked).
+`target/<host-arch>-unknown-linux-musl/release/` → `PATH`, skipping any
+candidate that is dynamically linked or not a Linux ELF at all.
 
 ## Architecture decisions (the "why")
 
@@ -42,16 +50,15 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
   `<sandbox>/agent.sock` host-side. Wire protocol: u32-BE length + JSON
   frames, byte payloads base64-encoded (`common::protocol`). With `-t` the
   workload gets its own guest pty and the agent bridges it to the console.
-- **Rootless userns mode.** `serve` re-execs into a user namespace
+- **Rootless userns mode (Linux-only).** `serve` re-execs into a user namespace
   (0 → user, 1.. → /etc/subuid) so the in-process virtiofs server can
   chown to mapped uids. Two-stage SIGSTOP handshake in
   `cli/src/userns.rs` — the child must re-exec *after* the maps are
-  written or execve strips its capabilities (see Sharp edges).
+  written or execve strips its capabilities (see Sharp edges). On macOS
+  there is no userns; the daemon runs with host credentials.
 - **Storage** (`storage` crate): `overlay` (default under root/userns;
-  `userxattr` inside a userns; upper persists across restarts), `copy`
-  (fallback, wiped each start), `ext4` (opt-in block-device root; agent
-  pivot_roots onto /dev/vda and applies the tar-header ownership manifest
-  recorded at unpack).
+  `userxattr` inside a userns; upper persists across restarts) and `copy`
+  (fallback, wiped each start). Both are served to the guest over virtiofs.
 - **Networking** (`--net`): `none` = dead unixgram NIC (disables libkrun's
   default TSI!), `tsi` = transparent host-serviced sockets, `gvproxy` =
   vfkit-mode datagram socket + agent-side static IP bootstrap (the daemon
@@ -70,14 +77,12 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
 ```
 <data>/
 ├── sandboxes.json          # registry (atomic tmp+rename persistence)
-├── images/<store-key>/     # meta.json, ownership.jsonl, rootfs/
+├── images/<store-key>/     # meta.json, rootfs/
 │                           # (.pulling-* = staging dirs, skipped by list)
 └── sandboxes/<id>/
     ├── shim.json           # ShimConfig written by the daemon
     ├── console.log         # guest console (appended by log pump)
     ├── rootfs|upper|work/  # per-driver filesystem state
-    ├── disk.img            # ext4 driver only (sparse)
-    ├── bootstrap/          # ext4 driver: agent + ownership manifest
     └── agent.sock          # agent control channel (unix listener)
 ```
 
@@ -89,7 +94,7 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
 | `krun-sys` | hand-written libkrun FFI; keep in sync with `/usr/include/libkrun.h` |
 | `runtime` | `KrunContext` RAII wrapper, shim entry (`run_shim`), shim spawner |
 | `image` | registry client (blocking reqwest), layer unpack + ownership manifest, `ImageStore` |
-| `storage` | `overlay` / `copy` / `ext4` drivers, overlay probe |
+| `storage` | `overlay` / `copy` drivers, overlay probe |
 | `network` | profile validation, port-map parsing |
 | `manager` | sandbox registry + lifecycle; owns agent vsock channels + console stdin |
 | `agent` | guest PID 1; std+libc only, poll(2) event loop, must stay static-friendly |
@@ -167,6 +172,34 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
   zombie holding host ports.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
+- **Never record a terminal *query* in `console.log`.** A tty session's
+  output contains sequences that ask the terminal to answer — DSR
+  (`ESC[6n`, "where is the cursor?") and Device Attributes (`ESC[c`).
+  `logs` and attach's backlog replay the recording verbatim, so a replayed
+  question makes the *reader's* terminal answer into its own input buffer:
+  stray `^[[1;5R` in their shell (the alpine prompt `~ # ` is 4 columns
+  wide, hence column 5). The log pump filters queries out of the file
+  (`manager::console_filter`) but leaves the **broadcast byte-exact** — a
+  live interactive shell really does ask for the cursor column and read the
+  reply, so `attach`/`run -it` must pass them through. Colours, cursor
+  motion and erases are real output and stay in both.
+- **macOS: no hypervisor entitlement, no VMs.** Hypervisor.framework
+  refuses binaries that don't carry `com.apple.security.hypervisor`;
+  `krun_start_enter` fails with `EINVAL` and no better hint. `build.sh`
+  codesigns `dist/mvm` with `scripts/hypervisor.entitlements`, and
+  `integration.sh` signs whatever binary it tests — a bare `cargo build`
+  binary needs the same `codesign --force --sign - --entitlements …`.
+- **macOS: libkrun dlopens `libkrunfw` by bare name** — dyld resolves that
+  against the *calling binary's* rpath, so `.cargo/config.toml` bakes the
+  Homebrew lib dirs into every binary. (A `-sys` crate's
+  `cargo:rustc-link-arg` does not reach the final link — only its
+  link-search does — which is why the rpath lives in the config, not in
+  `krun-sys/build.rs`.)
+- **macOS is not GNU userland.** BSD `cp` rejects `--reflink`, so the copy
+  driver uses `clonefile(2)` there; `script(1)`, `sha256sum` and
+  `timeout(1)` differ too — `integration.sh` wraps them (`run_pty`,
+  `sha256_stream`, a PATH shim for `timeout`, which must be a real command
+  because `script` execs it).
 - Whiteout handling and layer unpack have unit tests in `crates/image` —
   extend those rather than testing via pulls. Later OCI layers may replace an
   existing path with a hard link; remove the destination before
@@ -176,15 +209,14 @@ candidate with an ELF `PT_INTERP` (dynamically linked).
 
 `MVM_HOST` (client → daemon addr), `MVM_DATA_DIR` (state root),
 `MVM_AGENT_PATH` (guest agent binary), `MVM_STORAGE_DRIVER`
-(`overlay`/`copy`/`ext4`), `MVM_USERNS=0` (disable userns mode),
-`MVM_DISK_SLACK_MIB` (ext4 driver writable slack), `MVM_GVPROXY_BIN`
+(`overlay`/`copy`), `MVM_USERNS=0` (disable userns mode), `MVM_GVPROXY_BIN`
 (gvproxy binary for managed `--net gvproxy`), `MVM_GVPROXY_CONTROL`
 (control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port
 maps).
 
 Daemon → guest agent (set by the shim, scrubbed by the agent before it
-spawns the workload): `MVM_ROOT_DISK`, `MVM_WORKDIR`, `MVM_MOUNTS`,
-`MVM_NET_CONFIG`, `MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`.
+spawns the workload): `MVM_MOUNTS`, `MVM_NET_CONFIG`, `MVM_NET_TSI`,
+`MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`.
 
 ## Conventions
 

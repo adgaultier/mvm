@@ -1,33 +1,25 @@
 //! Per-sandbox writable filesystem layers.
 //!
-//! Three drivers (virtiofs-first; the daemon's userns mode gives virtiofs
-//! full chown semantics rootless):
+//! Two drivers (both served to the guest over virtiofs; the daemon's userns
+//! mode gives virtiofs full chown semantics rootless):
 //!  - `overlay`: OverlayFS (image = lower, per-sandbox upper); default for
-//!               root and for namespace-root (rootless userns mode).
-//!  - `copy`:    full recursive copy of the image rootfs; fallback when
-//!               overlay is unavailable.
-//!  - `ext4`:    opt-in; per-sandbox ext4 image built with mkfs.ext4 -d,
-//!               booted as a virtio-blk root instead of virtiofs.
+//!    root and for namespace-root (rootless userns mode).
+//!  - `copy`: full recursive copy of the image rootfs; fallback when
+//!    overlay is unavailable.
 
 use mvm_common::{DataDir, Error, Result, SandboxId};
 use std::path::{Path, PathBuf};
 
 mod copy;
-mod ext4;
 mod overlay;
 
 pub use copy::CopyDriver;
-pub use ext4::Ext4Driver;
 pub use overlay::OverlayDriver;
 
 /// What the caller gets back after preparing a sandbox filesystem.
 pub struct PreparedRootfs {
-    /// Path to pass to libkrun as the (virtiofs) guest root. For disk-backed
-    /// drivers this is a minimal bootstrap dir; the agent pivots off it.
+    /// Path to pass to libkrun as the (virtiofs) guest root.
     pub rootfs: PathBuf,
-    /// Raw disk image holding the real root filesystem, when the driver is
-    /// block-device based.
-    pub root_disk: Option<PathBuf>,
 }
 
 /// Storage driver interface.
@@ -46,7 +38,6 @@ pub fn default_driver(data_dir: DataDir) -> Box<dyn StorageDriver> {
     let choice = std::env::var("MVM_STORAGE_DRIVER").unwrap_or_default();
     match choice.as_str() {
         "copy" => return Box::new(CopyDriver::new(data_dir)),
-        "ext4" => return Box::new(Ext4Driver::new(data_dir)),
         "overlay" => return Box::new(OverlayDriver::new(data_dir)),
         _ => {}
     }

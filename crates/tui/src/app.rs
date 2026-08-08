@@ -74,7 +74,6 @@ pub enum PollUpdate {
         sandboxes: Vec<Sandbox>,
         images: Vec<ImageInfo>,
     },
-    Logs(String),
     Error(String),
     /// Result of an action the user triggered; shown briefly in the footer so
     /// the next poll's "connected — N sandboxes" doesn't swallow it.
@@ -191,7 +190,6 @@ pub struct App {
     pub sandboxes: Vec<Sandbox>,
     pub images: Vec<ImageInfo>,
     pub table_state: TableState,
-    pub logs: String,
     pub status: String,
     pub daemon_ok: bool,
     pub should_quit: bool,
@@ -211,7 +209,6 @@ impl App {
             sandboxes: vec![],
             images: vec![],
             table_state,
-            logs: String::new(),
             status: "connecting…".into(),
             daemon_ok: false,
             should_quit: false,

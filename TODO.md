@@ -172,14 +172,41 @@ unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## 8. TUI: render guest colours in the console pane
-The pane is plain text since escapes are stripped at the edge. Showing colours
-means parsing SGR into ratatui spans (`ansi-to-tui`-style) — never by passing
-escapes through, which is what let the guest drive the user's terminal.
-
 ---
 
 ## Done
+
+- **Dropped the `ext4` storage driver** (2026-08-06) — removed the
+  opt-in block-device root and everything that existed only to serve it:
+  `mkfs.ext4 -d` image building, the agent's `pivot_root` onto /dev/vda
+  (plus `apply_ownership` and the `mount` helper), the `root_disk`
+  plumbing through `PreparedRootfs`/`ShimConfig`/the shim's virtio-blk
+  attach, `MVM_ROOT_DISK`/`MVM_WORKDIR`, and the whole ownership-manifest
+  pipeline (`OwnershipManifest`, `ownership.jsonl`, `OwnershipEntry`,
+  `GUEST_OWNERSHIP_PATH`). Rationale: it was added to fix rootless guest
+  chown, which the userns mode later solved properly for the default
+  virtiofs path; it was opt-in, never exercised by `integration.sh`, and
+  needed e2fsprogs (absent on macOS). Storage is now `overlay` + `copy`.
+- **`run -t` lost the workload's last output** — the agent bridges the
+  workload's guest pty to the console on a detached thread, but nothing
+  waited for it: once the workload exited, `real_main` returned and
+  `process::exit` tore the process down mid-drain, so a short-lived `-t`
+  workload raced its own final bytes. Reproduced at ~8/15 (`run -t alpine
+  printf 'A\n'` losing its CRLF); the agent now keeps the thread's
+  JoinHandle and joins it before reporting `WorkloadExit` → 20/20.
+
+- **Apple Silicon port** — mvm builds, boots and passes the integration
+  suite 46/46 on aarch64-apple-darwin (2026-08-06). libkrun 1.19.4 from
+  the `libkrun/krun` Homebrew tap (Hypervisor.framework, same-arch arm64
+  guests); `scripts/install-darwin.sh` provisions the machine. Mechanism:
+  Linux-only code cfg-gated (userns, agent body, `/proc`, tap); Homebrew
+  lib dir baked into every binary as rpath via `.cargo/config.toml`
+  (libkrun dlopens libkrunfw by bare name); `dist/mvm` codesigned with
+  the hypervisor entitlement (without it `krun_start_enter` → EINVAL);
+  agent cross-compiled with `cargo zigbuild` (host-arch musl target,
+  `agent_binary()` now rejects non-ELF candidates); copy driver uses
+  `clonefile(2)` on APFS. macOS limits: no userns/chown fidelity, storage
+  = copy (wiped per start), no tap profile.
 
 - **E2E integration** — 49/49 on real KVM in rootless userns mode with the
   overlay driver, gvproxy v0.8.9 installed (2026-08-04); 21/21 at the
@@ -224,7 +251,7 @@ escapes through, which is what let the guest drive the user's terminal.
   into a user namespace (subuid ranges via newuidmap/newgidmap, two-stage
   SIGSTOP handshake so the daemon keeps capabilities after exec); the
   in-process virtiofs server chowns to mapped uids. Unpack applies real
-  tar-header ownership. `ext4` block-root driver kept as opt-in.
+  tar-header ownership.
 - **Overlay storage rootless** — `userxattr` mounts inside the userns;
   upper layer persists across stop/start; probe with labeled fallback.
 - **Network isolation + modes** — `none` now really is isolated (dead

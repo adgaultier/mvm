@@ -2,13 +2,14 @@
 
 mod client;
 mod run;
+#[cfg(target_os = "linux")]
 mod userns;
 
 use clap::{Args, Parser, Subcommand};
 use client::Client;
 use mvm_common::{DataDir, Mount, NetworkMode, Sandbox, SandboxSpec};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "mvm", version, about = "MicroVM sandbox manager (libkrun + OCI images)")]
@@ -178,6 +179,7 @@ fn main() {
         Command::Serve { addr } => {
             // Must run before the tokio runtime exists (single-threaded
             // requirement of unshare) — may re-exec and never return.
+            #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
             serve(addr)
         }
@@ -428,7 +430,7 @@ fn serve(addr: SocketAddr) -> i32 {
     0
 }
 
-fn vm_shim(config: &PathBuf) -> i32 {
+fn vm_shim(config: &Path) -> i32 {
     let config = match mvm_runtime::ShimConfig::load(config) {
         Ok(c) => c,
         Err(e) => {

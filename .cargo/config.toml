@@ -1,0 +1,8 @@
+# On macOS, libkrun dlopens libkrunfw by bare name at runtime; dyld
+# resolves that against the calling binary's rpath, so every mvm binary
+# needs the Homebrew lib dirs baked in (both prefixes: arm64 and Intel).
+[target.'cfg(target_os = "macos")']
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,/opt/homebrew/lib",
+    "-C", "link-arg=-Wl,-rpath,/usr/local/lib",
+]

@@ -1,26 +1,65 @@
 #!/usr/bin/env bash
 # End-to-end integration test: boots real microVMs.
 #
-# Requirements: /dev/kvm (rw), libkrun + libkrunfw installed, network access
-# to docker.io. Runs against an isolated data dir and port, so it never
-# touches your normal mvm state.
+# Requirements: Linux with /dev/kvm (rw), or macOS Apple Silicon with
+# libkrun installed (scripts/install-darwin.sh); libkrun + libkrunfw;
+# network access to docker.io. Runs against an isolated data dir and
+# port, so it never touches your normal mvm state.
 #
 # Usage: scripts/integration.sh [path-to-mvm] [path-to-static-mvm-agent]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+case "$(uname -m)" in
+    arm64|aarch64) MUSL_TARGET=aarch64-unknown-linux-musl ;;
+    *) MUSL_TARGET=x86_64-unknown-linux-musl ;;
+esac
+
 MVM=${1:-target/debug/mvm}
-AGENT=${2:-target/x86_64-unknown-linux-musl/release/mvm-agent}
+AGENT=${2:-target/$MUSL_TARGET/release/mvm-agent}
 PORT=24699
 export MVM_HOST="http://127.0.0.1:$PORT"
 export MVM_DATA_DIR=$(mktemp -d /tmp/mvm-itest.XXXXXX)
 export MVM_AGENT_PATH="$PWD/$AGENT"
 export MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
 
-[ -e /dev/kvm ] || { echo "SKIP: /dev/kvm not available"; exit 0; }
+if [ "$(uname -s)" = Darwin ]; then
+    [ -f "$(brew --prefix)/lib/libkrun.dylib" ] || {
+        echo "SKIP: libkrun not installed (run scripts/install-darwin.sh)"; exit 0; }
+    # Hypervisor.framework only serves binaries carrying the hypervisor
+    # entitlement; (re-)sign whatever binary we're about to run.
+    codesign --force --sign - --entitlements scripts/hypervisor.entitlements \
+        "$MVM" >/dev/null 2>&1
+else
+    [ -e /dev/kvm ] || { echo "SKIP: /dev/kvm not available"; exit 0; }
+fi
 [ -x "$MVM" ] || { echo "FAIL: $MVM not built (run scripts/build.sh or cargo build)"; exit 1; }
 [ -f "$AGENT" ] || { echo "FAIL: static agent $AGENT not built"; exit 1; }
+
+# GNU/BSD portability shims. timeout(1) must be a real command — it runs
+# inside script(1)'s pty, which execs it — so shim it on PATH if missing.
+if ! command -v timeout >/dev/null 2>&1; then
+    SHIM_DIR=$(mktemp -d /tmp/mvm-itest-shim.XXXXXX)
+    if command -v gtimeout >/dev/null 2>&1; then
+        printf '#!/bin/sh\nexec gtimeout "$@"\n' > "$SHIM_DIR/timeout"
+    else
+        printf '#!/bin/sh\nsecs=$1; shift\nexec perl -e '\''alarm shift; exec @ARGV'\'' "$secs" "$@"\n' > "$SHIM_DIR/timeout"
+    fi
+    chmod +x "$SHIM_DIR/timeout"
+    PATH="$SHIM_DIR:$PATH"
+fi
+sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+}
+# GNU and BSD script(1) disagree on syntax; wrap both.
+run_pty() {
+    if [ "$(uname -s)" = Darwin ]; then
+        script -q /dev/null "$@"
+    else
+        script -qec "$*" /dev/null
+    fi
+}
 
 PASS=0
 FAIL=0
@@ -78,7 +117,7 @@ check "run console is a tty" "CONSOLE-TTY" \
 # raw-mode path (termios guard enable/restore) actually engages.
 if command -v script >/dev/null 2>&1; then
     check "run -it raw mode" "found" \
-        "$(printf 'exit\n' | timeout 60 script -qec "$MVM run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK'" /dev/null | grep -q RAW-TTY-OK && echo found)"
+        "$(printf 'exit\n' | run_pty timeout 60 "$MVM" run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK' | grep -q RAW-TTY-OK && echo found)"
 
     # The workload gets its own guest pty, so its output is CRLF-terminated
     # like any terminal session (the client runs raw and adds nothing).
@@ -90,7 +129,7 @@ if command -v script >/dev/null 2>&1; then
     # output flushes only on '\n' (and at exit), so this has to be sampled
     # while the session is still open: that blank window *is* the freeze.
     PROMPT_OUT=$(mktemp /tmp/mvm-itest-prompt.XXXXXX)
-    timeout 40 script -qec "$MVM run -it alpine sh" /dev/null \
+    run_pty timeout 40 "$MVM" run -it alpine sh \
         < <(sleep 20; printf 'exit\n') > "$PROMPT_OUT" 2>&1 &
     PROMPT_PID=$!
     sleep 12
@@ -123,8 +162,8 @@ check "exec -i stdin" "roundtrip" "$(printf 'roundtrip' | "$MVM" exec -i itest c
 BINFILE=$(mktemp /tmp/mvm-itest-bin.XXXXXX)
 head -c 65536 /dev/urandom > "$BINFILE"
 check "exec binary roundtrip" \
-    "$(sha256sum < "$BINFILE" | cut -d' ' -f1)" \
-    "$("$MVM" exec -i itest cat < "$BINFILE" | sha256sum | cut -d' ' -f1)"
+    "$(sha256_stream < "$BINFILE" | cut -d' ' -f1)" \
+    "$("$MVM" exec -i itest cat < "$BINFILE" | sha256_stream | cut -d' ' -f1)"
 rm -f "$BINFILE"
 
 # -t allocates a pty: the guest command must see a terminal on stdin.
@@ -220,28 +259,34 @@ echo vol-data > "$VOLDIR/f.txt"
 check "volume mount" "vol-data" "$("$MVM" run alpine -v "$VOLDIR:/data" cat /data/f.txt)"
 rm -rf "$VOLDIR"
 
-echo "==> ext4 root (chown + ownership)"
-# Rootless virtiofs roots can't chown; the ext4 driver must allow it and
-# must have restored root ownership from the manifest.
-check "guest chown" "daemon" "$("$MVM" exec itest sh -c 'chown daemon:daemon /tmp && stat -c %U /tmp')"
-check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"
-"$MVM" exec itest touch /persist-marker >/dev/null
+echo "==> ownership + persistence"
+# Guest chown fidelity and rootfs persistence need an ownership-capable,
+# persistent driver (userns/overlay on Linux). The macOS copy driver
+# provides neither, so those checks are Linux-only.
+if [ "$(uname -s)" = Linux ]; then
+    check "guest chown" "daemon" "$("$MVM" exec itest sh -c 'chown daemon:daemon /tmp && stat -c %U /tmp')"
+    check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"
+    "$MVM" exec itest touch /persist-marker >/dev/null
+else
+    echo "skip: chown/ownership checks (copy driver on macOS)"
+fi
 
 echo "==> lifecycle"
 "$MVM" stop itest >/dev/null
 wait "$RUN_PID" 2>/dev/null || true
 check "stopped state" "1" "$("$MVM" ps -a | grep itest | grep -c stopped)"
 
-# ext4 disks survive stop/start (docker-like persistence).
 "$MVM" start itest >/dev/null
 for _ in $(seq 1 100); do
     "$MVM" exec itest true >/dev/null 2>&1 && break
     sleep 0.2
 done
-set +e
-"$MVM" exec itest test -f /persist-marker >/dev/null 2>&1
-check "rootfs persists across restart" "0" "$?"
-set -e
+if [ "$(uname -s)" = Linux ]; then
+    set +e
+    "$MVM" exec itest test -f /persist-marker >/dev/null 2>&1
+    check "rootfs persists across restart" "0" "$?"
+    set -e
+fi
 "$MVM" stop itest >/dev/null
 
 "$MVM" rm itest >/dev/null
@@ -273,7 +318,7 @@ if command -v script >/dev/null 2>&1; then
     # Attach, run a command through the console, then detach with ^P^Q: the
     # workload must survive it (an EOF here would end the shell instead).
     ATT_OUT=$(mktemp /tmp/mvm-itest-attach.XXXXXX)
-    timeout 40 script -qec "$MVM attach att" /dev/null \
+    run_pty timeout 40 "$MVM" attach att \
         < <(sleep 3; printf 'echo ATTACH-OK\n'; sleep 3; printf '\020\021') \
         > "$ATT_OUT" 2>&1 || true
     # The marker appears twice — the pty echoes the command, then the command

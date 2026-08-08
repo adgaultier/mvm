@@ -49,15 +49,25 @@ pub fn validate(mode: &NetworkMode) -> Result<()> {
             }
         }
         NetworkMode::Tap { name } => {
-            if name.is_empty() {
-                return Err(Error::Network("empty TAP device name".into()));
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = name;
+                Err(Error::Network(
+                    "tap networking requires Linux (no TAP devices on this host)".into(),
+                ))
             }
-            if std::path::Path::new(&format!("/sys/class/net/{name}")).exists() {
-                Ok(())
-            } else {
-                Err(Error::Network(format!(
-                    "TAP device '{name}' does not exist; create it first (e.g. `ip tuntap add dev {name} mode tap`)"
-                )))
+            #[cfg(target_os = "linux")]
+            {
+                if name.is_empty() {
+                    return Err(Error::Network("empty TAP device name".into()));
+                }
+                if std::path::Path::new(&format!("/sys/class/net/{name}")).exists() {
+                    Ok(())
+                } else {
+                    Err(Error::Network(format!(
+                        "TAP device '{name}' does not exist; create it first (e.g. `ip tuntap add dev {name} mode tap`)"
+                    )))
+                }
             }
         }
     }
