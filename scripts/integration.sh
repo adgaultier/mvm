@@ -78,7 +78,22 @@ GVPID=
 
 cleanup() {
     [ -n "$GVPID" ] && kill "$GVPID" 2>/dev/null || true
+    # On Linux `mvm serve` re-execs into a userns *child*, so killing the pid
+    # we spawned leaves the real daemon alive holding the port. It then
+    # answers the next run's health check — against a data dir this cleanup
+    # has already deleted — and that run fails in ways that look like the
+    # change under test. Kill whatever still owns the port, by pid, and wait
+    # for it to actually go.
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        curl -sf "$MVM_HOST/health" >/dev/null 2>&1 || break
+        for p in $(pgrep -x mvm 2>/dev/null); do
+            case "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" in
+                *"--addr 127.0.0.1:$PORT"*) kill -9 "$p" 2>/dev/null || true ;;
+            esac
+        done
+        sleep 0.2
+    done
     rm -rf "$MVM_DATA_DIR"
 }
 trap cleanup EXIT

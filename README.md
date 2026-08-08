@@ -48,7 +48,8 @@ $ mvm stop dev && mvm rm dev
 - **One shim process per VM.** libkrun's `krun_start_enter()` takes over the
   calling process, so the daemon spawns a detached `mvm __vm-shim` per
   sandbox; its stdout/stderr is the guest console, pumped to
-  `console.log` and live log followers.
+  `console.log` and live log followers. libkrun's own diagnostics go to a
+  separate `krun.log`, so hypervisor noise never shows up as guest output.
 - **Guest agent as the guest's init.** A static musl binary is injected at
   `/.mvm/agent` (libkrun's own `/init.krun` is PID 1 and execs it); it spawns
   the workload — on its own pty with `-t` — reaps zombies, and serves `exec`

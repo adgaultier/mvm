@@ -82,6 +82,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
 └── sandboxes/<id>/
     ├── shim.json           # ShimConfig written by the daemon
     ├── console.log         # guest console (appended by log pump)
+    ├── krun.log            # libkrun's own diagnostics, kept off the console
     ├── rootfs|upper|work/  # per-driver filesystem state
     └── agent.sock          # agent control channel (unix listener)
 ```
@@ -203,6 +204,16 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `timeout(1)` differ too — `integration.sh` wraps them (`run_pty`,
   `sha256_stream`, a PATH shim for `timeout`, which must be a real command
   because `script` execs it).
+- **The shim's stderr is the guest console, so libkrun must log elsewhere.**
+  libkrun maps the guest's fd 2 onto the shim's, which is why stderr joins
+  the console deliberately — but that also files libkrun's *own* host-side
+  diagnostics as guest output. `deferring proxy removal` from the vsock
+  muxer thread ends up in `console.log` and in `mvm run`'s stdout, and it
+  appears at VM teardown, so it lands mid-capture and breaks anything
+  comparing console output exactly (it was failing 10 integration checks).
+  `krun_init_log(fd, …)` points libkrun at `<sandbox>/krun.log` instead;
+  `krun_set_log_level` alone cannot fix this, since it only sets verbosity
+  on stderr. Style must be `NEVER` — the fd is a file, not a terminal.
 - **The guest resolves the guest's users.** `USER` / `-u` is passed through
   as `MVM_USER` and looked up against the *rootfs's* `/etc/passwd` by the
   agent, never against the host's user database — the same name means

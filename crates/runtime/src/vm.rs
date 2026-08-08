@@ -188,6 +188,27 @@ impl KrunContext {
         }
     }
 
+    /// Send libkrun's own logging to `fd` instead of stderr.
+    ///
+    /// The shim's stderr *is* the guest console (libkrun maps the guest's
+    /// fd 2 onto it), so leaving hypervisor diagnostics there files them as
+    /// guest output: they land in `console.log` and in `mvm run`'s stdout,
+    /// attributed to the workload. Colours are off because this fd is a
+    /// file, not a terminal.
+    pub fn init_log_to_fd(fd: std::os::unix::io::RawFd, level: u32) -> Result<()> {
+        check(
+            unsafe {
+                krun_sys::krun_init_log(
+                    fd,
+                    level,
+                    krun_sys::KRUN_LOG_STYLE_NEVER,
+                    krun_sys::KRUN_LOG_OPTION_NO_ENV,
+                )
+            },
+            "krun_init_log",
+        )
+    }
+
     /// Enter the microVM. On success this never returns: the process exits
     /// with the guest workload's exit status. On failure returns an error.
     pub fn start_enter(self) -> Result<()> {

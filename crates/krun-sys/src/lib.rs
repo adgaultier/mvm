@@ -18,6 +18,17 @@ pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
 pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
 pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 
+/// Keep libkrun's default log target (stderr).
+pub const KRUN_LOG_TARGET_DEFAULT: i32 = -1;
+
+pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
+pub const KRUN_LOG_STYLE_ALWAYS: u32 = 1;
+/// No terminal escape sequences — required for a log written to a file.
+pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
+
+/// Don't let `RUST_LOG` and friends override the configured settings.
+pub const KRUN_LOG_OPTION_NO_ENV: u32 = 1;
+
 #[link(name = "krun")]
 unsafe extern "C" {
     /// Creates a configuration context. Returns ctx id or negative errno.
@@ -111,8 +122,19 @@ unsafe extern "C" {
     /// Sets rlimits for the workload ("RLIMIT_NOFILE=1024:1024" style).
     pub fn krun_set_rlimits(ctx_id: c_uint, rlimits: *const *const c_char) -> c_int;
 
-    /// Configures libkrun logging level.
+    /// Configures libkrun logging level. Logs go to stderr — which for the
+    /// shim *is* the guest console, so prefer `krun_init_log` with a
+    /// dedicated fd.
     pub fn krun_set_log_level(level: c_uint) -> c_int;
+
+    /// Initializes libkrun logging against a specific fd.
+    /// `target_fd` = `KRUN_LOG_TARGET_DEFAULT` keeps stderr.
+    pub fn krun_init_log(
+        target_fd: c_int,
+        level: c_uint,
+        style: c_uint,
+        options: c_uint,
+    ) -> c_int;
 
     /// Starts and enters the microVM. Only returns on error; on success the
     /// process exits with the guest workload's exit status.
