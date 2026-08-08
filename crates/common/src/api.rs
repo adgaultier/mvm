@@ -17,6 +17,9 @@ pub struct ExecRequest {
     pub cols: u16,
     #[serde(default)]
     pub rows: u16,
+    /// Run as this user instead of the workload's identity (`exec -u`).
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// POST /api/v1/sandboxes/{id}/exec/{session}/resize

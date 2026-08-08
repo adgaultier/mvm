@@ -244,6 +244,8 @@ impl Manager {
         let mut env = image.config.env.clone();
         env.extend(spec.env.iter().cloned());
         let workdir = spec.workdir.clone().or(image.config.workdir.clone());
+        // `-u` wins over the image's USER, which wins over root.
+        let user = spec.user.clone().or(image.config.user.clone());
         let config = ShimConfig {
             sandbox_id: id.clone(),
             rootfs: prepared.rootfs,
@@ -259,6 +261,7 @@ impl Manager {
             agent_socket: agent_socket.clone(),
             console_tty: spec.tty,
             console_size: spec.tty_size,
+            user,
         };
 
         // 6. Register gvproxy port forwards before booting the guest.
@@ -547,6 +550,7 @@ impl Manager {
         tty: bool,
         cols: u16,
         rows: u16,
+        user: Option<String>,
     ) -> Result<(u32, mpsc::Receiver<protocol::AgentEvent>)> {
         let id = self.resolve(id_or_name)?;
         let (tx, rx) = mpsc::channel(64);
@@ -588,6 +592,7 @@ impl Manager {
                 tty,
                 cols,
                 rows,
+                user,
             })
             .map_err(|_| Error::Runtime("agent channel closed".into()))?;
         Ok((session_id, rx))

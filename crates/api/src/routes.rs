@@ -149,7 +149,7 @@ async fn exec(
 ) -> Result<Response, ApiError> {
     let (session, rx) = state
         .manager
-        .exec(&id, req.argv, req.env, req.workdir, req.tty, req.cols, req.rows)
+        .exec(&id, req.argv, req.env, req.workdir, req.tty, req.cols, req.rows, req.user)
         .await?;
 
     // If the client goes away mid-session (Ctrl-C, crash, network drop),

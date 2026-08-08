@@ -83,6 +83,10 @@ pub struct SandboxSpec {
     pub env: Vec<String>,
     /// Working directory inside the guest.
     pub workdir: Option<String>,
+    /// Run the workload as this user (`docker run -u`), overriding the image's
+    /// `USER`. Resolved in the guest against its own /etc/passwd.
+    #[serde(default)]
+    pub user: Option<String>,
     /// Number of vCPUs.
     #[serde(default = "default_vcpus")]
     pub vcpus: u8,
@@ -132,6 +136,7 @@ impl Default for SandboxSpec {
             command: vec![],
             env: vec![],
             workdir: None,
+            user: None,
             vcpus: default_vcpus(),
             ram_mib: default_ram(),
             attach_stdin: false,

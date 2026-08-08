@@ -39,6 +39,10 @@ pub struct ShimConfig {
     /// Size (cols, rows) for that PTY.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
+    /// Identity to run the workload as (image `USER` or `-u`), resolved in the
+    /// guest against its own /etc/passwd. `None` = root.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl ShimConfig {
@@ -134,6 +138,9 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             if let Some((cols, rows)) = config.console_size {
                 env.push(format!("MVM_CONSOLE_SIZE={cols},{rows}"));
             }
+        }
+        if let Some(user) = &config.user {
+            env.push(format!("MVM_USER={user}"));
         }
         if config.root_disk.is_some() {
             env.push("MVM_ROOT_DISK=/dev/vda".to_string());

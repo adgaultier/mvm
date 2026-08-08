@@ -105,6 +105,10 @@ enum Command {
         /// Allocate a pseudo-terminal (combine with -i for a shell).
         #[arg(short, long)]
         tty: bool,
+        /// Run as this user (name/uid[:group/gid]); default = the workload's
+        /// own identity, like `docker exec`.
+        #[arg(short, long)]
+        user: Option<String>,
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
@@ -142,6 +146,10 @@ pub(crate) struct BoxArgs {
     /// Working directory inside the guest.
     #[arg(short, long)]
     workdir: Option<String>,
+    /// Run the workload as this user (name/uid[:group/gid]), overriding the
+    /// image's USER.
+    #[arg(short, long)]
+    user: Option<String>,
     /// Keep the sandbox after the workload exits (run only).
     #[arg(long)]
     keep: bool,
@@ -306,8 +314,9 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             sandbox,
             interactive,
             tty,
+            user,
             command,
-        } => run::exec(client, &sandbox, command, interactive, tty),
+        } => run::exec(client, &sandbox, command, interactive, tty, user),
         Command::Serve { .. } | Command::VmShim { .. } => unreachable!(),
     }
 }
@@ -361,6 +370,7 @@ impl BoxArgs {
             command: self.command.clone(),
             env,
             workdir: self.workdir.clone(),
+            user: self.user.clone(),
             vcpus: self.cpus,
             ram_mib: self.memory,
             attach_stdin: self.interactive,

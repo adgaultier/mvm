@@ -37,13 +37,19 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -
     make_raw(slave, config.console_size);
     let stdin_fd = dup_fd(slave)?;
     let stdout_fd = dup_fd(slave)?;
+    // stderr joins the console instead of going somewhere only the daemon's
+    // debug log could see. libkrun maps the guest's fd 2 to the shim's, so
+    // piping it away silently discarded *all* guest stderr — a workload's
+    // error output and the agent's own startup diagnostics both vanished,
+    // leaving a bare exit code. Docker interleaves the two streams too.
+    let stderr_fd = dup_fd(slave)?;
     unsafe { libc::close(slave) };
 
     cmd.arg("__vm-shim")
         .arg(&config_path)
         .stdin(unsafe { Stdio::from(File::from_raw_fd(stdin_fd)) })
         .stdout(unsafe { Stdio::from(File::from_raw_fd(stdout_fd)) })
-        .stderr(Stdio::piped());
+        .stderr(unsafe { Stdio::from(File::from_raw_fd(stderr_fd)) });
 
     // Put the shim in its own session/process group so we can signal the
     // whole VM tree and it never receives our terminal's signals.
@@ -66,22 +72,6 @@ pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -
     } else {
         None
     };
-
-    if let Some(mut err) = child.stderr.take() {
-        use std::io::Read;
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match err.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let line = String::from_utf8_lossy(&buf[..n]);
-                        tracing::debug!(target: "mvm::shim", "{}", line.trim_end());
-                    }
-                }
-            }
-        });
-    }
 
     Ok(ShimHandle {
         child,

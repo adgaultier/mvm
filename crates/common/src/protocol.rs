@@ -50,6 +50,10 @@ pub enum AgentRequest {
         cols: u16,
         #[serde(default)]
         rows: u16,
+        /// Run as this user instead of the workload's own identity
+        /// (`docker exec -u`); `None` = whoever the workload runs as.
+        #[serde(default)]
+        user: Option<String>,
     },
     /// stdin data for an exec session (base64 over the wire: binary-safe).
     Stdin {
@@ -219,6 +223,7 @@ mod tests {
             tty: false,
             cols: 0,
             rows: 0,
+            user: None,
         };
         let frame = encode_frame(&req).unwrap();
         let mut dec = FrameDecoder::default();

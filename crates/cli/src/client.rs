@@ -154,6 +154,7 @@ impl Client {
         tty: bool,
         cols: u16,
         rows: u16,
+        user: Option<String>,
     ) -> Result<(u32, reqwest::blocking::Response), String> {
         let resp = self
             .http
@@ -165,6 +166,7 @@ impl Client {
                 tty,
                 cols,
                 rows,
+                user,
             })
             .send()
             .map_err(|e| e.to_string())?;

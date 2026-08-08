@@ -379,9 +379,11 @@ pub fn exec(
     command: Vec<String>,
     interactive: bool,
     tty: bool,
+    user: Option<String>,
 ) -> Result<i32, String> {
     let (cols, rows) = if tty { term_size().unwrap_or((0, 0)) } else { (0, 0) };
-    let (session, mut resp) = client.exec(sandbox, command, vec![], None, tty, cols, rows)?;
+    let (session, mut resp) =
+        client.exec(sandbox, command, vec![], None, tty, cols, rows, user)?;
 
     // Raw mode while the session runs; restored by Drop on every exit path.
     let _raw = if tty && interactive {
