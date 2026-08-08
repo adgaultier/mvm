@@ -54,6 +54,8 @@ struct Agent {
     sessions: HashMap<u32, Session>,
     workload_pid: i32,
     workload_code: Option<i32>,
+    /// Identity the workload runs as; exec sessions default to it.
+    workload_user: GuestUser,
     /// Bridges the workload's guest pty to the console (`-t` only). Joined
     /// once the workload exits, before the agent reports it: the workload
     /// closing its pty slave doesn't mean this thread has finished draining
@@ -89,6 +91,8 @@ fn real_main(workload_argv: &[String]) -> i32 {
         Some((cols.parse::<u16>().ok()?, rows.parse::<u16>().ok()?))
     });
 
+    let user_spec = std::env::var("MVM_USER").ok();
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_MOUNTS",
@@ -96,6 +100,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_NET_TSI",
         "MVM_CONSOLE_TTY",
         "MVM_CONSOLE_SIZE",
+        "MVM_USER",
     ] {
         std::env::remove_var(var);
     }
@@ -115,13 +120,27 @@ fn real_main(workload_argv: &[String]) -> i32 {
         normalize_console_termios();
     }
 
-    // 4. Spawn the workload. The guest console is a byte stream, so an
+    // 2. Resolve the identity the workload runs as (image USER or `-u`), now
+    // that the rootfs — and its /etc/passwd — is in place. Exec sessions
+    // inherit it, docker-style, unless they ask for someone else.
+    let user = match user_spec.as_deref() {
+        None | Some("") => GuestUser::root(),
+        Some(spec) => match resolve_user(spec) {
+            Ok(user) => user,
+            Err(e) => {
+                eprintln!("mvm-agent: {e}");
+                return 125;
+            }
+        },
+    };
+
+    // 3. Spawn the workload. The guest console is a byte stream, so an
     // interactive workload needs a real guest PTY of its own.
     let mut console_output = None;
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
-        match spawn_tty_workload(workload_argv, console_size) {
+        match spawn_tty_workload(workload_argv, console_size, &user) {
             Some((child, handle)) => {
                 console_output = Some(handle);
                 Some(child)
@@ -129,13 +148,13 @@ fn real_main(workload_argv: &[String]) -> i32 {
             None => return 127,
         }
     } else {
-        match Command::new(&workload_argv[0])
-            .args(&workload_argv[1..])
+        let mut cmd = Command::new(&workload_argv[0]);
+        cmd.args(&workload_argv[1..])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
+            .stderr(Stdio::inherit());
+        apply_user(&mut cmd, &user);
+        match cmd.spawn() {
             Ok(child) => Some(child),
             Err(e) => {
                 eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
@@ -145,7 +164,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     };
     let workload_pid = workload.map(|c| c.id() as i32).unwrap_or(-1);
 
-    // 3. Self-pipe for signals (must exist before handlers install).
+    // 4. Self-pipe for signals (must exist before handlers install).
     let mut pipe_fds = [-1i32; 2];
     unsafe {
         if libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) != 0 {
@@ -157,7 +176,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     SELFPIPE_W.store(pipe_fds[1], std::sync::atomic::Ordering::Relaxed);
     install_handlers();
 
-    // 4. Connect to the host over vsock (retry while host listener comes up).
+    // 5. Connect to the host over vsock (retry while host listener comes up).
     let vsock = match connect_vsock_retry(HOST_CID, protocol::AGENT_VSOCK_PORT, 100) {
         Some(fd) => fd,
         None => {
@@ -180,6 +199,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         sessions: HashMap::new(),
         workload_pid,
         workload_code: None,
+        workload_user: user,
         console_output,
     };
     agent.send(&AgentEvent::Ready {
@@ -192,6 +212,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
 fn spawn_tty_workload(
     workload_argv: &[String],
     size: Option<(u16, u16)>,
+    user: &GuestUser,
 ) -> Option<(std::process::Child, std::thread::JoinHandle<()>)> {
     let winsize = size.map(|(cols, rows)| libc::winsize {
         ws_row: rows,
@@ -222,6 +243,11 @@ fn spawn_tty_workload(
     // the only line discipline left in the chain, so spell out the terminal
     // behaviour it must provide.
     interactive_pty_termios(fds[1]);
+    // The workload owns this terminal, so it must be able to reopen /dev/tty
+    // and change its settings after dropping privileges.
+    if !user.is_root() {
+        unsafe { libc::fchown(fds[1], user.uid, user.gid) };
+    }
     let master = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let slave = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     let slave_out = slave.try_clone().ok()?;
@@ -239,6 +265,9 @@ fn spawn_tty_workload(
             Ok(())
         });
     }
+    // Registered last: pre_exec closures run in order, and claiming the
+    // controlling terminal has to happen while still root.
+    apply_user(&mut cmd, user);
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -267,6 +296,153 @@ fn spawn_tty_workload(
         let _ = std::io::copy(&mut output_master, &mut output);
     });
     Some((child, output_handle))
+}
+
+/// A resolved guest identity: what the image's `USER` (or `-u`) means once
+/// looked up in *this* rootfs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestUser {
+    uid: u32,
+    gid: u32,
+    /// Primary gid first, then supplementary groups from /etc/group.
+    groups: Vec<u32>,
+    /// Name for USER/LOGNAME; the numeric uid when passwd has no entry.
+    name: String,
+    home: String,
+}
+
+impl GuestUser {
+    fn root() -> Self {
+        Self {
+            uid: 0,
+            gid: 0,
+            groups: vec![0],
+            name: "root".into(),
+            home: "/root".into(),
+        }
+    }
+
+    fn is_root(&self) -> bool {
+        self.uid == 0 && self.gid == 0
+    }
+}
+
+/// Resolve a docker-style user spec — `name`, `uid`, `name:group`, `uid:gid` —
+/// against the rootfs. Errors the way docker does when a name is unknown:
+/// running as the wrong identity is worse than not running.
+fn resolve_user(spec: &str) -> Result<GuestUser, String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    resolve_user_from(spec, &passwd, &group)
+}
+
+/// The lookup itself, over the file contents — pure, so it can be tested
+/// against real image fixtures instead of whatever the host happens to have.
+fn resolve_user_from(spec: &str, passwd: &str, group_file: &str) -> Result<GuestUser, String> {
+    let (user_part, group_part) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
+    };
+
+    // passwd: name:passwd:uid:gid:gecos:home:shell
+    let entry = passwd.lines().find(|line| {
+        let mut f = line.split(':');
+        match (f.next(), f.nth(1)) {
+            (Some(name), Some(uid)) => name == user_part || uid == user_part,
+            _ => false,
+        }
+    });
+    let (name, uid, mut gid, home) = match entry {
+        Some(line) => {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() < 6 {
+                return Err(format!("malformed /etc/passwd entry for '{user_part}'"));
+            }
+            let uid: u32 = f[2]
+                .parse()
+                .map_err(|_| format!("bad uid in /etc/passwd for '{user_part}'"))?;
+            let gid: u32 = f[3]
+                .parse()
+                .map_err(|_| format!("bad gid in /etc/passwd for '{user_part}'"))?;
+            (f[0].to_string(), uid, gid, f[5].to_string())
+        }
+        // No entry: a numeric id is still usable (docker allows it), a name is not.
+        None => match user_part.parse::<u32>() {
+            Ok(uid) => (user_part.to_string(), uid, 0, "/".to_string()),
+            Err(_) => {
+                return Err(format!(
+                    "unable to find user '{user_part}': no matching entry in /etc/passwd"
+                ))
+            }
+        },
+    };
+
+    // group: name:passwd:gid:members
+    let gid_of = |want: &str| -> Option<u32> {
+        group_file.lines().find_map(|line| {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() >= 3 && (f[0] == want || f[2] == want) {
+                f[2].parse().ok()
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(group_part) = group_part {
+        gid = match gid_of(group_part) {
+            Some(gid) => gid,
+            None => group_part.parse::<u32>().map_err(|_| {
+                format!("unable to find group '{group_part}': no matching entry in /etc/group")
+            })?,
+        };
+    }
+
+    // Supplementary groups: every group listing this user as a member.
+    let mut groups = vec![gid];
+    for line in group_file.lines() {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let Ok(g) = f[2].parse::<u32>() else { continue };
+        if g != gid && f[3].split(',').any(|m| !m.is_empty() && m == name) {
+            groups.push(g);
+        }
+    }
+
+    Ok(GuestUser {
+        uid,
+        gid,
+        groups,
+        name,
+        home,
+    })
+}
+
+/// Run a child as `user`: identity env for the workload, and the actual
+/// privilege drop between fork and exec.
+fn apply_user(cmd: &mut Command, user: &GuestUser) {
+    cmd.env("HOME", &user.home)
+        .env("USER", &user.name)
+        .env("LOGNAME", &user.name);
+    if user.is_root() {
+        return;
+    }
+    // Everything the closure needs is allocated here, before the fork.
+    let (uid, gid, groups) = (user.uid, user.gid, user.groups.clone());
+    unsafe {
+        cmd.pre_exec(move || {
+            // Groups then gid then uid: dropping the uid first would forfeit
+            // the privilege needed for the other two.
+            if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
+                || libc::setgid(gid) != 0
+                || libc::setuid(uid) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Sane interactive defaults on a pty slave: CR/LF translation both ways,
@@ -347,7 +523,11 @@ impl Agent {
         loop {
             // Build the pollfd set.
             let mut fds: Vec<libc::pollfd> = Vec::with_capacity(4 + self.sessions.len() * 3);
-            let out_wanted = if self.out_queue.is_empty() { 0 } else { libc::POLLOUT };
+            let out_wanted = if self.out_queue.is_empty() {
+                0
+            } else {
+                libc::POLLOUT
+            };
             fds.push(libc::pollfd {
                 fd: self.vsock,
                 events: libc::POLLIN | out_wanted,
@@ -362,16 +542,28 @@ impl Agent {
             let mut fd_map: Vec<(u32, u8)> = Vec::new(); // (session id, 0=stdout,1=stderr,2=stdin)
             for (id, s) in self.sessions.iter() {
                 if let Some(fd) = s.stdout_fd {
-                    fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+                    fds.push(libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
                     fd_map.push((*id, 0));
                 }
                 if let Some(fd) = s.stderr_fd {
-                    fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+                    fds.push(libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
                     fd_map.push((*id, 1));
                 }
                 if let Some(fd) = s.stdin_fd {
                     if !s.stdin_buf.is_empty() {
-                        fds.push(libc::pollfd { fd, events: libc::POLLOUT, revents: 0 });
+                        fds.push(libc::pollfd {
+                            fd,
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        });
                         fd_map.push((*id, 2));
                     }
                 }
@@ -429,8 +621,8 @@ impl Agent {
                 let n = unsafe {
                     libc::read(selfpipe_r, sigs.as_mut_ptr() as *mut libc::c_void, 64)
                 };
-                for i in 0..n.max(0) as usize {
-                    self.handle_signal(sigs[i] as i32);
+                for &sig in &sigs[..n.max(0) as usize] {
+                    self.handle_signal(sig as i32);
                 }
             }
 
@@ -589,9 +781,16 @@ impl Agent {
     fn handle_request(&mut self, req: AgentRequest) {
         match req {
             AgentRequest::Ping => self.send(&AgentEvent::Pong),
-            AgentRequest::Exec { id, argv, env, workdir, tty, cols, rows,user: _ } => {
-                self.spawn_exec(id, argv, env, workdir, tty, cols, rows)
-            }
+            AgentRequest::Exec {
+                id,
+                argv,
+                env,
+                workdir,
+                tty,
+                cols,
+                rows,
+                user,
+            } => self.spawn_exec(id, argv, env, workdir, tty, cols, rows, user),
             AgentRequest::Stdin { id, data } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.stdin_buf.extend(data);
@@ -640,11 +839,26 @@ impl Agent {
         tty: bool,
         cols: u16,
         rows: u16,
+        user: Option<String>,
     ) {
         if argv.is_empty() {
             self.send(&AgentEvent::Exit { id, code: 126 });
             return;
         }
+
+        // Default to the workload's identity, like `docker exec`.
+        let user = match user.as_deref() {
+            None => self.workload_user.clone(),
+            Some("") => GuestUser::root(),
+            Some(spec) => match resolve_user(spec) {
+                Ok(user) => user,
+                Err(e) => {
+                    self.send(&AgentEvent::Error { message: e });
+                    self.send(&AgentEvent::Exit { id, code: 126 });
+                    return;
+                }
+            },
+        };
 
         // For tty sessions, allocate the pty up front; the child gets the
         // slave as its stdio and becomes the session leader on it.
@@ -699,6 +913,10 @@ impl Agent {
             if !env.iter().any(|kv| kv.starts_with("TERM=")) {
                 cmd.env("TERM", "xterm");
             }
+            // Hand the terminal to whoever will own it after the drop.
+            if !user.is_root() {
+                unsafe { libc::fchown(slave, user.uid, user.gid) };
+            }
             unsafe {
                 cmd.pre_exec(|| {
                     libc::setsid();
@@ -718,6 +936,9 @@ impl Agent {
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
         }
+        // Last, so the tty work above still happens as root. Also overrides
+        // HOME/USER/LOGNAME from baseline_env for the target identity.
+        apply_user(&mut cmd, &user);
         let spawned = cmd.spawn();
         if tty {
             unsafe { libc::close(slave) };
@@ -1020,5 +1241,83 @@ fn mount_bind_shares() {
                 std::ptr::null(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_user_from, GuestUser};
+
+    // Trimmed from a real alpine image, plus a docker-style app user.
+    const PASSWD: &str = "root:x:0:0:root:/root:/bin/ash\n\
+                          bin:x:1:1:bin:/bin:/sbin/nologin\n\
+                          agent:x:1000:1000:agent:/home/agent:/bin/sh\n\
+                          nobody:x:65534:65534:nobody:/:/sbin/nologin\n";
+    const GROUP: &str = "root:x:0:root\n\
+                         bin:x:1:root,bin,daemon\n\
+                         agent:x:1000:\n\
+                         docker:x:998:agent\n\
+                         wheel:x:10:agent,bin\n\
+                         nobody:x:65534:\n";
+
+    fn resolve(spec: &str) -> GuestUser {
+        resolve_user_from(spec, PASSWD, GROUP).expect("resolves")
+    }
+
+    #[test]
+    fn resolves_by_name_with_home_and_groups() {
+        let u = resolve("agent");
+        assert_eq!((u.uid, u.gid), (1000, 1000));
+        assert_eq!(u.name, "agent");
+        assert_eq!(u.home, "/home/agent");
+        // Primary gid first, then every group listing the user as a member.
+        assert_eq!(u.groups, vec![1000, 998, 10]);
+        assert!(!u.is_root());
+    }
+
+    #[test]
+    fn resolves_by_uid_and_by_explicit_group() {
+        assert_eq!(resolve("1000").name, "agent");
+        assert_eq!(resolve("65534").home, "/");
+
+        let u = resolve("agent:bin");
+        assert_eq!((u.uid, u.gid), (1000, 1));
+        // wheel/docker list "agent", bin is now primary, so it is not repeated.
+        assert_eq!(u.groups, vec![1, 998, 10]);
+
+        let u = resolve("agent:4242");
+        assert_eq!(u.gid, 4242);
+        assert_eq!(u.groups[0], 4242);
+    }
+
+    #[test]
+    fn root_is_recognised_as_root() {
+        let u = resolve("root");
+        assert!(u.is_root());
+        assert_eq!(u.home, "/root");
+        assert!(GuestUser::root().is_root());
+    }
+
+    #[test]
+    fn unknown_numeric_id_is_allowed_unknown_name_is_not() {
+        // docker: a bare uid needs no passwd entry (gid 0, home /).
+        let u = resolve("4242");
+        assert_eq!((u.uid, u.gid), (4242, 0));
+        assert_eq!(u.name, "4242");
+        assert_eq!(u.home, "/");
+        assert_eq!(u.groups, vec![0]);
+
+        let err = resolve_user_from("nosuchuser", PASSWD, GROUP).unwrap_err();
+        assert!(err.contains("unable to find user 'nosuchuser'"), "{err}");
+        let err = resolve_user_from("agent:nosuchgroup", PASSWD, GROUP).unwrap_err();
+        assert!(err.contains("unable to find group 'nosuchgroup'"), "{err}");
+    }
+
+    #[test]
+    fn survives_an_image_without_passwd() {
+        // Scratch-style rootfs: numeric ids still work, names cannot.
+        let u = resolve_user_from("0", "", "").unwrap();
+        assert!(u.is_root());
+        assert!(resolve_user_from("agent", "", "").is_err());
     }
 }

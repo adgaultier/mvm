@@ -143,7 +143,7 @@ GET    /api/v1/sandboxes                 POST   /api/v1/sandboxes
 GET    /api/v1/sandboxes/{id}            DELETE /api/v1/sandboxes/{id}
 POST   /api/v1/sandboxes/{id}/start      POST   /api/v1/sandboxes/{id}/stop
 POST   /api/v1/sandboxes/{id}/resize                  {"vcpus":N,"ram_mib":N}
-GET    /api/v1/sandboxes/{id}/logs?follow=bool&tail=N (raw console stream)
+GET    /api/v1/sandboxes/{id}/logs?follow=bool&tail=N&raw=bool  (console)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]
 POST   /api/v1/sandboxes/{id}/exec/{session}/resize   {"cols":N,"rows":N}
@@ -153,6 +153,11 @@ POST   /api/v1/images/pull                            (JSON-lines progress)
 
 Exec/log streams use length-prefixed JSON frames (`u32` BE length + JSON),
 defined in `crates/common/src/protocol.rs`.
+
+The console stream drops terminal *query* sequences (DSR `ESC[6n`, Device
+Attributes `ESC[c`) — replaying a question makes the reader's terminal answer
+into its own input buffer. `raw=true` keeps them, and is only for a client
+that owns a terminal and answers them, i.e. `mvm attach` / `mvm run -it`.
 
 ## Storage & networking
 

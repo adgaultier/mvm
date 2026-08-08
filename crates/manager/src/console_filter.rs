@@ -9,9 +9,14 @@
 //! instead — which surfaces as stray `^[[1;5R` in their shell.
 //!
 //! Only queries are dropped; colours, cursor motion and erases are real
-//! output and stay. The *live* broadcast is deliberately not filtered — an
-//! interactive guest shell asks for the cursor column and reads the reply,
-//! so `attach` and `run -it` need those bytes to pass through untouched.
+//! output and stay.
+//!
+//! The broadcast channel carries the console byte-exact, because one of its
+//! consumers must see queries: an interactive session (`mvm attach`,
+//! `mvm run -it`) owns the terminal and reads the reply. Every *other*
+//! consumer must not, so the logs route runs this same filter over the live
+//! stream unless the client asked for `?raw=true` — filtering the recording
+//! alone would leave `mvm logs -f`'s live tail unprotected.
 
 /// Longest escape sequence held while waiting for its final byte. Anything
 /// longer is not a query we recognise, so it is released rather than

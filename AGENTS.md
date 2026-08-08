@@ -145,16 +145,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   canonical adds an echo, buffers input until Enter, and steals ^C. Only
   the innermost pty — the workload's — should be cooked; the shim pty and
   the bridged console are `cfmakeraw`'d.
-- **Never render guest console bytes verbatim in the TUI.** The console pane
-  used to pass them through, so the guest's escape sequences drove the user's
+- **Never render guest console bytes verbatim in a TUI.** The TUI's console
+  pane passed them through, so the guest's escape sequences drove the user's
   terminal — and the ones that *ask* it something (every shell prompt emits
   `ESC [ 6 n`; TUIs query colours with `ESC ] 11 ; ?`) make the terminal answer
   on the TUI's stdin. crossterm parses `ESC ]` as Alt+`]` and then the rest of
   the reply as ordinary keys, so `ESC ] 11 ; rgb:2d2d/…` types `r`, `g`, `b`,
   `d`… into the app: the resize form opened by itself and `d` was one hex digit
-  away from deleting a sandbox. `app::sanitize_console` strips CSI/OSC/DCS/nF
-  escapes and control bytes at the poller edge; keep it that way, and never
-  feed raw console text to a widget.
+  away from deleting a sandbox. Sanitizing at the poller edge fixed it; the
+  pane was then dropped altogether (console output is `mvm logs`), which is
+  why no `sanitize_console` exists today. Any future widget showing console
+  text needs that filter back.
 - **A detach cannot unwind through the log stream.** The blocking read on the
   follow stream can't be interrupted, so the stdin thread leaves the process
   itself — which skips `RawTermGuard`'s `Drop`. The saved termios therefore
@@ -172,17 +173,19 @@ candidate that is dynamically linked or not a Linux ELF at all.
   zombie holding host ports.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
-- **Never record a terminal *query* in `console.log`.** A tty session's
-  output contains sequences that ask the terminal to answer — DSR
-  (`ESC[6n`, "where is the cursor?") and Device Attributes (`ESC[c`).
-  `logs` and attach's backlog replay the recording verbatim, so a replayed
-  question makes the *reader's* terminal answer into its own input buffer:
-  stray `^[[1;5R` in their shell (the alpine prompt `~ # ` is 4 columns
-  wide, hence column 5). The log pump filters queries out of the file
-  (`manager::console_filter`) but leaves the **broadcast byte-exact** — a
-  live interactive shell really does ask for the cursor column and read the
-  reply, so `attach`/`run -it` must pass them through. Colours, cursor
-  motion and erases are real output and stay in both.
+- **Terminal *queries* are filtered per consumer, not per stream.** A tty
+  session's output contains sequences that ask the terminal to answer — DSR
+  (`ESC[6n`, "where is the cursor?") and Device Attributes (`ESC[c`). A
+  question that reaches someone who will not answer it makes *their*
+  terminal answer into its own input buffer: stray `^[[1;5R` in their shell
+  (the alpine prompt `~ # ` is 4 columns wide, hence column 5). So:
+  `manager::console_filter` strips queries from `console.log`, and the logs
+  route runs the same filter over the live broadcast unless the client asks
+  for `?raw=true`. Only an interactive console session (`mvm attach`,
+  `mvm run -it`) sets `raw` — it owns the terminal and reads the reply.
+  Filtering only the recording is the trap: it leaves `mvm logs -f`'s live
+  tail unprotected, which is the same bug with a longer path to it. Colours,
+  cursor motion and erases are real output and stay everywhere.
 - **macOS: no hypervisor entitlement, no VMs.** Hypervisor.framework
   refuses binaries that don't carry `com.apple.security.hypervisor`;
   `krun_start_enter` fails with `EINVAL` and no better hint. `build.sh`
@@ -200,6 +203,14 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `timeout(1)` differ too — `integration.sh` wraps them (`run_pty`,
   `sha256_stream`, a PATH shim for `timeout`, which must be a real command
   because `script` execs it).
+- **The guest resolves the guest's users.** `USER` / `-u` is passed through
+  as `MVM_USER` and looked up against the *rootfs's* `/etc/passwd` by the
+  agent, never against the host's user database — the same name means
+  different uids in different images. The drop order in `apply_user` is
+  setgroups → setgid → setuid (dropping the uid first forfeits the privilege
+  needed for the other two), and it is registered *after* the pty
+  `pre_exec`s, since `TIOCSCTTY` must run while still root. The pty slave is
+  `fchown`ed to the target so the workload can reopen `/dev/tty`.
 - Whiteout handling and layer unpack have unit tests in `crates/image` —
   extend those rather than testing via pulls. Later OCI layers may replace an
   existing path with a hard link; remove the destination before
@@ -216,7 +227,7 @@ maps).
 
 Daemon → guest agent (set by the shim, scrubbed by the agent before it
 spawns the workload): `MVM_MOUNTS`, `MVM_NET_CONFIG`, `MVM_NET_TSI`,
-`MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`.
+`MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`.
 
 ## Conventions
 

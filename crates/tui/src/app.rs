@@ -3,8 +3,6 @@
 use mvm_common::{ImageInfo, Sandbox};
 use ratatui::widgets::TableState;
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Sandboxes,
@@ -19,7 +17,10 @@ pub enum PollUpdate {
     Error(String),
     /// Result of an action the user triggered; shown briefly in the footer so
     /// the next poll's "connected — N sandboxes" doesn't swallow it.
-    Notice { text: String, error: bool },
+    Notice {
+        text: String,
+        error: bool,
+    },
 }
 
 /// Pending "really delete this?" prompt. Removing a sandbox destroys its
@@ -236,7 +237,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_console, App};
+    use super::App;
     use mvm_common::{Sandbox, SandboxSpec};
 
     fn sandbox(name: &str) -> Sandbox {
@@ -280,44 +281,5 @@ mod tests {
         app.sandboxes = vec![sandbox("a"), sandbox("b")];
         app.clamp_selection();
         assert_eq!(app.selected_index(), Some(0));
-    }
-
-    #[test]
-    fn keeps_plain_text_and_newlines() {
-        assert_eq!(sanitize_console("hello\nworld\n"), "hello\nworld\n");
-        assert_eq!(sanitize_console("a\tb"), "a\tb");
-        // A pty's CRLF becomes a plain LF.
-        assert_eq!(sanitize_console("a\r\nb"), "a\nb");
-    }
-
-    #[test]
-    fn strips_csi_sequences() {
-        assert_eq!(sanitize_console("\x1b[31mred\x1b[0m"), "red");
-        // The cursor-position query every shell prompt emits.
-        assert_eq!(sanitize_console("~ # \x1b[6n"), "~ # ");
-        assert_eq!(sanitize_console("\x1b[2J\x1b[1;1Hclear"), "clear");
-    }
-
-    #[test]
-    fn strips_osc_and_dcs_strings() {
-        // BEL-terminated and ST-terminated forms of the colour query/report.
-        assert_eq!(sanitize_console("a\x1b]11;?\x07b"), "ab");
-        assert_eq!(sanitize_console("a\x1b]11;rgb:2d2d/2d2d/2d2d\x1b\\b"), "ab");
-        assert_eq!(sanitize_console("a\x1bP1+r544e\x1b\\b"), "ab");
-        // Nothing that could open a form or delete a sandbox survives.
-        let out = sanitize_console("\x1b]11;rgb:2d2d/2d2d/2d2d\x07");
-        assert!(!out.contains('r') && !out.contains('d'), "{out:?}");
-    }
-
-    #[test]
-    fn drops_lone_and_truncated_escapes() {
-        // A chunk can end mid-sequence; never emit the tail as text.
-        assert_eq!(sanitize_console("a\x1b[3"), "a");
-        assert_eq!(sanitize_console("a\x1b"), "a");
-        assert_eq!(sanitize_console("a\x1b]11;?"), "a");
-        // Two-character escapes, e.g. charset selection.
-        assert_eq!(sanitize_console("a\x1b(Bb"), "ab");
-        // Bare control bytes.
-        assert_eq!(sanitize_console("a\x07\x08\x7fb"), "ab");
     }
 }

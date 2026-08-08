@@ -153,6 +153,12 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
                 .join(";");
             env.push(format!("MVM_MOUNTS={spec}"));
         }
+        // The identity is resolved in the *guest*, against the rootfs's own
+        // /etc/passwd — the host has no business interpreting an image's
+        // `USER` against its own user database.
+        if let Some(user) = &config.user {
+            env.push(format!("MVM_USER={user}"));
+        }
         ctx.set_exec(protocol::GUEST_AGENT_PATH, &argv, &env)?;
     } else {
         let exec = config

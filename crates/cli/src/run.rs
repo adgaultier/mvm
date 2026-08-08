@@ -236,7 +236,11 @@ fn console_session(
     //
     // An attach replays only the last screenful of console: enough to land on
     // a prompt without dumping the whole history of a long-lived sandbox.
-    let mut resp = client.logs(id, true, backlog_tail)?;
+    //
+    // `raw`: this is the one consumer that must see terminal queries. The
+    // guest's shell asks for the cursor column and expects the answer back
+    // on its stdin, which is exactly what an attached terminal provides.
+    let mut resp = client.logs(id, true, backlog_tail, true)?;
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 8192];
     loop {

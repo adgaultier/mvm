@@ -3,18 +3,7 @@
 Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
-## 1. Honor the image USER directive
-`ImageConfig.user` is parsed and ignored — every workload runs as root.
-Faithful behavior (docker parity, needed by e.g.
-`docker/sandbox-templates:opencode`, which runs as `agent`): the guest
-agent resolves the user against the rootfs `/etc/passwd`/`/etc/group`, then
-setgroups/setgid/setuid before spawning the workload, and sets
-HOME/USER/LOGNAME. Also applies to exec sessions (docker exec runs as the
-container user by default, `-u` overrides). The OpenCode image now pulls
-successfully after hard-link replacement handling was added, but its VM
-startup still stops before this identity behavior can be tested.
-
-## 2. Credentials injection (design plan)
+## 1. Credentials injection (design plan)
 Modeled on Docker Sandboxes' credential handling
 (https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
 mvm's daemon + vsock architecture. Guiding principle: **real secrets never
@@ -61,7 +50,42 @@ sentinels and the host injects at the network boundary.
 
 Non-goals for now: console-log secret redaction; Windows/macOS keychains.
 
-## 3. Agent gateway — knative-style activation in front of mvm
+
+## 4. Live window resize for `mvm run -it` / `mvm attach`
+The workload pty boots at the client's size and TERM is forwarded, but the
+size is fixed for the session: resizing the terminal mid-run leaves the guest
+on the old geometry (exec -it has full resize). `attach` is worse — it uses
+`tty_size` as recorded at *create* time, so attaching from a differently sized
+terminal starts out wrong. Needs a console-level resize path: a sandbox-keyed
+Resize message (the protocol's is keyed to an exec session) plus TIOCSWINSZ on
+the workload pty in the agent, with `run`/`attach` polling `term_size()` the
+way `exec` does.
+
+## 5. Guest ptys are not reachable by path (`ttyname` fails)
+Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
+workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
+`/dev/pts/0`: three devpts instances end up stacked on `/dev/pts` (libkrun's
+init, then the agent's), and the pty is allocated in one that a later mount
+shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
+`os.ttyname` — sees an inconsistent world. Fix is for `ensure_devpts` to reuse
+a usable existing instance instead of stacking another; check what ptmxmode
+that leaves for non-root workloads before changing it.
+
+## 6. Decide `run`'s lifetime default
+`mvm run` removes the sandbox when the workload exits unless `--keep`, the
+inverse of docker (`run` keeps; `--rm` removes). It reads as "naming does not
+work": `run --name foo …` then `mvm start foo` says not found, which is why
+the CLI now prints a notice when it removes a named sandbox. Either keep the
+current default and leave the notice, or flip to docker semantics with `--rm`
+(`--keep` staying as a no-op alias) — a breaking change for scripts.
+
+## 7. Pull memory usage
+Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
+unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
+temp file with incremental hashing instead — matters for images like
+`docker/sandbox-templates:opencode` (~750 MB compressed).
+
+## 9. Agent gateway — knative-style activation in front of mvm
 Internal company tool (not client-facing): one long-lived agent per
 user/project, reachable at a stable URL, woken on demand and stopped when
 idle. Traefik does ingress/TLS/auth-forwarding only; the gateway owns compute
@@ -137,41 +161,6 @@ backend ever appears. Also no separate `status` column duplicating mvm's.
 everything as root), item 2 (secrets), item 7 (a 750 MB image spikes RAM by
 its layer size on a box also running 40 VMs). A watch/SSE endpoint on
 `/sandboxes` would beat polling once agent counts grow.
-
-## 4. Live window resize for `mvm run -it` / `mvm attach`
-The workload pty boots at the client's size and TERM is forwarded, but the
-size is fixed for the session: resizing the terminal mid-run leaves the guest
-on the old geometry (exec -it has full resize). `attach` is worse — it uses
-`tty_size` as recorded at *create* time, so attaching from a differently sized
-terminal starts out wrong. Needs a console-level resize path: a sandbox-keyed
-Resize message (the protocol's is keyed to an exec session) plus TIOCSWINSZ on
-the workload pty in the agent, with `run`/`attach` polling `term_size()` the
-way `exec` does.
-
-## 5. Guest ptys are not reachable by path (`ttyname` fails)
-Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
-workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
-`/dev/pts/0`: three devpts instances end up stacked on `/dev/pts` (libkrun's
-init, then the agent's), and the pty is allocated in one that a later mount
-shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
-`os.ttyname` — sees an inconsistent world. Fix is for `ensure_devpts` to reuse
-a usable existing instance instead of stacking another; check what ptmxmode
-that leaves for non-root workloads before changing it.
-
-## 6. Decide `run`'s lifetime default
-`mvm run` removes the sandbox when the workload exits unless `--keep`, the
-inverse of docker (`run` keeps; `--rm` removes). It reads as "naming does not
-work": `run --name foo …` then `mvm start foo` says not found, which is why
-the CLI now prints a notice when it removes a named sandbox. Either keep the
-current default and leave the notice, or flip to docker semantics with `--rm`
-(`--keep` staying as a no-op alias) — a breaking change for scripts.
-
-## 7. Pull memory usage
-Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
-unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
-temp file with incremental hashing instead — matters for images like
-`docker/sandbox-templates:opencode` (~750 MB compressed).
-
 ---
 
 ## Done

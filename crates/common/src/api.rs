@@ -58,6 +58,14 @@ pub struct LogsQuery {
     /// Cap the backlog to this many trailing lines (absent = the whole log).
     #[serde(default)]
     pub tail: Option<usize>,
+    /// Stream the *live* console byte-exact, terminal queries included.
+    /// Only an interactive console session (`mvm attach`, `mvm run -it`)
+    /// wants this: it owns the terminal and reads the reply. A plain reader
+    /// (`mvm logs -f`) never answers, so a query would make its terminal
+    /// reply into its own input buffer — hence filtered by default, the way
+    /// the recorded backlog already is.
+    #[serde(default)]
+    pub raw: bool,
 }
 
 /// Query for the exec stdin endpoint.

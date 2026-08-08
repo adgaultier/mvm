@@ -307,7 +307,11 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             Ok(0)
         }
         Command::Logs { sandbox, follow, tail } => {
-            let mut resp = client.logs(&sandbox, follow, tail)?;
+            // Not raw: `logs` only reads, so terminal queries must be
+            // filtered out of the live tail the way they already are out of
+            // the recording — a reader that never answers would have its own
+            // terminal reply into its own input buffer.
+            let mut resp = client.logs(&sandbox, follow, tail, false)?;
             let mut out = std::io::stdout();
             std::io::copy(&mut resp, &mut out).map_err(|e| e.to_string())?;
             Ok(0)

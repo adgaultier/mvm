@@ -104,16 +104,19 @@ impl Client {
 
     /// Streaming logs.
     /// `tail` caps the replayed backlog to that many trailing lines.
+    /// `raw` keeps the live stream byte-exact, terminal queries included —
+    /// only for a session that owns the terminal and answers them.
     pub fn logs(
         &self,
         id: &str,
         follow: bool,
         tail: Option<usize>,
+        raw: bool,
     ) -> Result<reqwest::blocking::Response, String> {
         let mut req = self
             .http
             .get(format!("{}/api/v1/sandboxes/{id}/logs", self.base))
-            .query(&[("follow", follow.to_string())]);
+            .query(&[("follow", follow.to_string()), ("raw", raw.to_string())]);
         if let Some(tail) = tail {
             req = req.query(&[("tail", tail.to_string())]);
         }

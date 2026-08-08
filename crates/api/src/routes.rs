@@ -12,6 +12,7 @@ use mvm_common::api::{
 };
 use mvm_common::protocol::{encode_frame, AgentEvent};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
+use mvm_manager::console_filter::QueryFilter;
 use std::convert::Infallible;
 
 use crate::{ApiError, AppState};
@@ -107,14 +108,30 @@ async fn logs(
 
     let stream: stream::BoxStream<'static, Result<Bytes, Infallible>> = match rx {
         Some(rx) => {
-            let live = stream::unfold(rx, |mut rx| async move {
+            // The broadcast is byte-exact so an interactive session can see
+            // the terminal queries it is expected to answer. Everyone else
+            // gets them stripped, exactly like the recorded backlog — a
+            // reader that never answers would otherwise have its own
+            // terminal reply into its own input buffer.
+            let filter = (!q.raw).then(QueryFilter::default);
+            let live = stream::unfold((rx, filter), |(mut rx, mut filter)| async move {
                 use tokio::sync::broadcast::error::RecvError;
                 loop {
-                    match rx.recv().await {
-                        Ok(bytes) => return Some((Ok(bytes), rx)),
+                    let bytes = match rx.recv().await {
+                        Ok(bytes) => bytes,
                         Err(RecvError::Lagged(_)) => continue,
                         Err(RecvError::Closed) => return None,
-                    }
+                    };
+                    let bytes = match filter.as_mut() {
+                        None => bytes,
+                        // A chunk that is nothing but a query filters down to
+                        // empty; keep waiting rather than emitting nothing.
+                        Some(f) => match f.filter(&bytes) {
+                            out if out.is_empty() => continue,
+                            out => Bytes::from(out),
+                        },
+                    };
+                    return Some((Ok(bytes), (rx, filter)));
                 }
             });
             Box::pin(backlog_stream.chain(live))

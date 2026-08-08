@@ -2,7 +2,7 @@
 //! persistence, and the host side of the guest-agent control channel.
 
 mod agent_conn;
-mod console_filter;
+pub mod console_filter;
 mod gvproxy;
 
 use std::collections::HashMap;
