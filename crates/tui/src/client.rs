@@ -37,6 +37,18 @@ impl Client {
             .map_err(|e| e.to_string())
     }
 
+    /// Full sandbox record (the TUI's `mvm inspect`).
+    pub fn get_sandbox(&self, id: &str) -> Result<Sandbox, String> {
+        let resp = self
+            .http()
+            .get(format!("{}/api/v1/sandboxes/{id}", self.base))
+            .send()
+            .map_err(|e| e.to_string())?;
+        Self::check(resp, "inspect")?
+            .json()
+            .map_err(|e| e.to_string())
+    }
+
     pub fn start(&self, id: &str) -> Result<(), String> {
         self.action(id, "start")
     }

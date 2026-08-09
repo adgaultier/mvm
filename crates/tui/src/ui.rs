@@ -3,7 +3,9 @@
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
+};
 use ratatui::Frame;
 
 use crate::app::{App, ResizeField, Tab};
@@ -64,7 +66,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Span::styled("r", Style::default().fg(Color::Yellow)),
         Span::raw(" resize  "),
         Span::styled("d", Style::default().fg(Color::Yellow)),
-        Span::raw(" delete   "),
+        Span::raw(" delete  "),
+        Span::styled("i", Style::default().fg(Color::Yellow)),
+        Span::raw(" inspect   "),
         Span::styled(
             message,
             Style::default().fg(if message_is_error {
@@ -84,6 +88,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.confirm_delete.is_some() {
         draw_confirm_delete(f, app);
+    }
+    if app.inspect.is_some() {
+        draw_inspect(f, app);
     }
 }
 
@@ -202,6 +209,153 @@ fn draw_resize(f: &mut Frame, app: &App) {
             .title(" resize microVM "),
     );
     f.render_widget(popup, area);
+}
+
+/// Modal `mvm inspect` viewer: the full sandbox record as a key/value table.
+fn draw_inspect(f: &mut Frame, app: &mut App) {
+    let Some(ins) = app.inspect.as_mut() else { return };
+    let area = centered_rect(
+        f.area().width.saturating_sub(8).max(20),
+        f.area().height.saturating_sub(6).max(8),
+        f.area(),
+    );
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" inspect: {} ", ins.label));
+
+    match &ins.sandbox {
+        Some(sb) => {
+            let pairs = inspect_rows(sb);
+            // Header row + its bottom margin + the two borders.
+            let visible = area.height.saturating_sub(4) as usize;
+            ins.scroll = (ins.scroll as usize).min(pairs.len().saturating_sub(visible)) as u16;
+
+            let header = Row::new(["FIELD", "VALUE"])
+                .style(
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .bottom_margin(1);
+            let rows: Vec<Row> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let value_style = if *k == "STATE" {
+                        Style::default().fg(state_color(sb.state))
+                    } else {
+                        Style::default()
+                    };
+                    Row::new(vec![
+                        Cell::from(*k).style(Style::default().fg(Color::Cyan)),
+                        Cell::from(v.as_str()).style(value_style),
+                    ])
+                })
+                .collect();
+            let mut state = TableState::default();
+            *state.offset_mut() = ins.scroll as usize;
+            let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(24)])
+                .header(header)
+                .block(block);
+            f.render_stateful_widget(table, area, &mut state);
+        }
+        None => {
+            let line = match &ins.error {
+                Some(e) => Line::from(Span::styled(
+                    format!("  inspect failed: {e}"),
+                    Style::default().fg(Color::Red),
+                )),
+                None => Line::from(Span::styled(
+                    "  fetching…",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            };
+            let para = Paragraph::new(vec![Line::raw(""), line]).block(block);
+            f.render_widget(para, area);
+        }
+    }
+}
+
+/// The inspect table body: every field `mvm inspect` reports, as label/value
+/// pairs. Values are joined into single lines so the table rows stay flat.
+fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
+    let spec = &sb.spec;
+    let dash = "-".to_string();
+    let ts = |t: Option<chrono::DateTime<chrono::Utc>>| -> String {
+        t.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| dash.clone())
+    };
+    let join = |items: Vec<String>| -> String {
+        if items.is_empty() {
+            dash.clone()
+        } else {
+            items.join(", ")
+        }
+    };
+    let mounts = join(
+        spec.mounts
+            .iter()
+            .map(|m| {
+                let mut s = format!("{}:{}", m.host.display(), m.guest.display());
+                if m.read_only {
+                    s.push_str(":ro");
+                }
+                s
+            })
+            .collect(),
+    );
+    let labels = join(spec.labels.iter().map(|(k, v)| format!("{k}={v}")).collect());
+    let command = if spec.command.is_empty() {
+        "(image default)".to_string()
+    } else {
+        spec.command.join(" ")
+    };
+
+    vec![
+        ("ID", sb.id.to_string()),
+        ("NAME", spec.name.clone().unwrap_or(dash.clone())),
+        ("STATE", sb.state.to_string()),
+        (
+            "EXIT CODE",
+            sb.exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| dash.clone()),
+        ),
+        (
+            "PID",
+            sb.pid.map(|p| p.to_string()).unwrap_or_else(|| dash.clone()),
+        ),
+        (
+            "GVPROXY PID",
+            sb.gvproxy_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| dash.clone()),
+        ),
+        ("CREATED", ts(Some(sb.created_at))),
+        ("STARTED", ts(sb.started_at)),
+        ("FINISHED", ts(sb.finished_at)),
+        ("IMAGE", spec.image.clone()),
+        ("COMMAND", command),
+        ("VCPUS", spec.vcpus.to_string()),
+        ("RAM (MiB)", spec.ram_mib.to_string()),
+        ("NETWORK", spec.network.to_string()),
+        ("PORTS", join(spec.ports.clone())),
+        ("MOUNTS", mounts),
+        ("ENV", join(spec.env.clone())),
+        ("WORKDIR", spec.workdir.clone().unwrap_or(dash.clone())),
+        ("USER", spec.user.clone().unwrap_or(dash.clone())),
+        ("TTY", spec.tty.to_string()),
+        (
+            "TTY SIZE",
+            spec.tty_size
+                .map(|(c, r)| format!("{c}x{r}"))
+                .unwrap_or_else(|| dash.clone()),
+        ),
+        ("ATTACH STDIN", spec.attach_stdin.to_string()),
+        ("LABELS", labels),
+    ]
 }
 
 /// A `width` x `height` rect centred in `area` (clamped to it).

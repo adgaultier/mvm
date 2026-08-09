@@ -16,7 +16,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, DeleteConfirm, PollUpdate, ResizeForm, Tab};
+use app::{App, DeleteConfirm, Inspect, PollUpdate, ResizeForm, Tab};
 use client::Client;
 
 #[derive(Parser)]
@@ -68,6 +68,23 @@ fn run_loop(
                     app.images = images;
                     app.clamp_selection();
                 }
+                PollUpdate::Inspect { id, result } => {
+                    if let Some(ins) = app.inspect.as_mut() {
+                        if ins.id == id {
+                            match result {
+                                Ok(sb) => {
+                                    ins.sandbox = Some(*sb);
+                                    ins.error = None;
+                                }
+                                Err(e) => {
+                                    ins.sandbox = None;
+                                    ins.error = Some(e);
+                                }
+                            }
+                            ins.scroll = 0;
+                        }
+                    }
+                }
                 PollUpdate::Error(e) => {
                     app.daemon_ok = false;
                     app.status = format!("daemon: {e}");
@@ -92,6 +109,10 @@ fn run_loop(
                 }
                 if app.confirm_delete.is_some() {
                     handle_confirm_key(app, key, client, tx);
+                    continue;
+                }
+                if app.inspect.is_some() {
+                    handle_inspect_key(app, key);
                     continue;
                 }
                 match key.code {
@@ -142,6 +163,19 @@ fn run_loop(
                             app.resize = Some(ResizeForm::new(sb));
                         }
                     }
+                    KeyCode::Char('i') => {
+                        if let Some(sb) = app.selected_sandbox() {
+                            let id = sb.id.to_string();
+                            app.inspect = Some(Inspect::new(sb));
+                            // Fetch fresh on open, like `mvm inspect <id>`.
+                            let c = client.clone();
+                            let t = tx.clone();
+                            std::thread::spawn(move || {
+                                let result = c.get_sandbox(&id).map(Box::new);
+                                let _ = t.send(PollUpdate::Inspect { id, result });
+                            });
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -181,6 +215,20 @@ fn handle_confirm_key(
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
             app.confirm_delete = None;
         }
+        _ => {}
+    }
+}
+
+/// Keys for the inspect viewer. `j`/`k` (or arrows and page keys) scroll; the
+/// close keys are the only thing the footer advertises — scrolling is not.
+fn handle_inspect_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let Some(ins) = app.inspect.as_mut() else { return };
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => app.inspect = None,
+        KeyCode::Char('j') | KeyCode::Down => ins.scroll = ins.scroll.saturating_add(1),
+        KeyCode::Char('k') | KeyCode::Up => ins.scroll = ins.scroll.saturating_sub(1),
+        KeyCode::PageDown | KeyCode::Char(' ') => ins.scroll = ins.scroll.saturating_add(10),
+        KeyCode::PageUp => ins.scroll = ins.scroll.saturating_sub(10),
         _ => {}
     }
 }

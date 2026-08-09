@@ -14,6 +14,12 @@ pub enum PollUpdate {
         sandboxes: Vec<Sandbox>,
         images: Vec<ImageInfo>,
     },
+    /// Fresh inspect record for a sandbox, fetched on demand. The sandbox is
+    /// boxed so this variant stays small next to `Data`.
+    Inspect {
+        id: String,
+        result: Result<Box<Sandbox>, String>,
+    },
     Error(String),
     /// Result of an action the user triggered; shown briefly in the footer so
     /// the next poll's "connected — N sandboxes" doesn't swallow it.
@@ -39,6 +45,31 @@ impl DeleteConfirm {
             id: sb.id.to_string(),
             label: sb.name().to_string(),
             running: sb.state.is_alive(),
+        }
+    }
+}
+
+/// Modal `mvm inspect`: the full sandbox record as a key/value table. The
+/// record is fetched fresh on open so state, PID and exit code match reality
+/// at the moment of inspection, not whenever the last poll happened.
+pub struct Inspect {
+    pub id: String,
+    pub label: String,
+    /// Fetched record; None while loading or after an error.
+    pub sandbox: Option<Sandbox>,
+    pub error: Option<String>,
+    /// Rows scrolled past in the viewer (j/k).
+    pub scroll: u16,
+}
+
+impl Inspect {
+    pub fn new(sb: &Sandbox) -> Self {
+        Self {
+            id: sb.id.to_string(),
+            label: sb.name().to_string(),
+            sandbox: None,
+            error: None,
+            scroll: 0,
         }
     }
 }
@@ -140,6 +171,8 @@ pub struct App {
     pub resize: Option<ResizeForm>,
     /// Modal delete confirmation; same rule.
     pub confirm_delete: Option<DeleteConfirm>,
+    /// Modal `mvm inspect` viewer; same rule.
+    pub inspect: Option<Inspect>,
     notice: Option<(String, bool, std::time::Instant)>,
 }
 
@@ -157,6 +190,7 @@ impl App {
             should_quit: false,
             resize: None,
             confirm_delete: None,
+            inspect: None,
             notice: None,
         }
     }
@@ -237,7 +271,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::{App, Inspect};
     use mvm_common::{Sandbox, SandboxSpec};
 
     fn sandbox(name: &str) -> Sandbox {
@@ -261,6 +295,19 @@ mod tests {
             app.selected_sandbox().map(|s| s.name().to_string()),
             Some("newest".to_string())
         );
+    }
+
+    #[test]
+    fn inspect_opens_loading() {
+        let sb = sandbox("web");
+        let ins = Inspect::new(&sb);
+        assert_eq!(ins.id, sb.id.to_string());
+        assert_eq!(ins.label, "web");
+        // The record is fetched on demand; the modal starts in the loading
+        // state and only the fetch fills it in.
+        assert!(ins.sandbox.is_none());
+        assert!(ins.error.is_none());
+        assert_eq!(ins.scroll, 0);
     }
 
     #[test]
