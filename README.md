@@ -10,7 +10,7 @@ $ mvm serve &
 $ mvm pull alpine
 $ mvm run alpine echo hello-from-microvm
 hello-from-microvm
-$ mvm run --name dev --keep alpine sleep infinity &
+$ mvm run --name dev alpine sleep infinity &
 $ mvm exec dev uname -a
 Linux localhost 6.12.91 #1 SMP PREEMPT_DYNAMIC ... x86_64 Linux
 $ printf 'stdin works\n' | mvm exec -i dev cat
@@ -102,7 +102,7 @@ libc you don't control.
 | `mvm serve [--addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
-| `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; ephemeral unless `--keep` (`-i` attaches stdin to the console, `-t` gives the workload its own guest pty at your terminal's size, `-it` = interactive shell) |
+| `mvm run [-i] [-t] IMAGE [CMD…]` | create + start + attach; the sandbox survives the workload (removed only with `--rm`) (`-i` attaches stdin to the console, `-t` gives the workload its own guest pty at your terminal's size, `-it` = interactive shell) |
 | `mvm create IMAGE [CMD…]` | create without starting |
 | `mvm ps [-a]` | list sandboxes |
 | `mvm start [-a] SANDBOX` | start a created/stopped sandbox (`-a` also attaches) |
@@ -117,10 +117,11 @@ libc you don't control.
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
-`-w workdir`, `--keep`. Without `--name`, the sandbox gets a generated
+`-w workdir`, `--rm` (run only: remove the sandbox when the workload exits,
+docker-style). Without `--name`, the sandbox gets a generated
 `<adjective>-<animal>` name (e.g. `bold-lion`), unique among existing
-sandboxes — `create`/`clone` print it to stderr, `run --keep` includes it in
-its "kept" message.
+sandboxes — `create`/`clone` print it to stderr, `run` includes it in its
+"kept" message.
 
 Any command that takes a `SANDBOX` accepts its **id, a unique id prefix, or
 its `--name`** (names are unique; creating a second sandbox with a taken name
@@ -131,14 +132,15 @@ docker) — `start` has no `-i`/`-t` of its own, it reuses what the sandbox was
 created with. So a long-lived interactive VM is:
 
 ```console
-$ mvm create -it --name dev alpine sh    # or: mvm run -it --keep --name dev …
+$ mvm create -it --name dev alpine sh    # or: mvm run -it --name dev …
 $ mvm start dev                          # detached
 $ mvm attach dev                         # ctrl-p ctrl-q to leave it running
 ```
 
-Note that **`mvm run` removes the sandbox when the workload exits** unless you
-pass `--keep` (the inverse of docker's `--rm` default), so `run --name foo`
-without `--keep` leaves nothing to `start` afterwards.
+`mvm run` keeps the sandbox after the workload exits (docker's default), so a
+short-lived `run alpine true` still leaves a `true` sandbox to `start`
+afterwards. Pass `--rm` to remove it on exit (the inverse of the old
+ephemeral default).
 
 ## HTTP API
 

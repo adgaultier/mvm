@@ -70,7 +70,7 @@ fn print_pull_event(line: &str) {
 
 /// create + start + stream logs + wait + cleanup.
 pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
-    let keep = args.keep;
+    let rm = args.rm;
     let interactive = args.interactive;
     let tty = args.tty;
     let spec = args.spec()?;
@@ -83,26 +83,26 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
         Ok(code) => code,
         Err(e) => {
             let _ = client.stop_sandbox(&id);
-            if !keep {
+            if rm {
                 let _ = client.remove_sandbox(&id);
             }
             return Err(e);
         }
     };
 
-    if !keep {
+    if rm {
         client.remove_sandbox(&id)?;
-        // A name only outlives the run with --keep. Say so, or `mvm start
-        // <name>` afterwards just reports "sandbox not found". The daemon
-        // assigns a generated name when none was given, so read it off the
-        // sandbox it actually created.
+        // The daemon assigns a generated name when none was given, so read it
+        // off the sandbox it actually created.
         if let Some(name) = &sb.spec.name {
-            eprintln!("mvm: sandbox '{name}' removed on exit (use --keep to start it again)");
+            eprintln!("mvm: sandbox '{name}' removed on exit (run without --rm to keep it)");
         }
     } else {
+        // stderr: stdout is the workload's, and piping `mvm run` into another
+        // program must not see diagnostics.
         match &sb.spec.name {
-            Some(name) => println!("sandbox {id} kept (name: {name}, state: exited)"),
-            None => println!("sandbox {id} kept (state: exited)"),
+            Some(name) => eprintln!("mvm: sandbox {id} kept (name: {name}, state: exited)"),
+            None => eprintln!("mvm: sandbox {id} kept (state: exited)"),
         }
     }
     Ok(exit_code)
@@ -110,9 +110,9 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
 
 fn run_attached(client: &Client, id: &str, interactive: bool, tty: bool) -> Result<i32, String> {
     client.start_sandbox(id)?;
-    // No detach keys here: `run` owns the sandbox's lifetime (it removes it
-    // unless --keep), so leaving the workload behind would orphan it. And no
-    // backlog cap — this console starts empty.
+    // No detach keys here: `run` owns the sandbox's lifetime (with --rm it
+    // removes the sandbox on exit), so leaving the workload behind would
+    // orphan it. And no backlog cap — this console starts empty.
     console_session(client, id, interactive, tty, None, None)
 }
 

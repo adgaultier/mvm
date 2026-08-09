@@ -71,14 +71,6 @@ shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
 a usable existing instance instead of stacking another; check what ptmxmode
 that leaves for non-root workloads before changing it.
 
-## 6. Decide `run`'s lifetime default
-`mvm run` removes the sandbox when the workload exits unless `--keep`, the
-inverse of docker (`run` keeps; `--rm` removes). It reads as "naming does not
-work": `run --name foo …` then `mvm start foo` says not found, which is why
-the CLI now prints a notice when it removes a named sandbox. Either keep the
-current default and leave the notice, or flip to docker semantics with `--rm`
-(`--keep` staying as a no-op alias) — a breaking change for scripts.
-
 ## 7. Pull memory usage
 Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
 unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
@@ -164,6 +156,13 @@ image-USER blocker is gone — the opencode image runs as `agent`, and mvm now
 honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
 agent counts grow.
 ## Done
+
+- **`mvm run` keeps by default; `--rm` removes on exit** (2026-08-09) —
+  flipped to docker semantics. `run` no longer removes the sandbox when the
+  workload exits unless `--rm`; the "kept" notice (id + generated name +
+  state) goes to *stderr* so `mvm run` stays pipeable. TODO section 6 was
+  this decision; the removed-on-exit notice now only fires under `--rm`.
+
 
 - **`mvm clone` / `mvm clone --fork`** (2026-08-09) — new sandbox from an
   existing one's spec with every create flag overridable; `--fork` carries the

@@ -48,7 +48,7 @@ enum Command {
         #[command(flatten)]
         overrides: CloneArgs,
     },
-    /// Create and start a sandbox, stream its output (ephemeral unless --keep).
+    /// Create and start a sandbox, stream its output (kept unless --rm).
     Run(BoxArgs),
     /// List sandboxes.
     Ps {
@@ -162,9 +162,10 @@ pub(crate) struct BoxArgs {
     /// image's USER.
     #[arg(short, long)]
     user: Option<String>,
-    /// Keep the sandbox after the workload exits (run only).
+    /// Remove the sandbox when the workload exits (docker --rm; kept by
+    /// default).
     #[arg(long)]
-    keep: bool,
+    rm: bool,
     /// Keep the guest console's stdin open and forward local stdin to it.
     /// Recorded in the spec, so a `create`d sandbox stays attachable later.
     #[arg(short, long)]
@@ -411,7 +412,7 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
 fn validate_guest_command(command: &[String]) -> Result<(), String> {
     const MVM_FLAGS: &[&str] = &[
         "--name", "--env", "--volume", "--publish", "--net", "--cpus", "--memory", "--workdir",
-        "--keep", "--host", "--interactive", "--tty",
+        "--rm", "--host", "--interactive", "--tty",
     ];
     if let Some(first) = command.first() {
         if first.starts_with('-') {
@@ -619,7 +620,7 @@ mod tests {
     fn rejects_mvm_flags_after_image() {
         assert!(validate_guest_command(&cmd(&["sh", "-c", "apk add curl", "--net", "gvproxy"]))
             .is_err());
-        assert!(validate_guest_command(&cmd(&["--keep", "sh"])).is_err());
+        assert!(validate_guest_command(&cmd(&["--rm", "sh"])).is_err());
         assert!(validate_guest_command(&cmd(&["-x"])).is_err());
     }
 

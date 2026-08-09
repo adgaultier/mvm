@@ -167,7 +167,7 @@ else
 fi
 
 echo "==> exec"
-"$MVM" run --name itest --keep alpine sleep 60 >/dev/null &
+"$MVM" run --name itest alpine sleep 60 >/dev/null &
 RUN_PID=$!
 # Wait for the guest agent to come up ("running" state precedes the
 # agent's vsock connection by a moment).
@@ -258,7 +258,7 @@ if command -v gvproxy >/dev/null 2>&1; then
             'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
 
     # Port forwarding: a guest TCP listener reachable from the host.
-    "$MVM" run --keep --name web --net gvproxy -p 18080:8000 alpine \
+    "$MVM" run --name web --net gvproxy -p 18080:8000 alpine \
         sh -c 'while true; do printf "gv-web\\n" | nc -l -p 8000; done' >/dev/null 2>&1 &
     WEB_PID=$!
     sleep 3
@@ -318,7 +318,7 @@ fi
 check "removed" "0" "$("$MVM" ps -a | grep -c itest || true)"
 
 echo "==> logs"
-"$MVM" run --name logtest --keep alpine sh -c 'echo l1; echo l2' >/dev/null
+"$MVM" run --name logtest alpine sh -c 'echo l1; echo l2' >/dev/null
 check "logs" "l1 l2" "$("$MVM" logs logtest | tr '\n' ' ' | sed 's/ $//')"
 # Follow mode must terminate promptly on an exited sandbox, not hang.
 check "logs -f terminates" "l1 l2" \
@@ -388,13 +388,13 @@ set -e
 "$MVM" rm -f att >/dev/null
 
 # Console backlog can be capped (what attach uses to avoid dumping history).
-"$MVM" run --name tailtest --keep alpine sh -c 'echo one; echo two; echo three' >/dev/null
+"$MVM" run --name tailtest alpine sh -c 'echo one; echo two; echo three' >/dev/null
 check "logs --tail" "two three" \
     "$("$MVM" logs -n 2 tailtest | tr -d '\r' | tr '\n' ' ' | sed 's/ $//')"
 "$MVM" rm tailtest >/dev/null
 
 echo "==> resize (cpu/memory)"
-"$MVM" run --name rsz --keep alpine sleep 180 >/dev/null 2>&1 &
+"$MVM" run --name rsz alpine sleep 180 >/dev/null 2>&1 &
 RSZ_PID=$!
 for _ in $(seq 1 100); do
     "$MVM" exec rsz true >/dev/null 2>&1 && break
@@ -432,8 +432,8 @@ check "rejected resize left spec alone" "1024" \
 
 echo "==> clone"
 # A sandbox that writes a marker to its rootfs and then exits, so its disk
-# holds state to fork. `run --keep` leaves the sandbox behind in `exited`.
-"$MVM" run --name clsrc --keep alpine sh -c 'echo base-disk > /marker' >/dev/null
+# holds state to fork. `run` leaves the sandbox behind in `exited`.
+"$MVM" run --name clsrc alpine sh -c 'echo base-disk > /marker' >/dev/null
 CLSRC_ID=$("$MVM" ps -a | grep clsrc | awk '{print $1}')
 
 # A plain clone inherits the spec but starts from a fresh disk. The inherited
@@ -494,9 +494,9 @@ check "no-name clone gets a generated name" "1" \
     "$(echo "$GNCLONE_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
 check "generated names are distinct" "1" "$([ "$GEN_NAME" != "$GNCLONE_NAME" ] && echo 1)"
 
-# run without --name too: --keep reports the generated name on exit.
-RUN_OUT=$("$MVM" run --keep alpine true)
-RUN_ID=${RUN_OUT#sandbox }
+# run without --name too: reports the generated name on exit (stderr).
+RUN_OUT=$("$MVM" run alpine true 2>&1)
+RUN_ID=${RUN_OUT#mvm: sandbox }
 RUN_ID=${RUN_ID%% *}
 RUN_NAME=$("$MVM" ps -a | grep -w "$RUN_ID" | awk '{print $2}')
 check "run without --name gets a generated name" "1" \
