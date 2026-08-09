@@ -56,10 +56,7 @@ fn print_pull_event(line: &str) {
             );
         }
         Some("uptodate") => {
-            println!(
-                "up to date ({})",
-                short(v["digest"].as_str().unwrap_or(""))
-            );
+            println!("up to date ({})", short(v["digest"].as_str().unwrap_or("")));
         }
         Some("error") => {
             eprintln!("pull error: {}", v["error"].as_str().unwrap_or_default());
@@ -148,7 +145,11 @@ pub fn attach(client: &Client, sandbox: &str, no_stdin: bool) -> Result<i32, Str
     eprintln!(
         "mvm: attached to {} — detach with {}",
         sb.name(),
-        if detach.is_some() { "ctrl-p ctrl-q" } else { "ctrl-c" }
+        if detach.is_some() {
+            "ctrl-p ctrl-q"
+        } else {
+            "ctrl-c"
+        }
     );
     console_session(
         client,
@@ -193,9 +194,7 @@ fn console_session(
             let mut chunk = [0u8; 4096];
             // Detach scanning only makes sense on a raw tty; a pipe must stay
             // byte-exact (binaries travel through here).
-            let mut scanner = detach
-                .filter(|_| raw_active)
-                .map(DetachScanner::new);
+            let mut scanner = detach.filter(|_| raw_active).map(DetachScanner::new);
             loop {
                 let n = match stdin.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
@@ -289,7 +288,10 @@ enum Scanned {
 
 impl DetachScanner {
     fn new(keys: [u8; 2]) -> Self {
-        Self { keys, pending: false }
+        Self {
+            keys,
+            pending: false,
+        }
     }
 
     fn feed(&mut self, input: &[u8]) -> Scanned {
@@ -321,7 +323,9 @@ static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mu
 
 /// Undo raw mode, once, whoever gets there first.
 fn restore_terminal() {
-    let Ok(mut saved) = ORIGINAL_TERMIOS.lock() else { return };
+    let Ok(mut saved) = ORIGINAL_TERMIOS.lock() else {
+        return;
+    };
     if let Some(term) = saved.take() {
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &term);
@@ -390,9 +394,12 @@ pub fn exec(
     tty: bool,
     user: Option<String>,
 ) -> Result<i32, String> {
-    let (cols, rows) = if tty { term_size().unwrap_or((0, 0)) } else { (0, 0) };
-    let (session, mut resp) =
-        client.exec(sandbox, command, vec![], None, tty, cols, rows, user)?;
+    let (cols, rows) = if tty {
+        term_size().unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    let (session, mut resp) = client.exec(sandbox, command, vec![], None, tty, cols, rows, user)?;
 
     // Raw mode while the session runs; restored by Drop on every exit path.
     let _raw = if tty && interactive {
@@ -411,7 +418,10 @@ pub fn exec(
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 match term_size() {
                     Some(size) if size != last => {
-                        if resize_client.exec_resize(&sb, session, size.0, size.1).is_err() {
+                        if resize_client
+                            .exec_resize(&sb, session, size.0, size.1)
+                            .is_err()
+                        {
                             break;
                         }
                         last = size;

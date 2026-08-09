@@ -183,7 +183,6 @@ fn run_loop(
     }
 }
 
-
 /// Keys for the delete confirmation. Only `y` goes through; anything that is
 /// not an explicit yes or no leaves the prompt up rather than guessing.
 fn handle_confirm_key(
@@ -194,7 +193,9 @@ fn handle_confirm_key(
 ) {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            let Some(confirm) = app.confirm_delete.take() else { return };
+            let Some(confirm) = app.confirm_delete.take() else {
+                return;
+            };
             let c = client.clone();
             let t = tx.clone();
             std::thread::spawn(move || {
@@ -222,7 +223,9 @@ fn handle_confirm_key(
 /// Keys for the inspect viewer. `j`/`k` (or arrows and page keys) scroll; the
 /// close keys are the only thing the footer advertises — scrolling is not.
 fn handle_inspect_key(app: &mut App, key: crossterm::event::KeyEvent) {
-    let Some(ins) = app.inspect.as_mut() else { return };
+    let Some(ins) = app.inspect.as_mut() else {
+        return;
+    };
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => app.inspect = None,
         KeyCode::Char('j') | KeyCode::Down => ins.scroll = ins.scroll.saturating_add(1),
@@ -242,7 +245,9 @@ fn handle_resize_key(
     tx: &mpsc::Sender<PollUpdate>,
 ) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let Some(form) = app.resize.as_mut() else { return };
+    let Some(form) = app.resize.as_mut() else {
+        return;
+    };
 
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.resize = None,
@@ -257,13 +262,10 @@ fn handle_resize_key(
     }
 }
 
-fn apply_resize(
-    app: &mut App,
-    client: &Client,
-    tx: &mpsc::Sender<PollUpdate>,
-    restart: bool,
-) {
-    let Some(form) = app.resize.as_ref() else { return };
+fn apply_resize(app: &mut App, client: &Client, tx: &mpsc::Sender<PollUpdate>, restart: bool) {
+    let Some(form) = app.resize.as_ref() else {
+        return;
+    };
     let (vcpus, ram_mib) = match form.values() {
         Ok(values) => values,
         Err(message) => {
@@ -286,14 +288,22 @@ fn apply_resize(
     let t = tx.clone();
     std::thread::spawn(move || {
         let notice = match c.resize(&id, vcpus, ram_mib) {
-            Err(e) => PollUpdate::Notice { text: format!("resize {label}: {e}"), error: true },
+            Err(e) => PollUpdate::Notice {
+                text: format!("resize {label}: {e}"),
+                error: true,
+            },
             Ok(sb) => {
                 let size = format!("{} vcpu / {} MiB", sb.spec.vcpus, sb.spec.ram_mib);
                 if !running {
-                    PollUpdate::Notice { text: format!("{label} resized to {size}"), error: false }
+                    PollUpdate::Notice {
+                        text: format!("{label} resized to {size}"),
+                        error: false,
+                    }
                 } else if !restart {
                     PollUpdate::Notice {
-                        text: format!("{label} resized to {size} — restart to apply (^r does both)"),
+                        text: format!(
+                            "{label} resized to {size} — restart to apply (^r does both)"
+                        ),
                         error: false,
                     }
                 } else {

@@ -38,7 +38,9 @@ pub fn validate(mode: &NetworkMode) -> Result<()> {
                 ))
             }
         }
-        NetworkMode::Gvproxy { socket: Some(socket) } => {
+        NetworkMode::Gvproxy {
+            socket: Some(socket),
+        } => {
             if socket.exists() {
                 Ok(())
             } else {
@@ -75,7 +77,9 @@ pub fn validate(mode: &NetworkMode) -> Result<()> {
 
 /// Is `name` an executable somewhere on PATH?
 fn in_path(name: &std::path::Path) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else { return false };
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
 }
 

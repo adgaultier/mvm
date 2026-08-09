@@ -87,7 +87,11 @@ pub fn spawn(dir: &Path) -> Result<Gvproxy> {
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     loop {
         if vfkit.exists() && control.exists() {
-            return Ok(Gvproxy { child, vfkit, control });
+            return Ok(Gvproxy {
+                child,
+                vfkit,
+                control,
+            });
         }
         // A gvproxy that died on startup (unsupported unixgram scheme on old
         // builds, port clash, …) must not turn into a five-second stall.

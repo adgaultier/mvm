@@ -68,11 +68,7 @@ impl ImageStore {
     /// matches the registry digest; otherwise downloads into a staging dir
     /// and swaps it in atomically, so a failed pull never destroys the
     /// existing image. Concurrent pulls of the same reference serialize.
-    pub fn pull(
-        &self,
-        reference: &str,
-        on_event: impl FnMut(PullEvent),
-    ) -> Result<ImageInfo> {
+    pub fn pull(&self, reference: &str, on_event: impl FnMut(PullEvent)) -> Result<ImageInfo> {
         let reference = ImageReference::parse(reference)?;
         let key = reference.store_key();
         let _guard = self.lock_pull(&key);
@@ -89,9 +85,9 @@ impl ImageStore {
         std::fs::create_dir_all(&staging)?;
         let rootfs = staging.join("rootfs");
 
-        let outcome =
-            self.client
-                .pull(&reference, &rootfs, existing_digest.as_deref(), on_event);
+        let outcome = self
+            .client
+            .pull(&reference, &rootfs, existing_digest.as_deref(), on_event);
         let pulled = match outcome {
             Ok(PullOutcome::Pulled(pulled)) => pulled,
             Ok(PullOutcome::UpToDate { .. }) => {
@@ -143,7 +139,9 @@ impl ImageStore {
         let matches: Vec<_> = self
             .list()?
             .into_iter()
-            .filter(|i| i.reference == reference || i.reference.starts_with(&format!("{reference}:")))
+            .filter(|i| {
+                i.reference == reference || i.reference.starts_with(&format!("{reference}:"))
+            })
             .collect();
         match matches.len() {
             1 => {

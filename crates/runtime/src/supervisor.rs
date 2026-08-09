@@ -22,7 +22,11 @@ pub struct ShimHandle {
 
 /// Write the shim config and spawn the shim with a pty-backed console. The
 /// guest workload must see a terminal even when the client is not attached.
-pub fn spawn_shim(config: &ShimConfig, sandbox_dir: &Path, attach_stdin: bool) -> Result<ShimHandle> {
+pub fn spawn_shim(
+    config: &ShimConfig,
+    sandbox_dir: &Path,
+    attach_stdin: bool,
+) -> Result<ShimHandle> {
     let config_path = sandbox_dir.join("shim.json");
     config.save(&config_path)?;
 

@@ -92,7 +92,9 @@ pub struct RegistryClient {
 pub enum PullOutcome {
     Pulled(PulledImage),
     /// The stored copy already matches the registry's manifest digest.
-    UpToDate { digest: String },
+    UpToDate {
+        digest: String,
+    },
 }
 
 /// Everything pulled for one image, unpacked on disk.
@@ -136,7 +138,9 @@ impl RegistryClient {
         };
 
         if skip_if_digest == Some(digest.as_str()) {
-            on_event(PullEvent::UpToDate { digest: digest.clone() });
+            on_event(PullEvent::UpToDate {
+                digest: digest.clone(),
+            });
             return Ok(PullOutcome::UpToDate { digest });
         }
 
@@ -166,8 +170,7 @@ impl RegistryClient {
         std::fs::create_dir_all(dest_rootfs)?;
         let mut total_size = 0u64;
         for layer in &manifest.layers {
-            if layer.media_type.contains("nondistributable")
-                || layer.media_type.contains("foreign")
+            if layer.media_type.contains("nondistributable") || layer.media_type.contains("foreign")
             {
                 tracing::warn!("skipping foreign layer {}", layer.digest);
                 continue;
@@ -205,8 +208,7 @@ impl RegistryClient {
     /// Fetch a manifest; if it is an index/list, resolve to the platform
     /// manifest for this host.
     fn fetch_manifest_resolved(&self, reference: &ImageReference) -> ImgResult<(Manifest, String)> {
-        let (bytes, content_type) =
-            self.get_manifest_raw(reference, reference.ref_str())?;
+        let (bytes, content_type) = self.get_manifest_raw(reference, reference.ref_str())?;
 
         if is_index(&content_type, &bytes) {
             let index: Index = serde_json::from_slice(&bytes)
@@ -257,7 +259,9 @@ impl RegistryClient {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let bytes = resp.bytes().map_err(|e| img_err(format!("manifest body: {e}")))?;
+        let bytes = resp
+            .bytes()
+            .map_err(|e| img_err(format!("manifest body: {e}")))?;
         Ok((bytes.to_vec(), content_type))
     }
 
@@ -267,7 +271,9 @@ impl RegistryClient {
             reference.registry, reference.repository, digest
         );
         let resp = self.send_with_auth(&url, &[])?;
-        let bytes = resp.bytes().map_err(|e| img_err(format!("blob body: {e}")))?;
+        let bytes = resp
+            .bytes()
+            .map_err(|e| img_err(format!("blob body: {e}")))?;
         verify_digest(digest, &bytes)?;
         Ok(bytes.to_vec())
     }
@@ -287,7 +293,9 @@ impl RegistryClient {
         let mut chunk = [0u8; 1 << 16];
         let mut downloaded = 0u64;
         loop {
-            let n = resp.read(&mut chunk).map_err(|e| img_err(format!("blob read: {e}")))?;
+            let n = resp
+                .read(&mut chunk)
+                .map_err(|e| img_err(format!("blob read: {e}")))?;
             if n == 0 {
                 break;
             }
@@ -335,10 +343,7 @@ impl RegistryClient {
             .unwrap_or_default()
             .to_string();
         let token = self.fetch_bearer_token(&challenge)?;
-        self.tokens
-            .lock()
-            .unwrap()
-            .insert(token_key, token.clone());
+        self.tokens.lock().unwrap().insert(token_key, token.clone());
 
         let resp = build(Some(&token))
             .send()
@@ -396,7 +401,9 @@ fn error_for_status(resp: reqwest::blocking::Response) -> ImgResult<reqwest::blo
 
 fn parse_auth_params(challenge: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let challenge = challenge.trim_start_matches("Bearer").trim_start_matches("bearer");
+    let challenge = challenge
+        .trim_start_matches("Bearer")
+        .trim_start_matches("bearer");
     for part in challenge.split(',') {
         if let Some((k, v)) = part.trim().split_once('=') {
             map.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
@@ -449,5 +456,4 @@ mod tests {
         assert_eq!(p.get("realm").unwrap(), "https://auth.docker.io/token");
         assert_eq!(p.get("service").unwrap(), "registry.docker.io");
     }
-
 }

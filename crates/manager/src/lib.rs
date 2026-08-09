@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::Bytes;
-use mvm_common::{
-    protocol, DataDir, Error, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
-};
+use mvm_common::{protocol, DataDir, Error, Result, Sandbox, SandboxId, SandboxSpec, SandboxState};
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
@@ -140,8 +138,11 @@ impl Manager {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let mut spec = spec;
             if spec.name.is_none() {
-                let taken =
-                    |n: &str| sandboxes.values().any(|e| e.spec().name.as_deref() == Some(n));
+                let taken = |n: &str| {
+                    sandboxes
+                        .values()
+                        .any(|e| e.spec().name.as_deref() == Some(n))
+                };
                 spec.name = Some(mvm_common::names::random_sandbox_name(taken));
             }
             let sandbox = Sandbox::new(spec);
@@ -157,7 +158,12 @@ impl Manager {
     /// and — when `fork` — the source's current disk carried over.
     /// Copying only the spec keeps the clone's runtime state clean; the disk
     /// is duplicated by the storage driver into the clone's fresh sandbox dir.
-    pub fn clone_sandbox(&self, id_or_name: &str, spec: SandboxSpec, fork: bool) -> Result<Sandbox> {
+    pub fn clone_sandbox(
+        &self,
+        id_or_name: &str,
+        spec: SandboxSpec,
+        fork: bool,
+    ) -> Result<Sandbox> {
         let source_id = self.resolve(id_or_name)?;
         self.validate(&spec)?;
         // The disk copy can be slow (whole-rootfs on the `copy` driver), so it
@@ -173,8 +179,11 @@ impl Manager {
         {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if sandbox.spec.name.is_none() {
-                let taken =
-                    |n: &str| sandboxes.values().any(|e| e.spec().name.as_deref() == Some(n));
+                let taken = |n: &str| {
+                    sandboxes
+                        .values()
+                        .any(|e| e.spec().name.as_deref() == Some(n))
+                };
                 sandbox.spec.name = Some(mvm_common::names::random_sandbox_name(taken));
             }
             sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
@@ -195,7 +204,10 @@ impl Manager {
 
         if let Some(name) = &spec.name {
             let sandboxes = self.inner.sandboxes.read().unwrap();
-            if sandboxes.values().any(|e| e.spec().name.as_ref() == Some(name)) {
+            if sandboxes
+                .values()
+                .any(|e| e.spec().name.as_ref() == Some(name))
+            {
                 return Err(Error::Other(format!("name '{name}' is already in use")));
             }
         }
@@ -456,7 +468,9 @@ impl Manager {
     ) -> Result<Sandbox> {
         const MIN_RAM_MIB: u32 = 64;
         if let Some(0) = vcpus {
-            return Err(Error::InvalidState("a sandbox needs at least 1 vcpu".into()));
+            return Err(Error::InvalidState(
+                "a sandbox needs at least 1 vcpu".into(),
+            ));
         }
         if let Some(ram) = ram_mib {
             if ram < MIN_RAM_MIB {
@@ -555,7 +569,10 @@ impl Manager {
         tail: Option<usize>,
     ) -> Result<(Vec<u8>, Option<broadcast::Receiver<Bytes>>)> {
         let id = self.resolve(id_or_name)?;
-        let sb_dir = self.inner.data_dir.sandbox_dir(&SandboxId::from(id.clone()));
+        let sb_dir = self
+            .inner
+            .data_dir
+            .sandbox_dir(&SandboxId::from(id.clone()));
         // Subscribe (under the same lock as the liveness check, so an exit
         // in between can't leave us on a channel nobody will ever close)
         // *before* reading the backlog file, so no bytes fall in the gap.
@@ -697,7 +714,11 @@ impl Manager {
     pub fn exec_resize(&self, id_or_name: &str, session: u32, cols: u16, rows: u16) -> Result<()> {
         self.send_to_agent(
             id_or_name,
-            protocol::AgentRequest::Resize { id: session, cols, rows },
+            protocol::AgentRequest::Resize {
+                id: session,
+                cols,
+                rows,
+            },
         )
     }
 
@@ -747,8 +768,10 @@ impl Manager {
         let ports = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             sandboxes.get(id).and_then(|entry| {
-                if matches!(entry.info.spec.network, mvm_common::NetworkMode::Gvproxy { socket: Some(_) })
-                    && !entry.info.spec.ports.is_empty()
+                if matches!(
+                    entry.info.spec.network,
+                    mvm_common::NetworkMode::Gvproxy { socket: Some(_) }
+                ) && !entry.info.spec.ports.is_empty()
                 {
                     Some(entry.info.spec.ports.clone())
                 } else {
@@ -792,7 +815,8 @@ impl Manager {
             let mgr = self.clone();
             let control = self.inner.gvproxy_control.clone();
             tokio::spawn(async move {
-                mgr.remove_gvproxy_ports(Some(ports), control.as_deref()).await
+                mgr.remove_gvproxy_ports(Some(ports), control.as_deref())
+                    .await
             });
         }
     }
@@ -802,8 +826,7 @@ impl Manager {
         spec: &SandboxSpec,
         control: Option<&std::path::Path>,
     ) -> Result<Option<Vec<String>>> {
-        if !matches!(spec.network, mvm_common::NetworkMode::Gvproxy { .. })
-            || spec.ports.is_empty()
+        if !matches!(spec.network, mvm_common::NetworkMode::Gvproxy { .. }) || spec.ports.is_empty()
         {
             return Ok(None);
         }
@@ -829,7 +852,9 @@ impl Manager {
         control: Option<&std::path::Path>,
     ) {
         let Some(mappings) = mappings else { return };
-        let Some(control) = control.map(|c| c.to_path_buf()) else { return };
+        let Some(control) = control.map(|c| c.to_path_buf()) else {
+            return;
+        };
         let ports = mappings
             .iter()
             .filter_map(|p| mvm_network::parse_port_map(p).ok())
@@ -883,7 +908,9 @@ impl Manager {
     fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
         use protocol::AgentEvent::*;
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
-        let Some(entry) = sandboxes.get_mut(id) else { return };
+        let Some(entry) = sandboxes.get_mut(id) else {
+            return;
+        };
         match event {
             Stdout { id: sid, .. } | Stderr { id: sid, .. } => {
                 if let Some(session) = entry.exec_sessions.get(&sid) {

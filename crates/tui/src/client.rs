@@ -68,7 +68,9 @@ impl Client {
             })
             .send()
             .map_err(|e| e.to_string())?;
-        Self::check(resp, "resize")?.json().map_err(|e| e.to_string())
+        Self::check(resp, "resize")?
+            .json()
+            .map_err(|e| e.to_string())
     }
 
     pub fn remove(&self, id: &str) -> Result<(), String> {

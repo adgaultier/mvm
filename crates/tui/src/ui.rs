@@ -96,7 +96,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 /// "Really delete this?" — removing a sandbox destroys its filesystem.
 fn draw_confirm_delete(f: &mut Frame, app: &App) {
-    let Some(confirm) = app.confirm_delete.as_ref() else { return };
+    let Some(confirm) = app.confirm_delete.as_ref() else {
+        return;
+    };
     let area = centered_rect(54, 9, f.area());
     f.render_widget(Clear, area);
 
@@ -105,7 +107,9 @@ fn draw_confirm_delete(f: &mut Frame, app: &App) {
             Span::raw("  delete sandbox "),
             Span::styled(
                 &confirm.label,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("?"),
         ]),
@@ -124,7 +128,10 @@ fn draw_confirm_delete(f: &mut Frame, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled("y", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "y",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" delete  "),
         Span::styled("n", Style::default().fg(Color::Yellow)),
         Span::raw(" / "),
@@ -143,7 +150,9 @@ fn draw_confirm_delete(f: &mut Frame, app: &App) {
 
 /// Modal vcpu/RAM editor for the selected sandbox.
 fn draw_resize(f: &mut Frame, app: &App) {
-    let Some(form) = app.resize.as_ref() else { return };
+    let Some(form) = app.resize.as_ref() else {
+        return;
+    };
     let area = centered_rect(52, 11, f.area());
     f.render_widget(Clear, area);
 
@@ -165,7 +174,9 @@ fn draw_resize(f: &mut Frame, app: &App) {
     let mut lines = vec![
         Line::from(vec![Span::styled(
             format!("  {}", form.label),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )]),
         Line::raw(""),
         field("vCPUs", &form.vcpus, form.field == ResizeField::Vcpus),
@@ -213,7 +224,9 @@ fn draw_resize(f: &mut Frame, app: &App) {
 
 /// Modal `mvm inspect` viewer: the full sandbox record as a key/value table.
 fn draw_inspect(f: &mut Frame, app: &mut App) {
-    let Some(ins) = app.inspect.as_mut() else { return };
+    let Some(ins) = app.inspect.as_mut() else {
+        return;
+    };
     let area = centered_rect(
         f.area().width.saturating_sub(8).max(20),
         f.area().height.saturating_sub(6).max(8),
@@ -306,7 +319,12 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
             })
             .collect(),
     );
-    let labels = join(spec.labels.iter().map(|(k, v)| format!("{k}={v}")).collect());
+    let labels = join(
+        spec.labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect(),
+    );
     let command = if spec.command.is_empty() {
         "(image default)".to_string()
     } else {
@@ -325,7 +343,9 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
         ),
         (
             "PID",
-            sb.pid.map(|p| p.to_string()).unwrap_or_else(|| dash.clone()),
+            sb.pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| dash.clone()),
         ),
         (
             "GVPROXY PID",
@@ -382,9 +402,11 @@ fn state_color(state: mvm_common::SandboxState) -> Color {
 }
 
 fn draw_sandboxes(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let header = Row::new(["ID", "NAME", "IMAGE", "STATE", "EXIT", "VCPU/RAM", "COMMAND"])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new([
+        "ID", "NAME", "IMAGE", "STATE", "EXIT", "VCPU/RAM", "COMMAND",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
     let rows: Vec<Row> = app
         .sandboxes
         .iter()
@@ -395,9 +417,17 @@ fn draw_sandboxes(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 Cell::from(sb.spec.name.clone().unwrap_or_else(|| "-".into())),
                 Cell::from(sb.spec.image.clone()),
                 Cell::from(sb.state.to_string()).style(Style::default().fg(state_color(sb.state))),
-                Cell::from(sb.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into())),
+                Cell::from(
+                    sb.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                ),
                 Cell::from(format!("{}/{}MiB", sb.spec.vcpus, sb.spec.ram_mib)),
-                Cell::from(if cmd.is_empty() { "(image default)".into() } else { cmd }),
+                Cell::from(if cmd.is_empty() {
+                    "(image default)".into()
+                } else {
+                    cmd
+                }),
             ];
             Row::new(cells)
         })

@@ -14,7 +14,9 @@ impl DataDir {
     /// $MVM_DATA_DIR, root -> /var/lib/mvm, else ~/.local/share/mvm
     pub fn resolve() -> std::io::Result<Self> {
         if let Ok(dir) = std::env::var("MVM_DATA_DIR") {
-            return Ok(Self { root: PathBuf::from(dir) });
+            return Ok(Self {
+                root: PathBuf::from(dir),
+            });
         }
         let root = if is_root() {
             PathBuf::from("/var/lib/mvm")
@@ -57,7 +59,6 @@ impl DataDir {
     pub fn sandbox_dir(&self, id: &crate::SandboxId) -> PathBuf {
         self.sandboxes_dir().join(id.as_str())
     }
-
 }
 
 /// Path to the guest agent binary, resolved at runtime.
@@ -96,12 +97,7 @@ pub fn agent_binary() -> Option<PathBuf> {
             // Dev tree: exe in target/<profile>/, static agent in
             // target/<arch>-unknown-linux-musl/release/.
             if let Some(target) = dir.parent() {
-                candidates.push(
-                    target
-                        .join(&musl_target)
-                        .join("release")
-                        .join("mvm-agent"),
-                );
+                candidates.push(target.join(&musl_target).join("release").join("mvm-agent"));
             }
         }
     }

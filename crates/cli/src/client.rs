@@ -48,7 +48,12 @@ impl Client {
 
     /// Clone a sandbox from `id`'s spec (as given, already overridden), with
     /// `fork` carrying the source's current disk.
-    pub fn clone_sandbox(&self, id: &str, spec: &SandboxSpec, fork: bool) -> Result<Sandbox, String> {
+    pub fn clone_sandbox(
+        &self,
+        id: &str,
+        spec: &SandboxSpec,
+        fork: bool,
+    ) -> Result<Sandbox, String> {
         self.post_json(
             &format!("/api/v1/sandboxes/{id}/clone"),
             &mvm_common::api::CloneRequest {
@@ -59,11 +64,17 @@ impl Client {
     }
 
     pub fn start_sandbox(&self, id: &str) -> Result<Sandbox, String> {
-        self.post_json(&format!("/api/v1/sandboxes/{id}/start"), &serde_json::json!({}))
+        self.post_json(
+            &format!("/api/v1/sandboxes/{id}/start"),
+            &serde_json::json!({}),
+        )
     }
 
     pub fn stop_sandbox(&self, id: &str) -> Result<Sandbox, String> {
-        self.post_json(&format!("/api/v1/sandboxes/{id}/stop"), &serde_json::json!({}))
+        self.post_json(
+            &format!("/api/v1/sandboxes/{id}/stop"),
+            &serde_json::json!({}),
+        )
     }
 
     /// Change the sandbox's vcpu/RAM allocation (takes effect on next boot).
@@ -151,7 +162,10 @@ impl Client {
     pub fn sandbox_stdin_eof(&self, id: &str) -> Result<(), String> {
         let resp = self
             .http
-            .post(format!("{}/api/v1/sandboxes/{id}/stdin?eof=true", self.base))
+            .post(format!(
+                "{}/api/v1/sandboxes/{id}/stdin?eof=true",
+                self.base
+            ))
             .send()
             .map_err(|e| e.to_string())?;
         Self::expect(resp, &[204]).map(|_| ())
@@ -244,7 +258,9 @@ impl Client {
             .get(format!("{}{}", self.base, path))
             .send()
             .map_err(|e| e.to_string())?;
-        Self::expect(resp, &[200])?.json().map_err(|e| e.to_string())
+        Self::expect(resp, &[200])?
+            .json()
+            .map_err(|e| e.to_string())
     }
 
     fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(

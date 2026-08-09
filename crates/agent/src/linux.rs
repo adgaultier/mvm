@@ -9,9 +9,7 @@ use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use mvm_common::protocol::{
-    self, encode_frame, AgentEvent, AgentRequest, FrameDecoder,
-};
+use mvm_common::protocol::{self, encode_frame, AgentEvent, AgentRequest, FrameDecoder};
 
 const HOST_CID: u32 = 2; // VMADDR_CID_HOST
 const CHUNK: usize = 8192;
@@ -82,7 +80,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // /etc/resolv.conf, which most images ship empty.
     if std::env::var_os("MVM_NET_TSI").is_some() {
         let _ = std::fs::create_dir_all("/etc");
-        let _ = std::fs::write("/etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
+        let _ = std::fs::write(
+            "/etc/resolv.conf",
+            "nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+        );
     }
 
     let console_tty = std::env::var_os("MVM_CONSOLE_TTY").is_some();
@@ -234,7 +235,10 @@ fn spawn_tty_workload(
         )
     };
     if rc != 0 {
-        eprintln!("mvm-agent: openpty failed: {}", std::io::Error::last_os_error());
+        eprintln!(
+            "mvm-agent: openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
         return None;
     }
     // Don't trust the guest kernel's pty defaults: this VM's fresh slaves come
@@ -594,7 +598,11 @@ impl Agent {
             }
             if vsock_revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
                 let n = unsafe {
-                    libc::read(self.vsock, read_buf.as_mut_ptr() as *mut libc::c_void, CHUNK)
+                    libc::read(
+                        self.vsock,
+                        read_buf.as_mut_ptr() as *mut libc::c_void,
+                        CHUNK,
+                    )
                 };
                 if n <= 0 {
                     // Host gone: shut down.
@@ -618,9 +626,8 @@ impl Agent {
             // 2) signals
             if fds[1].revents & libc::POLLIN != 0 {
                 let mut sigs = [0u8; 64];
-                let n = unsafe {
-                    libc::read(selfpipe_r, sigs.as_mut_ptr() as *mut libc::c_void, 64)
-                };
+                let n =
+                    unsafe { libc::read(selfpipe_r, sigs.as_mut_ptr() as *mut libc::c_void, 64) };
                 for &sig in &sigs[..n.max(0) as usize] {
                     self.handle_signal(sig as i32);
                 }
@@ -708,7 +715,12 @@ impl Agent {
                 self.workload_code = Some(code);
                 continue;
             }
-            if let Some((sid, _)) = self.sessions.iter().find(|(_, s)| s.pid == pid).map(|(a, b)| (*a, b.pid)) {
+            if let Some((sid, _)) = self
+                .sessions
+                .iter()
+                .find(|(_, s)| s.pid == pid)
+                .map(|(a, b)| (*a, b.pid))
+            {
                 if let Some(s) = self.sessions.get_mut(&sid) {
                     s.exit_code = Some(code);
                     // Close stdin so readers see a clean EOF. Not for tty:
@@ -761,7 +773,9 @@ impl Agent {
     }
 
     fn flush_session_stdin(&mut self, sid: u32) {
-        let Some(s) = self.sessions.get_mut(&sid) else { return };
+        let Some(s) = self.sessions.get_mut(&sid) else {
+            return;
+        };
         let Some(fd) = s.stdin_fd else { return };
         while !s.stdin_buf.is_empty() {
             let n = unsafe {
@@ -909,7 +923,9 @@ impl Agent {
                 use std::os::unix::io::FromRawFd;
                 Stdio::from_raw_fd(libc::dup(fd))
             };
-            cmd.stdin(stdio(slave)).stdout(stdio(slave)).stderr(stdio(slave));
+            cmd.stdin(stdio(slave))
+                .stdout(stdio(slave))
+                .stderr(stdio(slave));
             if !env.iter().any(|kv| kv.starts_with("TERM=")) {
                 cmd.env("TERM", "xterm");
             }
@@ -926,7 +942,9 @@ impl Agent {
                 });
             }
         } else {
-            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
         }
         for kv in env {
             if let Some((k, v)) = kv.split_once('=') {
@@ -1004,7 +1022,10 @@ impl Agent {
 fn baseline_env() -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars().collect();
     if !env.iter().any(|(k, _)| k == "PATH") {
-        env.push(("PATH".into(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
+        env.push((
+            "PATH".into(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+        ));
     }
     env
 }
@@ -1082,7 +1103,9 @@ fn connect_vsock_retry(cid: u32, port: u32, attempts: u32) -> Option<RawFd> {
 /// gateway doubles as the DNS server. Skipped when eth0 already has an
 /// address. Pure ioctls — works in any image, no `ip` binary required.
 fn configure_network() {
-    let Ok(spec) = std::env::var("MVM_NET_CONFIG") else { return };
+    let Ok(spec) = std::env::var("MVM_NET_CONFIG") else {
+        return;
+    };
     let parsed = (|| {
         let (addr, gw) = spec.split_once(',')?;
         let (ip, prefix) = addr.split_once('/')?;
@@ -1120,7 +1143,10 @@ fn configure_network() {
         let mut req = ifreq("eth0");
         put_sockaddr_in(&mut req.ifr_ifru.ifru_addr, ip);
         if libc::ioctl(sock, libc::SIOCSIFADDR as _, &req) != 0 {
-            eprintln!("mvm-agent: SIOCSIFADDR: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "mvm-agent: SIOCSIFADDR: {}",
+                std::io::Error::last_os_error()
+            );
             libc::close(sock);
             return;
         }
@@ -1216,10 +1242,14 @@ fn ensure_devpts() {
 
 /// Mount extra virtiofs shares listed in MVM_MOUNTS: "tag:guest[:ro];..."
 fn mount_bind_shares() {
-    let Ok(spec) = std::env::var("MVM_MOUNTS") else { return };
+    let Ok(spec) = std::env::var("MVM_MOUNTS") else {
+        return;
+    };
     for entry in spec.split(';').filter(|e| !e.is_empty()) {
         let mut parts = entry.split(':');
-        let (Some(tag), Some(guest)) = (parts.next(), parts.next()) else { continue };
+        let (Some(tag), Some(guest)) = (parts.next(), parts.next()) else {
+            continue;
+        };
         let read_only = parts.next() == Some("ro");
         let _ = std::fs::create_dir_all(guest);
         let c_tag = match std::ffi::CString::new(tag) {

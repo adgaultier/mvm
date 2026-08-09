@@ -39,8 +39,7 @@ pub fn api_routes() -> Router<AppState> {
 async fn info(State(_state): State<AppState>) -> Json<InfoResponse> {
     Json(InfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        storage_driver: std::env::var("MVM_STORAGE_DRIVER")
-            .unwrap_or_else(|_| "auto".into()),
+        storage_driver: std::env::var("MVM_STORAGE_DRIVER").unwrap_or_else(|_| "auto".into()),
     })
 }
 
@@ -178,7 +177,16 @@ async fn exec(
 ) -> Result<Response, ApiError> {
     let (session, rx) = state
         .manager
-        .exec(&id, req.argv, req.env, req.workdir, req.tty, req.cols, req.rows, req.user)
+        .exec(
+            &id,
+            req.argv,
+            req.env,
+            req.workdir,
+            req.tty,
+            req.cols,
+            req.rows,
+            req.user,
+        )
         .await?;
 
     // If the client goes away mid-session (Ctrl-C, crash, network drop),
@@ -239,7 +247,9 @@ async fn exec_resize(
     Path((id, session)): Path<(String, u32)>,
     Json(req): Json<ResizeRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state.manager.exec_resize(&id, session, req.cols, req.rows)?;
+    state
+        .manager
+        .exec_resize(&id, session, req.cols, req.rows)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -269,10 +279,7 @@ async fn remove_image(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn pull_image(
-    State(state): State<AppState>,
-    Json(req): Json<PullRequest>,
-) -> Response {
+async fn pull_image(State(state): State<AppState>, Json(req): Json<PullRequest>) -> Response {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let reference = req.reference.clone();
     let manager = state.manager.clone();
@@ -298,14 +305,12 @@ async fn pull_image(
         }
     });
 
-    let stream = stream::poll_fn(move |cx| {
-        match rx.poll_recv(cx) {
-            std::task::Poll::Ready(Some(line)) => {
-                std::task::Poll::Ready(Some(Ok::<_, Infallible>(Bytes::from(format!("{line}\n")))))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
+    let stream = stream::poll_fn(move |cx| match rx.poll_recv(cx) {
+        std::task::Poll::Ready(Some(line)) => {
+            std::task::Poll::Ready(Some(Ok::<_, Infallible>(Bytes::from(format!("{line}\n")))))
         }
+        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => std::task::Poll::Pending,
     });
     Response::new(Body::from_stream(stream))
 }

@@ -102,7 +102,8 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             // Attach a virtio-net device backed by a dead socketpair end:
             // TSI is disabled and every frame is silently dropped.
             let mut sp = [-1i32; 2];
-            let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, sp.as_mut_ptr()) };
+            let rc =
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, sp.as_mut_ptr()) };
             if rc != 0 {
                 return Err(mvm_common::Error::Runtime(
                     "socketpair for isolated NIC failed".into(),

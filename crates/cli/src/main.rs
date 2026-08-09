@@ -12,10 +12,19 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "mvm", version, about = "MicroVM sandbox manager (libkrun + OCI images)")]
+#[command(
+    name = "mvm",
+    version,
+    about = "MicroVM sandbox manager (libkrun + OCI images)"
+)]
 struct Cli {
     /// Daemon address.
-    #[arg(long, global = true, env = "MVM_HOST", default_value = "http://127.0.0.1:24642")]
+    #[arg(
+        long,
+        global = true,
+        env = "MVM_HOST",
+        default_value = "http://127.0.0.1:24642"
+    )]
     host: String,
 
     #[command(subcommand)]
@@ -271,7 +280,12 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             println!("{:<40} {:<20} {:>10}", "IMAGE", "DIGEST", "SIZE");
             for img in images {
                 let digest: String = img.digest.chars().take(19).collect();
-                println!("{:<40} {:<20} {:>10}", img.reference, digest, human_size(img.size));
+                println!(
+                    "{:<40} {:<20} {:>10}",
+                    img.reference,
+                    digest,
+                    human_size(img.size)
+                );
             }
             Ok(0)
         }
@@ -297,7 +311,8 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         } => {
             let source = client.get_sandbox(&sandbox)?;
             let named = overrides.name.is_none();
-            let sb = client.clone_sandbox(source.id.as_str(), &clone_spec(&source, overrides)?, fork)?;
+            let sb =
+                client.clone_sandbox(source.id.as_str(), &clone_spec(&source, overrides)?, fork)?;
             println!("{}", sb.id);
             if named {
                 if let Some(n) = &sb.spec.name {
@@ -323,7 +338,9 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
                     sb.spec.name.as_deref().unwrap_or("-"),
                     sb.spec.image,
                     sb.state.to_string(),
-                    sb.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
+                    sb.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-".into()),
                     sb.spec.command.join(" ")
                 );
             }
@@ -385,7 +402,11 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             );
             Ok(0)
         }
-        Command::Logs { sandbox, follow, tail } => {
+        Command::Logs {
+            sandbox,
+            follow,
+            tail,
+        } => {
             // Not raw: `logs` only reads, so terminal queries must be
             // filtered out of the live tail the way they already are out of
             // the recording — a reader that never answers would have its own
@@ -411,8 +432,18 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
 /// guest. Reject the obvious cases instead.
 fn validate_guest_command(command: &[String]) -> Result<(), String> {
     const MVM_FLAGS: &[&str] = &[
-        "--name", "--env", "--volume", "--publish", "--net", "--cpus", "--memory", "--workdir",
-        "--rm", "--host", "--interactive", "--tty",
+        "--name",
+        "--env",
+        "--volume",
+        "--publish",
+        "--net",
+        "--cpus",
+        "--memory",
+        "--workdir",
+        "--rm",
+        "--host",
+        "--interactive",
+        "--tty",
     ];
     if let Some(first) = command.first() {
         if first.starts_with('-') {
@@ -516,17 +547,17 @@ fn clone_spec(source: &Sandbox, overrides: CloneArgs) -> Result<SandboxSpec, Str
     }
     if let Some(tty) = overrides.tty {
         spec.tty = tty;
-            spec.tty_size = if tty {
-                // Mirror `create`: carry our TERM in, record the current size.
-                if !spec.env.iter().any(|kv| kv.starts_with("TERM=")) {
-                    if let Ok(term) = std::env::var("TERM") {
-                        spec.env.push(format!("TERM={term}"));
-                    }
+        spec.tty_size = if tty {
+            // Mirror `create`: carry our TERM in, record the current size.
+            if !spec.env.iter().any(|kv| kv.starts_with("TERM=")) {
+                if let Ok(term) = std::env::var("TERM") {
+                    spec.env.push(format!("TERM={term}"));
                 }
-                run::term_size()
-            } else {
-                None
-            };
+            }
+            run::term_size()
+        } else {
+            None
+        };
     }
     Ok(spec)
 }
@@ -561,7 +592,10 @@ fn serve(addr: SocketAddr) -> i32 {
             return 1;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: cannot start async runtime: {e}");
@@ -618,8 +652,10 @@ mod tests {
 
     #[test]
     fn rejects_mvm_flags_after_image() {
-        assert!(validate_guest_command(&cmd(&["sh", "-c", "apk add curl", "--net", "gvproxy"]))
-            .is_err());
+        assert!(
+            validate_guest_command(&cmd(&["sh", "-c", "apk add curl", "--net", "gvproxy"]))
+                .is_err()
+        );
         assert!(validate_guest_command(&cmd(&["--rm", "sh"])).is_err());
         assert!(validate_guest_command(&cmd(&["-x"])).is_err());
     }

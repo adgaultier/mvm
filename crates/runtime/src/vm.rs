@@ -107,7 +107,12 @@ impl KrunContext {
         let envp = CStringArray::new(envp.iter().map(|s| s.as_str()))?;
         check(
             unsafe {
-                krun_sys::krun_set_exec(self.ctx, e.as_ptr(), argv.ptrs.as_ptr(), envp.ptrs.as_ptr())
+                krun_sys::krun_set_exec(
+                    self.ctx,
+                    e.as_ptr(),
+                    argv.ptrs.as_ptr(),
+                    envp.ptrs.as_ptr(),
+                )
             },
             "krun_set_exec",
         )
@@ -130,14 +135,7 @@ impl KrunContext {
         let mac: [u8; 6] = [0x5a, 0x4d, 0x56, 0x4d, 0x00, 0x01]; // locally administered
         check(
             unsafe {
-                krun_sys::krun_add_net_unixgram(
-                    self.ctx,
-                    std::ptr::null(),
-                    fd,
-                    mac.as_ptr(),
-                    0,
-                    0,
-                )
+                krun_sys::krun_add_net_unixgram(self.ctx, std::ptr::null(), fd, mac.as_ptr(), 0, 0)
             },
             "krun_add_net_unixgram",
         )

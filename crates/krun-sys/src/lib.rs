@@ -129,12 +129,7 @@ unsafe extern "C" {
 
     /// Initializes libkrun logging against a specific fd.
     /// `target_fd` = `KRUN_LOG_TARGET_DEFAULT` keeps stderr.
-    pub fn krun_init_log(
-        target_fd: c_int,
-        level: c_uint,
-        style: c_uint,
-        options: c_uint,
-    ) -> c_int;
+    pub fn krun_init_log(target_fd: c_int, level: c_uint, style: c_uint, options: c_uint) -> c_int;
 
     /// Starts and enters the microVM. Only returns on error; on success the
     /// process exits with the guest workload's exit status.

@@ -8,18 +8,16 @@ use crate::{img_err, ImgResult};
 /// Unpack one layer blob (tar / tar+gzip / tar+zstd) onto `dest`,
 /// applying OCI whiteouts.
 pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()> {
-    let reader: Box<dyn Read> = if media_type.ends_with("+gzip")
-        || media_type.contains("tar.gzip")
-        || is_gzip(blob)
-    {
-        Box::new(flate2::read::GzDecoder::new(blob))
-    } else if media_type.ends_with("+zstd") || is_zstd(blob) {
-        let dec = zstd::stream::read::Decoder::new(blob)
-            .map_err(|e| img_err(format!("zstd decoder: {e}")))?;
-        Box::new(dec)
-    } else {
-        Box::new(blob)
-    };
+    let reader: Box<dyn Read> =
+        if media_type.ends_with("+gzip") || media_type.contains("tar.gzip") || is_gzip(blob) {
+            Box::new(flate2::read::GzDecoder::new(blob))
+        } else if media_type.ends_with("+zstd") || is_zstd(blob) {
+            let dec = zstd::stream::read::Decoder::new(blob)
+                .map_err(|e| img_err(format!("zstd decoder: {e}")))?;
+            Box::new(dec)
+        } else {
+            Box::new(blob)
+        };
 
     let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
@@ -87,16 +85,14 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
         let mode = entry.header().mode().unwrap_or(0o644);
 
         // unpack_in guards against path escapes; false => unsafe path skipped.
-        let ok = entry
-            .unpack_in(dest)
-            .map_err(|e| {
-                img_err(format!(
-                    "unpack {} type={:?} link={:?}: {e:?}",
-                    path.display(),
-                    entry.header().entry_type(),
-                    entry.link_name().ok().flatten()
-                ))
-            })?;
+        let ok = entry.unpack_in(dest).map_err(|e| {
+            img_err(format!(
+                "unpack {} type={:?} link={:?}: {e:?}",
+                path.display(),
+                entry.header().entry_type(),
+                entry.link_name().ok().flatten()
+            ))
+        })?;
         if !ok {
             tracing::warn!("skipped unsafe tar path: {}", path.display());
             continue;
@@ -121,7 +117,10 @@ fn apply_owner(path: &Path, uid: u32, gid: u32, mode: u32) {
     let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if rc == 0
         && mode & 0o6000 != 0
-        && path.symlink_metadata().map(|m| !m.is_symlink()).unwrap_or(false)
+        && path
+            .symlink_metadata()
+            .map(|m| !m.is_symlink())
+            .unwrap_or(false)
     {
         unsafe { libc::chmod(c_path.as_ptr(), mode as libc::mode_t) };
     }
@@ -171,7 +170,12 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     fn build_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        build_tar_owned(&entries.iter().map(|(n, d)| (*n, *d, 0, 0)).collect::<Vec<_>>())
+        build_tar_owned(
+            &entries
+                .iter()
+                .map(|(n, d)| (*n, *d, 0, 0))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn build_tar_owned(entries: &[(&str, &[u8], u64, u64)]) -> Vec<u8> {
@@ -183,9 +187,7 @@ mod tests {
             header.set_uid(*uid);
             header.set_gid(*gid);
             header.set_cksum();
-            builder
-                .append_data(&mut header, name, *data)
-                .unwrap();
+            builder.append_data(&mut header, name, *data).unwrap();
         }
         builder.into_inner().unwrap()
     }
@@ -263,10 +265,15 @@ mod tests {
         std::fs::write(tmp.join("usr/bin/perl"), b"new").unwrap();
         unpack(&layer2, "application/vnd.oci.image.layer.v1.tar", &tmp);
 
-        assert_eq!(std::fs::read(tmp.join("usr/bin/perl5.40.1")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(tmp.join("usr/bin/perl5.40.1")).unwrap(),
+            b"new"
+        );
         assert_eq!(
             std::fs::metadata(tmp.join("usr/bin/perl")).unwrap().ino(),
-            std::fs::metadata(tmp.join("usr/bin/perl5.40.1")).unwrap().ino()
+            std::fs::metadata(tmp.join("usr/bin/perl5.40.1"))
+                .unwrap()
+                .ino()
         );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
@@ -283,7 +290,10 @@ mod tests {
         ]);
         unpack(&l1, "application/vnd.oci.image.layer.v1.tar", &tmp);
 
-        let l2 = build_tar_owned(&[("tmp/.wh.scratch", b"", 0, 0), ("var/spool/mail", b"m", 100, 100)]);
+        let l2 = build_tar_owned(&[
+            ("tmp/.wh.scratch", b"", 0, 0),
+            ("var/spool/mail", b"m", 100, 100),
+        ]);
         unpack(&l2, "application/vnd.oci.image.layer.v1.tar", &tmp);
 
         assert!(tmp.join("bin/su").exists());

@@ -119,7 +119,10 @@ mod tests {
     #[test]
     fn passes_plain_and_binary_bytes_through() {
         assert_eq!(filtered(&[b"plain\r\ntext\n"]), b"plain\r\ntext\n");
-        assert_eq!(filtered(&[&[0x00, 0xff, 0x1b, 0x00]]), &[0x00, 0xff, 0x1b, 0x00]);
+        assert_eq!(
+            filtered(&[&[0x00, 0xff, 0x1b, 0x00]]),
+            &[0x00, 0xff, 0x1b, 0x00]
+        );
     }
 
     #[test]
@@ -130,6 +133,10 @@ mod tests {
         let mut long = b"\x1b[".to_vec();
         long.extend(std::iter::repeat_n(b'0', 200));
         let out = f.filter(&long);
-        assert!(out.len() > 100, "expected the run to be released, got {}", out.len());
+        assert!(
+            out.len() > 100,
+            "expected the run to be released, got {}",
+            out.len()
+        );
     }
 }
