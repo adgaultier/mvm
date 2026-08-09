@@ -37,6 +37,17 @@ enum Command {
     Rmi { image: String },
     /// Create a sandbox (without starting it).
     Create(BoxArgs),
+    /// Clone a sandbox: new record with the source's spec (flags override
+    /// it); `--fork` carries the source's current disk.
+    Clone {
+        /// Source sandbox (id, id prefix, or name).
+        sandbox: String,
+        /// Carry the source's current disk into the clone.
+        #[arg(long)]
+        fork: bool,
+        #[command(flatten)]
+        overrides: CloneArgs,
+    },
     /// Create and start a sandbox, stream its output (ephemeral unless --keep).
     Run(BoxArgs),
     /// List sandboxes.
@@ -164,6 +175,52 @@ pub(crate) struct BoxArgs {
     tty: bool,
 }
 
+/// `mvm clone` flag overrides. Absent = inherit from the source. Unlike
+/// `create`, no `--name` defaults the clone to being unnamed: the source's
+/// name is still taken by the source itself, so reusing it is an error.
+#[derive(Args)]
+struct CloneArgs {
+    /// Override the image.
+    #[arg(long)]
+    image: Option<String>,
+    /// Sandbox name.
+    #[arg(long)]
+    name: Option<String>,
+    /// Environment variables (KEY=VAL); *replaces* the source's env.
+    #[arg(short, long)]
+    env: Vec<String>,
+    /// Bind mounts (host:guest[:ro]); *replaces* the source's mounts.
+    #[arg(short, long)]
+    volume: Vec<String>,
+    /// Port mappings (hostPort:guestPort); *replaces* the source's ports.
+    #[arg(short, long)]
+    publish: Vec<String>,
+    /// Network mode: none | tsi | gvproxy[:<socket>] | tap:<dev>.
+    #[arg(long)]
+    net: Option<String>,
+    /// Number of vCPUs.
+    #[arg(long)]
+    cpus: Option<u8>,
+    /// Memory in MiB.
+    #[arg(short, long)]
+    memory: Option<u32>,
+    /// Working directory inside the guest.
+    #[arg(short, long)]
+    workdir: Option<String>,
+    /// Run the workload as this user (name/uid[:group/gid]).
+    #[arg(short, long)]
+    user: Option<String>,
+    /// Keep the guest console's stdin open and writable.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    interactive: Option<bool>,
+    /// Give the workload its own guest pty.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    tty: Option<bool>,
+    /// Override the guest command (docker-style trailing args).
+    #[arg(trailing_var_arg = true)]
+    command: Vec<String>,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -224,6 +281,16 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         }
         Command::Create(args) => {
             let sb = client.create_sandbox(&args.spec()?)?;
+            println!("{}", sb.id);
+            Ok(0)
+        }
+        Command::Clone {
+            sandbox,
+            fork,
+            overrides,
+        } => {
+            let source = client.get_sandbox(&sandbox)?;
+            let sb = client.clone_sandbox(source.id.as_str(), &clone_spec(&source, overrides)?, fork)?;
             println!("{}", sb.id);
             Ok(0)
         }
@@ -388,6 +455,68 @@ impl BoxArgs {
             labels: Default::default(),
         })
     }
+}
+
+/// Build the clone's spec: the source's, with every explicitly-given flag
+/// applied. Absent flags inherit — the only structural difference from
+/// `create` is that the source's *name* is not reused (it is still the
+/// source's), so an unnamed clone is the default.
+fn clone_spec(source: &Sandbox, overrides: CloneArgs) -> Result<SandboxSpec, String> {
+    validate_guest_command(&overrides.command)?;
+    let mut spec = source.spec.clone();
+    if let Some(image) = overrides.image {
+        spec.image = image;
+    }
+    spec.name = overrides.name;
+    if !overrides.command.is_empty() {
+        spec.command = overrides.command;
+    }
+    if !overrides.env.is_empty() {
+        spec.env = overrides.env;
+    }
+    if !overrides.volume.is_empty() {
+        spec.mounts = overrides
+            .volume
+            .iter()
+            .map(|v| parse_volume(v))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    if !overrides.publish.is_empty() {
+        spec.ports = overrides.publish;
+    }
+    if let Some(net) = overrides.net {
+        spec.network = net.parse().map_err(|e: String| e)?;
+    }
+    if let Some(cpus) = overrides.cpus {
+        spec.vcpus = cpus;
+    }
+    if let Some(memory) = overrides.memory {
+        spec.ram_mib = memory;
+    }
+    if let Some(workdir) = overrides.workdir {
+        spec.workdir = Some(workdir);
+    }
+    if let Some(user) = overrides.user {
+        spec.user = Some(user);
+    }
+    if let Some(interactive) = overrides.interactive {
+        spec.attach_stdin = interactive;
+    }
+    if let Some(tty) = overrides.tty {
+        spec.tty = tty;
+            spec.tty_size = if tty {
+                // Mirror `create`: carry our TERM in, record the current size.
+                if !spec.env.iter().any(|kv| kv.starts_with("TERM=")) {
+                    if let Ok(term) = std::env::var("TERM") {
+                        spec.env.push(format!("TERM={term}"));
+                    }
+                }
+                run::term_size()
+            } else {
+                None
+            };
+    }
+    Ok(spec)
 }
 
 fn parse_volume(v: &str) -> Result<Mount, String> {

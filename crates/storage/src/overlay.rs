@@ -5,7 +5,7 @@ use mvm_common::{DataDir, Result, SandboxId};
 use std::path::Path;
 use std::process::Command;
 
-use crate::{storage_err, PreparedRootfs, StorageDriver};
+use crate::{copy_tree, storage_err, PreparedRootfs, StorageDriver};
 
 pub struct OverlayDriver {
     data_dir: DataDir,
@@ -100,6 +100,20 @@ impl StorageDriver for OverlayDriver {
 
         mount_overlay(image_rootfs, &upper, &work, &merged)?;
         Ok(PreparedRootfs { rootfs: merged })
+    }
+
+    fn duplicate(&self, from: &SandboxId, to: &SandboxId) -> Result<()> {
+        // The persisted upper layer *is* the current disk: the merged view
+        // served at boot is lower(image) + upper, so reusing the same image
+        // lower with a copied upper reproduces it. work/ and the mount are
+        // rebuilt at the clone's first start.
+        let src = self.data_dir.sandbox_dir(from).join("upper");
+        let dst = self.data_dir.sandbox_dir(to).join("upper");
+        std::fs::create_dir_all(&dst)?;
+        if src.exists() {
+            copy_tree(&src, &dst)?;
+        }
+        Ok(())
     }
 
     fn destroy(&self, id: &SandboxId) -> Result<()> {

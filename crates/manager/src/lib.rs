@@ -133,7 +133,45 @@ impl Manager {
 
     /// Create a sandbox (does not start it).
     pub fn create(&self, spec: SandboxSpec) -> Result<Sandbox> {
-        // Validate the image exists up-front.
+        self.validate(&spec)?;
+        let sandbox = Sandbox::new(spec);
+        std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
+        self.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+        self.persist()?;
+        Ok(sandbox)
+    }
+
+    /// Clone a sandbox: new record with the given (already overridden) spec,
+    /// and — when `fork` — the source's current disk carried over.
+    /// Copying only the spec keeps the clone's runtime state clean; the disk
+    /// is duplicated by the storage driver into the clone's fresh sandbox dir.
+    pub fn clone_sandbox(&self, id_or_name: &str, spec: SandboxSpec, fork: bool) -> Result<Sandbox> {
+        let source_id = self.resolve(id_or_name)?;
+        self.validate(&spec)?;
+        let sandbox = Sandbox::new(spec);
+        std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
+        if fork {
+            self.inner
+                .storage
+                .duplicate(&SandboxId::from(source_id.clone()), &sandbox.id)?;
+        }
+        self.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+        self.persist()?;
+        tracing::info!(sandbox = %sandbox.id, source = %source_id, fork, "sandbox cloned");
+        Ok(sandbox)
+    }
+
+    /// Common spec validation for create/clone: image present, network and
+    /// port syntax, and a unique name.
+    fn validate(&self, spec: &SandboxSpec) -> Result<()> {
         self.inner.images.get(&spec.image)?;
         mvm_network::validate(&spec.network)?;
         for p in &spec.ports {
@@ -146,16 +184,7 @@ impl Manager {
                 return Err(Error::Other(format!("name '{name}' is already in use")));
             }
         }
-
-        let sandbox = Sandbox::new(spec);
-        std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
-        self.inner
-            .sandboxes
-            .write()
-            .unwrap()
-            .insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
-        self.persist()?;
-        Ok(sandbox)
+        Ok(())
     }
 
     /// Start a created/stopped sandbox: prepare rootfs, inject the agent,

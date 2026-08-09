@@ -112,6 +112,7 @@ libc you don't control.
 | `mvm exec [-i] [-t] SANDBOX CMD…` | run a command in a live sandbox (`-i` forwards stdin, `-t` allocates a pty; `-it` = interactive shell) |
 | `mvm logs [-f] [-n N] SANDBOX` | guest console output (`-n` = last N lines) |
 | `mvm inspect SANDBOX` | full sandbox JSON |
+| `mvm clone SANDBOX [--fork] [FLAG…]` | new sandbox with a copy of the source's spec (any `run`/`create` flag overrides it; `--fork` also copies the source's current disk, reflink'd, so the clone boots with its files intact). For forking a *running* source, stop it first — the snapshot is point-in-time, not crash-consistent |
 | `mvm-tui` | live dashboard (sandboxes, images); `s`/`x`/`d` start, stop, delete and `r` opens a resize form (`tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts). Console output is `mvm logs` |
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
@@ -144,6 +145,7 @@ GET    /api/v1/sandboxes                 POST   /api/v1/sandboxes
 GET    /api/v1/sandboxes/{id}            DELETE /api/v1/sandboxes/{id}
 POST   /api/v1/sandboxes/{id}/start      POST   /api/v1/sandboxes/{id}/stop
 POST   /api/v1/sandboxes/{id}/resize                  {"vcpus":N,"ram_mib":N}
+POST   /api/v1/sandboxes/{id}/clone    {"spec":{...},"fork":bool}
 GET    /api/v1/sandboxes/{id}/logs?follow=bool&tail=N&raw=bool  (console)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]

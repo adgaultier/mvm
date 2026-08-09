@@ -163,32 +163,18 @@ backend ever appears. Also no separate `status` column duplicating mvm's.
 image-USER blocker is gone — the opencode image runs as `agent`, and mvm now
 honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
 agent counts grow.
-## 10. `mvm clone` — fork a sandbox's live disk
-
-`mvm clone <id> --name new [--flag overrides...]` creating a new sandbox from
-an existing one, with every create flag overridable (same spec by default).
-Cheap to build: `SandboxSpec` already carries every field, `GET
-/sandboxes/{id}` returns it, and `create` already parses all the flags — the
-trap is to copy only the spec, never the runtime fields (pid, gvproxy_pid,
-started/finished timestamps). A `--fork` flag (default false) carries the
-source's *current disk* into the clone. For the disk, the overlay driver's
-`upper/` *is* the current disk, so a fork is a copy/reflink (`FICLONE`) of
-the source `upper/` into the clone's `upper/`; under the `copy` driver the
-whole rootfs is copied. The clone must use the source's storage driver.
-Mechanics: a `StorageDriver::duplicate(from, to)` used by the manager's
-start/prepare path, plus a clone API route.
-
-Consistency caveat: forking a *running* source is a point-in-time snapshot,
-not crash-consistent (same caveat as `docker commit`). Stopping the source
-first fixes it — overlay `upper/` persists, so restarting the original after
-the clone boots it with the disk intact — at the cost of the original
-transitioning to `stopped` (its `exit_code` is lost) and being offline for
-the clone duration (negligible with reflink). Leave the stop→clone→restart
-ordering to the user, or offer it as an atomic flag.
-
----
-
 ## Done
+
+- **`mvm clone` / `mvm clone --fork`** (2026-08-09) — new sandbox from an
+  existing one's spec with every create flag overridable; `--fork` carries the
+  source's current disk. `StorageDriver::duplicate(from, to)` reflink-copies
+  the overlay `upper/` (or the whole rootfs under `copy`); `Manager` gained
+  `clone_sandbox` (not `clone` — it shadows `Clone`'s) + a
+  `POST /sandboxes/{id}/clone` route; the CLI flattens `CloneArgs` so only
+  flags you pass override the inherited spec. Forking a running source is a
+  point-in-time snapshot — stop it first for crash consistency. Covered by
+  the `clone` section in `integration.sh` (58/58 green).
+
 
 - **Dropped the `ext4` storage driver** (2026-08-06) — removed the
   opt-in block-device root and everything that existed only to serve it:

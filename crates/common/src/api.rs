@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::SandboxSpec;
+
 /// POST /api/v1/sandboxes/{id}/exec
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
@@ -42,6 +44,17 @@ pub struct SandboxResizeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequest {
     pub reference: String,
+}
+
+/// POST /api/v1/sandboxes/{id}/clone — new sandbox from the source's spec.
+/// `fork` carries the source's current disk into the clone (mvm clone --fork).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneRequest {
+    /// The fully overridden spec the client wants; the source record is only
+    /// referenced for its disk (when forking), never merged here.
+    pub spec: SandboxSpec,
+    #[serde(default)]
+    pub fork: bool,
 }
 
 /// Uniform error body.

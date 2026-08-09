@@ -46,6 +46,18 @@ impl Client {
         self.post_json("/api/v1/sandboxes", spec)
     }
 
+    /// Clone a sandbox from `id`'s spec (as given, already overridden), with
+    /// `fork` carrying the source's current disk.
+    pub fn clone_sandbox(&self, id: &str, spec: &SandboxSpec, fork: bool) -> Result<Sandbox, String> {
+        self.post_json(
+            &format!("/api/v1/sandboxes/{id}/clone"),
+            &mvm_common::api::CloneRequest {
+                spec: spec.clone(),
+                fork,
+            },
+        )
+    }
+
     pub fn start_sandbox(&self, id: &str) -> Result<Sandbox, String> {
         self.post_json(&format!("/api/v1/sandboxes/{id}/start"), &serde_json::json!({}))
     }

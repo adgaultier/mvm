@@ -7,8 +7,8 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use mvm_common::api::{
-    ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest, SandboxResizeRequest,
-    StdinQuery,
+    CloneRequest, ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest,
+    SandboxResizeRequest, StdinQuery,
 };
 use mvm_common::protocol::{encode_frame, AgentEvent};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
@@ -22,6 +22,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/info", get(info))
         .route("/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
+        .route("/sandboxes/{id}/clone", post(clone_sandbox))
         .route("/sandboxes/{id}/start", post(start_sandbox))
         .route("/sandboxes/{id}/stop", post(stop_sandbox))
         .route("/sandboxes/{id}/resize", post(resize_sandbox))
@@ -62,6 +63,17 @@ async fn get_sandbox(
     Path(id): Path<String>,
 ) -> Result<Json<Sandbox>, ApiError> {
     Ok(Json(state.manager.get(&id)?))
+}
+
+/// Clone a sandbox: new record from the source's spec (already overridden by
+/// the client), optionally with the source's current disk (`--fork`).
+async fn clone_sandbox(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CloneRequest>,
+) -> Result<(StatusCode, Json<Sandbox>), ApiError> {
+    let sb = state.manager.clone_sandbox(&id, req.spec, req.fork)?;
+    Ok((StatusCode::CREATED, Json(sb)))
 }
 
 async fn remove_sandbox(
