@@ -12,6 +12,45 @@ sentinels and the host injects at the network boundary.
 
 SEE CREDENTIALS.md
 
+## 2. `--net passt` as a first-class network mode (HIGH PRIORITY)
+
+First-class `passt` support, on par with `tsi` and `gvproxy` — the second
+of libkrun's two documented virtio-net backends ("virtio-net + passt/gvproxy"
+vs "virtio-vsock + TSI"). Unlike gvproxy's in-guest static-IP bootstrap,
+passt runs its own DHCP/DNS on the guest side and gives the VM a real
+interface with outbound connectivity and host port forwards with zero host
+setup — the missing "easy outbound networking" option for corp networks where
+TSI's socket impersonation is undesirable.
+
+**It is buildable today**: the installed libkrun (1.x) header already ships
+`krun_add_net_unixstream(ctx_id, c_path, fd, c_mac, features, flags)` (header
+line 448, same shape as the unixgram call krun-sys already binds for gvproxy);
+mvm just doesn't bind or use it.
+
+Plan (mirror the gvproxy flow):
+1. `krun-sys`: add the `krun_add_net_unixstream` FFI binding (mirror the
+   `krun_add_net_unixgram` binding at krun-sys/src/lib.rs:48; keep in sync
+   with /usr/include/libkrun.h:448).
+2. `network` crate: `NetworkMode::Passt` — `--net passt` runs a private passt
+   per sandbox, `--net passt:<socket>` attaches to one you run (gvproxy
+   parity). `passt` subprocess spawned by the daemon like gvproxy
+   (socketpair + `passt -f --fd N` per crun's handler, or `--socket-path`);
+   passt's stdout/stderr must go to /dev/null or a log (closing them makes
+   passt exit). Wait for it to be ready before boot; kill *and* wait it at
+   teardown (the gvproxy zombie lesson, AGENTS.md).
+3. `runtime/shim.rs`: add `krun_add_net_unixstream` in the NIC setup, passing
+   the socket fd/path via `ShimConfig`; first NIC = eth0 (with TSI disabled
+   when passt is added, same as gvproxy's dead-NIC trick).
+4. Port maps: translate mvm's `-p host:guest` into passt `-t`/`-u` forwards
+   (crun's handler uses `-t all -u all`; we want per-map), instead of
+   `krun_set_port_map`.
+5. Agent: confirm eth0 comes up via passt's DHCP (libkrun's init embeds a
+   DHCP client, but the agent IS init here — may need a DHCP/static bootstrap
+   like gvproxy's; verify what the workload sees).
+6. Env: `MVM_PASST_BIN` (default `passt`, macOS needs no Homebrew libkrun
+   dependency here since passt is standalone). Docs: README network table +
+   route surface if any. Integration: outbound + dns + port-forward checks
+   mirroring the gvproxy section, gated on `command -v passt`.
 
 ## 5. Guest ptys are not reachable by path (`ttyname` fails)
 Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the

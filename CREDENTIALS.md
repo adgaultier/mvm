@@ -327,3 +327,48 @@ The attacker inside the VM must still be unable to obtain or exfiltrate credenti
 ## Key Principle
 
 > **Credential injection must be an authorization decision, not a header-replacement feature.**
+# TODO — libkrun Sandbox Egress & Credential Proxy
+
+## Guest agent
+
+* [ ] Install `PR_SET_NO_NEW_PRIVS` before launching workload.
+* [ ] Drop `CAP_NET_RAW` (and other unnecessary capabilities).
+* [ ] Install a small seccomp filter from the existing static agent.
+
+  * [ ] Deny `AF_PACKET`.
+  * [ ] Deny `SOCK_RAW` for IPv4/IPv6.
+  * [ ] Deny `AF_ALG`.
+  * [ ] Deny `AF_VSOCK` if workload doesn't need it.
+* [ ] Keep normal TCP/UDP sockets working.
+* [ ] Install proxy CA into guest trust store.
+* [ ] Configure `HTTP_PROXY` / `HTTPS_PROXY` for workload.
+* [ ] Never expose proxy private key or injected credentials to guest.
+
+## Host proxy
+
+* [ ] Run credential/TLS forward proxy on host.
+* [ ] Support HTTP `CONNECT`.
+* [ ] Terminate guest TLS using sandbox proxy CA.
+* [ ] Inject credentials into permitted HTTP requests.
+* [ ] Keep credentials exclusively on host.
+
+## Network enforcement
+
+* [ ] Define common `EgressPolicy` abstraction.
+* [ ] TSI implementation: enforce policy at host-side socket/egress layer.
+* [ ] gvproxy implementation: enforce policy at gvproxy outbound-flow layer.
+* [ ] Allow VM → proxy endpoint.
+* [ ] Allow controlled DNS.
+* [ ] Deny direct Internet egress.
+* [ ] Verify both TSI and gvproxy have equivalent bypass resistance.
+
+## Tests
+
+* [ ] Normal HTTPS through proxy works.
+* [ ] `SOCK_RAW` fails.
+* [ ] `AF_PACKET` fails.
+* [ ] Direct TCP to Internet fails.
+* [ ] HTTPS through proxy receives injected credential.
+* [ ] Credential/private proxy key is never present in VM.
+* [ ] Run the same test suite with TSI.
+* [ ] Run the same test suite with gvproxy.
