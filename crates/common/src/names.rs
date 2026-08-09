@@ -9,8 +9,8 @@ pub const ADJECTIVES: &[&str] = &[
     "swift", "untamed", "vibrant", "watchful", "wily",
 ];
 
-/// Savannah animals for generated sandbox names.
-pub const SAVANNAH_ANIMALS: &[&str] = &[
+/// Cool animals for generated sandbox names.
+pub const COOL_ANIMALS: &[&str] = &[
     "aardvark",
     "aardwolf",
     "agama",
@@ -18,6 +18,7 @@ pub const SAVANNAH_ANIMALS: &[&str] = &[
     "bohor",
     "buffalo",
     "bushbuck",
+    "capybara", // thanks to pyth0ps for his positive contribution to the projet
     "caracal",
     "chacma",
     "chameleon",
@@ -84,7 +85,7 @@ where
         let name = format!(
             "{}-{}",
             ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())],
-            SAVANNAH_ANIMALS[rng.gen_range(0..SAVANNAH_ANIMALS.len())]
+            COOL_ANIMALS[rng.gen_range(0..COOL_ANIMALS.len())]
         );
         if !taken(&name) {
             return name;
@@ -94,7 +95,7 @@ where
     // forever, just disambiguate with a numeric suffix.
     let (adj, animal) = (
         ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())],
-        SAVANNAH_ANIMALS[rng.gen_range(0..SAVANNAH_ANIMALS.len())],
+        COOL_ANIMALS[rng.gen_range(0..COOL_ANIMALS.len())],
     );
     let mut n = 0u32;
     loop {
@@ -115,7 +116,7 @@ mod tests {
         let name = random_sandbox_name(|_| false);
         let (adj, animal) = name.split_once('-').unwrap();
         assert!(ADJECTIVES.contains(&adj));
-        assert!(SAVANNAH_ANIMALS.contains(&animal));
+        assert!(COOL_ANIMALS.contains(&animal));
     }
 
     #[test]
