@@ -192,6 +192,11 @@ done
 check "console resize reaches the workload pty" "1" \
     "$(grep -c '45 123' "$MVM_DATA_DIR/csrz.log" || true)"
 
+# The live geometry is recorded on the sandbox (spec.tty_size stays the
+# create-time initial), so inspect shows it.
+check "inspect reports the live console size" "1" \
+    "$("$MVM" inspect csrz | tr -d '\n ' | grep -c '"console_size":\[123,45\]')"
+
 # Resize after teardown is refused, and the daemon must stay healthy.
 "$MVM" stop csrz >/dev/null 2>&1 || true
 set +e

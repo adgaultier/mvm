@@ -369,7 +369,8 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
         ("TTY", spec.tty.to_string()),
         (
             "TTY SIZE",
-            spec.tty_size
+            sb.console_size
+                .or(spec.tty_size)
                 .map(|(c, r)| format!("{c}x{r}"))
                 .unwrap_or_else(|| dash.clone()),
         ),

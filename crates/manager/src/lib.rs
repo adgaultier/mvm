@@ -724,7 +724,17 @@ impl Manager {
 
     /// Resize the console workload's pty (sandbox-keyed, no session id).
     pub fn console_resize(&self, id_or_name: &str, cols: u16, rows: u16) -> Result<()> {
-        self.send_to_agent(id_or_name, protocol::AgentRequest::ConsoleResize { cols, rows })
+        self.send_to_agent(id_or_name, protocol::AgentRequest::ConsoleResize { cols, rows })?;
+        // Record the live geometry for `mvm inspect` (spec.tty_size stays the
+        // create-time initial). Only updated when a resize actually arrived.
+        let id = self.resolve(id_or_name)?;
+        {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            if let Some(entry) = sandboxes.get_mut(&id) {
+                entry.info.console_size = Some((cols, rows));
+            }
+        }
+        self.persist()
     }
 
     fn send_to_agent(&self, id_or_name: &str, req: protocol::AgentRequest) -> Result<()> {

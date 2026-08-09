@@ -202,6 +202,11 @@ pub struct Sandbox {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last size the console workload pty was resized to (cols, rows). The
+    /// spec's `tty_size` is the create-time initial; this tracks live
+    /// `/console/resize` calls and is None until one arrives.
+    #[serde(default)]
+    pub console_size: Option<(u16, u16)>,
 }
 
 impl Sandbox {
@@ -216,6 +221,7 @@ impl Sandbox {
             created_at: chrono::Utc::now(),
             started_at: None,
             finished_at: None,
+            console_size: None,
         }
     }
 
