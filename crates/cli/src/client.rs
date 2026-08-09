@@ -237,6 +237,20 @@ impl Client {
         Self::expect(resp, &[204]).map(|_| ())
     }
 
+    /// Resize the console workload's pty (sandbox-keyed, no session id).
+    pub fn console_resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/v1/sandboxes/{id}/console/resize",
+                self.base
+            ))
+            .json(&mvm_common::api::ResizeRequest { cols, rows })
+            .send()
+            .map_err(|e| e.to_string())?;
+        Self::expect(resp, &[204]).map(|_| ())
+    }
+
     /// Close stdin of a live exec session.
     pub fn exec_stdin_eof(&self, id: &str, session: u32) -> Result<(), String> {
         let resp = self

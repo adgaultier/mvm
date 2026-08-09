@@ -155,6 +155,7 @@ GET    /api/v1/sandboxes/{id}/logs?follow=bool&tail=N&raw=bool  (console)
 POST   /api/v1/sandboxes/{id}/exec                    (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]
 POST   /api/v1/sandboxes/{id}/exec/{session}/resize   {"cols":N,"rows":N}
+POST   /api/v1/sandboxes/{id}/console/resize           {"cols":N,"rows":N}
 GET    /api/v1/images                    DELETE /api/v1/images/{name}
 POST   /api/v1/images/pull                            (JSON-lines progress)
 ```

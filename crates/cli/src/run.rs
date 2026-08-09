@@ -184,6 +184,35 @@ fn console_session(
     };
     let raw_active = _raw.is_some();
 
+    // The local terminal is the authoritative console geometry. Send its size
+    // up front — an attach from a differently sized terminal must not sit on
+    // the create-time geometry — then track changes, mirroring exec's poller.
+    // Gated on the workload having a pty: a pipe console has no size to apply.
+    // Not coupled to stdin: `-t` without `-i` still resizes.
+    if tty {
+        let resize_client = Client::new(client.base());
+        let sid = id.to_string();
+        if let Some((cols, rows)) = term_size() {
+            let _ = resize_client.console_resize(&sid, cols, rows);
+            std::thread::spawn(move || {
+                let mut last = (cols, rows);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    match term_size() {
+                        Some(size) if size != last => {
+                            if resize_client.console_resize(&sid, size.0, size.1).is_err() {
+                                break;
+                            }
+                            last = size;
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+            });
+        }
+    }
+
     // Pump local stdin into the guest console.
     if interactive {
         let stdin_client = Client::new(client.base());

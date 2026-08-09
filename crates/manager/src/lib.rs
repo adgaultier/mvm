@@ -722,6 +722,11 @@ impl Manager {
         )
     }
 
+    /// Resize the console workload's pty (sandbox-keyed, no session id).
+    pub fn console_resize(&self, id_or_name: &str, cols: u16, rows: u16) -> Result<()> {
+        self.send_to_agent(id_or_name, protocol::AgentRequest::ConsoleResize { cols, rows })
+    }
+
     fn send_to_agent(&self, id_or_name: &str, req: protocol::AgentRequest) -> Result<()> {
         let id = self.resolve(id_or_name)?;
         let sandboxes = self.inner.sandboxes.read().unwrap();

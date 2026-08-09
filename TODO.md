@@ -13,69 +13,6 @@ sentinels and the host injects at the network boundary.
 SEE CREDENTIALS.md
 
 
-## 4. Live window resize for `mvm run -it` / `mvm attach`
-
-`exec -it` already tracks the terminal: a 500 ms poll thread posts
-`/sandboxes/{id}/exec/{session}/resize` and the agent runs `TIOCSWINSZ` on the
-exec pty master (`manager::exec_resize` → `AgentRequest::Resize`). The console
-has no such path — the workload pty is created at boot with the size from
-`MVM_CONSOLE_SIZE`, and the pty master is owned by the agent's console-bridge
-thread, so nothing can resize it mid-session. `attach` is worse: it uses
-`tty_size` recorded at *create* time, so attaching from a differently sized
-terminal starts out wrong.
-
-Plan (mirror the exec path):
-
-1. Agent `spawn_tty_workload` keeps the bridge owning the original pty master
-   (unchanged), but also `dup`s it for the agent. `Agent` stores an owned fd
-   (`OwnedFd`) as `console_pty: Option<_>` beside `console_output`. The bridge
-   and agent then have independent fd ownership while referring to the same
-   workload pty. The agent-owned fd is closed exactly once at agent shutdown.
-
-   Add `AgentRequest::ConsoleResize { cols, rows }`, a dedicated variant since
-   the console is sandbox-keyed rather than session-keyed. It runs `TIOCSWINSZ`
-   on `console_pty`. A failing `TIOCSWINSZ` (workload gone) is logged, not
-   fatal — like `exec_resize`, a resize that races VM teardown must not tear
-   down the console. `console_pty` is only accessed inside the agent's request
-   loop, so it cannot race teardown.
-
-2. Add `Manager::console_resize` → `send_to_agent(ConsoleResize)` and route
-   `POST /sandboxes/{id}/console/resize`, reusing `ResizeRequest { cols, rows }`.
-   Keep this endpoint console-specific rather than introducing a generic
-   sandbox-level resize endpoint.
-
-3. Add `Client::console_resize`. In `console_session`, when the local console
-   is a tty, obtain `term_size()` and send the **initial resize before starting
-   console I/O**. This makes the attaching/running terminal authoritative
-   immediately, eliminating the stale create-time geometry window in `attach`.
-   Then spawn the existing 500 ms poll thread and send subsequent changes.
-
-   The resize condition should be whether the local console session has a tty
-   whose dimensions should control the workload, rather than being coupled
-   solely to whether stdin is enabled.
-
-4. Non-tty consoles are unaffected. `--no-stdin` does not by itself disable
-   resizing; resizing still occurs when the console is attached to a local
-   tty. The agent-owned console pty fd lives for the VM's lifetime and is
-   closed when the agent exits.
-
-
-5. Add coverage for:
-
-   * initial console dimensions;
-   * `console_resize` changing the workload pty's `TIOCGWINSZ`;
-   * resize racing workload/VM teardown being non-fatal;
-   * `attach` from a differently sized terminal sending the local size
-     immediately;
-   * subsequent local terminal changes propagating;
-   * non-tty consoles not starting the resize poller;
-   * agent shutdown closing the duplicated console fd exactly once.
-
-Extract a shared "poll local tty size and invoke callback" helper for exec and
-console eventually — the 500 ms loop and `term_size()` check are identical;
-only the endpoint/request variant differs, so keep those paths separate until
-the console implementation is working.
-
 ## 5. Guest ptys are not reachable by path (`ttyname` fails)
 Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
 workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
@@ -181,6 +118,19 @@ image-USER blocker is gone — the opencode image runs as `agent`, and mvm now
 honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
 agent counts grow.
 ## Done
+
+- **Live console window resize for `mvm run -it` / `mvm attach`** (2026-08-09) —
+  the console now tracks the terminal like `exec` does. The agent `dup`s the
+  workload pty master for itself (`console_pty: Option<OwnedFd>`, bridge keeps
+  the original) and answers `AgentRequest::ConsoleResize` with `TIOCSWINSZ`
+  (logged, not fatal, on failure); `POST /sandboxes/{id}/console/resize`
+  reaches it via `Manager::console_resize`; `console_session` sends the local
+  `term_size()` *before* console I/O — so `attach`'s create-time geometry is
+  gone — then a 500 ms poll thread mirrors exec's. Gated on the workload
+  having a pty, not on stdin. Covered by the `console resize` section in
+  `integration.sh` (65/65 green). Follow-up (leftover): extract a shared
+  "poll local tty size and invoke callback" helper for exec and console.
+
 
 - **`mvm run` keeps by default; `--rm` removes on exit** (2026-08-09) —
   flipped to docker semantics. `run` no longer removes the sandbox when the

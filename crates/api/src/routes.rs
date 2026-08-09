@@ -31,6 +31,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/sandboxes/{id}/exec", post(exec))
         .route("/sandboxes/{id}/exec/{session}/stdin", post(exec_stdin))
         .route("/sandboxes/{id}/exec/{session}/resize", post(exec_resize))
+        .route("/sandboxes/{id}/console/resize", post(console_resize))
         .route("/images", get(list_images))
         .route("/images/pull", post(pull_image))
         .route("/images/{*name}", delete(remove_image))
@@ -250,6 +251,16 @@ async fn exec_resize(
     state
         .manager
         .exec_resize(&id, session, req.cols, req.rows)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resize the console workload's pty (sandbox-keyed, no session id).
+async fn console_resize(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ResizeRequest>,
+) -> Result<StatusCode, ApiError> {
+    state.manager.console_resize(&id, req.cols, req.rows)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

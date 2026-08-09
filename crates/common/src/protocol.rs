@@ -48,6 +48,9 @@ pub enum AgentRequest {
     StdinEof { id: u32 },
     /// Resize a tty exec session.
     Resize { id: u32, cols: u16, rows: u16 },
+    /// Resize the console workload's pty (sandbox-keyed rather than
+    /// session-keyed, so it has no `id`).
+    ConsoleResize { cols: u16, rows: u16 },
     /// Kill an exec session.
     Kill { id: u32 },
     /// Liveness probe.

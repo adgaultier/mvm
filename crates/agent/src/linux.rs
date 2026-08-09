@@ -5,7 +5,8 @@
 //! as PID 1. Built statically (crt-static) so it runs in any rootfs.
 
 use std::collections::{HashMap, VecDeque};
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::OwnedFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
@@ -62,6 +63,11 @@ struct Agent {
     /// workload can race its own exit against its last bytes ever reaching
     /// the host.
     console_output: Option<std::thread::JoinHandle<()>>,
+    /// Agent-owned dup of the workload pty master (the bridge owns the
+    /// original; the input bridge its clone). Kept so the host can resize
+    /// the console (`AgentRequest::ConsoleResize`) without coupling to the
+    /// bridge threads' lifetimes. Closed exactly once when the agent drops.
+    console_pty: Option<OwnedFd>,
 }
 
 pub fn main() {
@@ -138,12 +144,14 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // 3. Spawn the workload. The guest console is a byte stream, so an
     // interactive workload needs a real guest PTY of its own.
     let mut console_output = None;
+    let mut console_pty = None;
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
         match spawn_tty_workload(workload_argv, console_size, &user) {
-            Some((child, handle)) => {
+            Some((child, handle, pty)) => {
                 console_output = Some(handle);
+                console_pty = pty;
                 Some(child)
             }
             None => return 127,
@@ -202,6 +210,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         workload_code: None,
         workload_user: user,
         console_output,
+        console_pty,
     };
     agent.send(&AgentEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
@@ -214,7 +223,11 @@ fn spawn_tty_workload(
     workload_argv: &[String],
     size: Option<(u16, u16)>,
     user: &GuestUser,
-) -> Option<(std::process::Child, std::thread::JoinHandle<()>)> {
+) -> Option<(
+    std::process::Child,
+    std::thread::JoinHandle<()>,
+    Option<OwnedFd>,
+)> {
     let winsize = size.map(|(cols, rows)| libc::winsize {
         ws_row: rows,
         ws_col: cols,
@@ -285,21 +298,26 @@ fn spawn_tty_workload(
     if input_fd < 0 || output_fd < 0 {
         // No bridging possible either way; hand back an already-finished
         // handle so the caller can still unconditionally join it.
-        return Some((child, std::thread::spawn(|| {})));
+        return Some((child, std::thread::spawn(|| {}), None));
     }
     let mut input = unsafe { std::fs::File::from_raw_fd(input_fd) };
     let Ok(mut input_master) = master.try_clone() else {
-        return Some((child, std::thread::spawn(|| {})));
+        return Some((child, std::thread::spawn(|| {}), None));
     };
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut input, &mut input_master);
     });
     let mut output = unsafe { std::fs::File::from_raw_fd(output_fd) };
     let mut output_master = master;
+    // The agent's own handle to the workload pty. Dup'd off the master before
+    // it moves into the output bridge thread: the bridge (and the input
+    // bridge's clone) keep their existing ownership, this fd is independent
+    // of both and closes when the agent drops.
+    let console_pty = output_master.try_clone().ok().map(OwnedFd::from);
     let output_handle = std::thread::spawn(move || {
         let _ = std::io::copy(&mut output_master, &mut output);
     });
-    Some((child, output_handle))
+    Some((child, output_handle, console_pty))
 }
 
 /// A resolved guest identity: what the image's `USER` (or `-u`) means once
@@ -832,6 +850,26 @@ impl Agent {
                             ws_ypixel: 0,
                         };
                         unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) };
+                    }
+                }
+            }
+            AgentRequest::ConsoleResize { cols, rows } => {
+                if let Some(pty) = &self.console_pty {
+                    let ws = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    // The workload may already be gone (a resize that raced
+                    // teardown); log, don't tear down the console.
+                    if unsafe { libc::ioctl(pty.as_raw_fd(), libc::TIOCSWINSZ, &ws) } < 0 {
+                        eprintln!(
+                            "mvm-agent: console resize {}x{} failed: {}",
+                            cols,
+                            rows,
+                            std::io::Error::last_os_error()
+                        );
                     }
                 }
             }
