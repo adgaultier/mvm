@@ -1110,6 +1110,7 @@ dependencies = [
 name = "mvm-common"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "dirs",
  "rand 0.8.7",

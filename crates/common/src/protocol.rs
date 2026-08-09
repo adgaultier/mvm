@@ -82,69 +82,22 @@ pub enum AgentEvent {
     Error { message: String },
 }
 
-/// Minimal base64 (standard alphabet, with padding) so the static guest
-/// agent doesn't need an extra dependency.
+/// Base64 (standard alphabet, with padding) for byte payloads on the wire.
+/// Uses the `base64` crate; the module stays so `#[serde(with = "b64")]`
+/// keeps working for the framed JSON structs.
 pub mod b64 {
+    use base64::Engine;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const STANDARD: base64::engine::general_purpose::GeneralPurpose =
+        base64::engine::general_purpose::STANDARD;
 
     pub fn encode(data: &[u8]) -> String {
-        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-        for chunk in data.chunks(3) {
-            let b = [
-                chunk[0],
-                *chunk.get(1).unwrap_or(&0),
-                *chunk.get(2).unwrap_or(&0),
-            ];
-            let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-            let idx = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-            out.push(ALPHABET[idx[0] as usize] as char);
-            out.push(ALPHABET[idx[1] as usize] as char);
-            out.push(if chunk.len() > 1 {
-                ALPHABET[idx[2] as usize] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                ALPHABET[idx[3] as usize] as char
-            } else {
-                '='
-            });
-        }
-        out
+        STANDARD.encode(data)
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        fn val(c: u8) -> Result<u32, String> {
-            match c {
-                b'A'..=b'Z' => Ok((c - b'A') as u32),
-                b'a'..=b'z' => Ok((c - b'a') as u32 + 26),
-                b'0'..=b'9' => Ok((c - b'0') as u32 + 52),
-                b'+' => Ok(62),
-                b'/' => Ok(63),
-                _ => Err(format!("invalid base64 byte {c:#x}")),
-            }
-        }
-        let s = s.as_bytes();
-        if !s.len().is_multiple_of(4) {
-            return Err("base64 length not a multiple of 4".into());
-        }
-        let mut out = Vec::with_capacity(s.len() / 4 * 3);
-        for chunk in s.chunks(4) {
-            let pad = chunk.iter().filter(|&&c| c == b'=').count();
-            if pad > 2 || (pad > 0 && !chunk[4 - pad..].iter().all(|&c| c == b'=')) {
-                return Err("malformed base64 padding".into());
-            }
-            let mut n = 0u32;
-            for &c in &chunk[..4 - pad] {
-                n = (n << 6) | val(c)?;
-            }
-            n <<= 6 * pad as u32;
-            let bytes = n.to_be_bytes();
-            out.extend_from_slice(&bytes[1..4 - pad]);
-        }
-        Ok(out)
+        STANDARD.decode(s).map_err(|e| e.to_string())
     }
 
     pub fn serialize<S: Serializer>(data: &[u8], s: S) -> Result<S::Ok, S::Error> {
