@@ -18,7 +18,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://example.invalid/mvm"
+repository = "https://github.com/adgaultier/mvm"
 
 [workspace.dependencies]
 anyhow = "1"

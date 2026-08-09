@@ -3,14 +3,14 @@
 Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
-## 1. Credentials injection (design plan)
+## 1. Credentials injection
 Modeled on Docker Sandboxes' credential handling
 (https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
 mvm's daemon + vsock architecture. Guiding principle: **real secrets never
 enter the guest** — not its env, not its filesystem; the guest sees
 sentinels and the host injects at the network boundary.
 
-SEE CREDENTIALS.md
+-> SEE TODO.CREDENTIALS.md
 
 ## 2. `--net passt` as a first-class network mode (HIGH PRIORITY)
 
@@ -52,15 +52,14 @@ Plan (mirror the gvproxy flow):
    route surface if any. Integration: outbound + dns + port-forward checks
    mirroring the gvproxy section, gated on `command -v passt`.
 
-## 5. Guest ptys are not reachable by path (`ttyname` fails)
-Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
-workload's pty even though `[ -t 0 ]` is true and `/proc/self/fd/0` points at
-`/dev/pts/0`: three devpts instances end up stacked on `/dev/pts` (libkrun's
-init, then the agent's), and the pty is allocated in one that a later mount
-shadows. Anything resolving a tty by name — `sudo`, `screen`, `script`,
-`os.ttyname` — sees an inconsistent world. Fix is for `ensure_devpts` to reuse
-a usable existing instance instead of stacking another; check what ptmxmode
-that leaves for non-root workloads before changing it.
+## 3. SEC HARDENING
+-> See  
+- [`TODO.SEC.md`](security/TODO.SEC.md)
+- [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md)
+- [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md)
+
+## 6. Add startup latency instrumentation
+introduce a `StartupTimings` struct with `total`, `vm_boot`, `guest_agent`, and `exec` `Duration`s, measured with monotonic `Instant`s at the actual VM boot, guest-agent-ready, and exec-complete lifecycle events. Add `--timings` output (VM boot / guest ready / exec / total), then benchmark `mvm run --rm alpine true` over 100 runs and report min/median/p95/max.
 
 ## 7. Pull memory usage
 Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
@@ -79,84 +78,18 @@ Snapshot the source VM's *memory* so `mvm clone --fork --checkpoint SRC` creates
 The mvm-side plumbing remains valid and cheap to land independently: `common::protocol::Checkpoint`, a `checkpoint` spec flag alongside `fork`, and `Manager::clone_sandbox` doing **checkpoint → stop → duplicate**. `--fork` already stops before copying overlayfs, so `--checkpoint` simply adds VM execution state to the existing disk snapshot. Expose `clone --checkpoint` and, if useful, `mvm checkpoint SRC`.
 
 ## 9. Agent gateway — knative-style activation in front of mvm
-Internal company tool (not client-facing): one long-lived agent per
-user/project, reachable at a stable URL, woken on demand and stopped when
-idle. Traefik does ingress/TLS/auth-forwarding only; the gateway owns compute
-lifecycle. Separate crate, one host to start with.
+...
 
-```
-client -> Traefik (*.agents.corp, TLS, forward-auth)
-       -> agent gateway :8080  (activation + reverse proxy)
-       -> 127.0.0.1:<agent port> -> mvm sandbox -> opencode :4096
-```
-
-**Decisions taken.** One host: gateway and `mvm serve` colocated, daemon on
-loopback, ports allocated locally — a 64 GB box holds 30–60 agents at
-512 MiB–1 GiB. Going multi-host turns the gateway into a scheduler (capacity,
-workspace placement) and needs auth on mvm's API, so treat it as a separate
-project, not a config flag. A host port per agent is accepted: allocate at
-*create* (mvm's `ports` are create-time only), store it on the agent record,
-own it for the agent's life, release on delete. `agent_id` **is** the mvm
-sandbox name — names are unique and resolvable by name/id/prefix, so no
-mapping table. mvm owns lifecycle state (`GET /sandboxes/{id}`); the gateway's
-DB holds only what mvm cannot know: owner, viewers, host port, `last_used_at`,
-quotas, image pin. Reconcile against mvm on startup.
-
-**Where knative's model does not fit, and it matters.** Knative assumes
-request-scoped work: no traffic means nothing is happening. An agent can spend
-ten minutes editing files and running tests with no HTTP traffic at all, so
-idle-by-traffic kills working agents and looks random. Idle must mean *no HTTP
-activity **and** no active work*, with "active work" coming from the workload
-(an opencode `/status`) or from `mvm exec <id>` inspecting the guest. Likewise
-`last_used_at` must be bumped when a stream *completes*, or a 20-minute SSE
-response gets its VM shut out from under it.
-
-**Phases.**
-1. Stable URL + forward-auth; proxy to an already-running agent; agent
-   registry with port allocation. Streaming, WebSockets, long requests,
-   cancellation, no response buffering.
-2. Activation: per-agent startup lock so concurrent requests coalesce onto one
-   start; wait for the workload's own health endpoint; explicit activation
-   budget with 503 + `Retry-After` past it. Measure workload-ready time from
-   day one — VM boot is ~250 ms, the workload is the real cost, and activation
-   latency is the SLA.
-3. `agentctl shell|logs|status` — mvm's `exec -it`/`attach` over vsock work
-   even with `--net none`, and console/exit-code/uptime are already in the
-   API. This is the feature that makes the platform supportable, and no
-   competitor to it has anything comparable; do not leave it for last.
-4. Admission control: per-user concurrent cap, global memory budget, queue
-   with a visible "waiting for capacity" state, per-agent size via
-   `mvm resize`. Then idle shutdown (per the work-detection rule above),
-   crash-loop backoff, and metrics: activation count/latency histogram,
-   per-agent memory.
-5. `agentctl upgrade <id> --image X` as a first-class verb: create a new
-   sandbox with the same workspace volume, verify healthy, delete the old.
-   mvm specs are immutable apart from cpu/ram, so done ad hoc this loses work.
-
-**Networking.** Start with `--net tsi`: zero setup, `-p` maps work, one less
-process per VM. Switch to `--net gvproxy` (one per sandbox) when egress policy
-matters — inside a corp network a hallucinating agent reaching internal
-services is the real risk, and only gvproxy can hold an allowlist.
-
-**Secrets.** Depends on credentials injection. Cheapest large win first:
-per-agent GitHub App installation tokens (hour-scoped) instead of long-lived
-PATs. LLM-generated code inside the VM can read its own environment, so its
-Milestone B
-(sentinel + host proxy over vsock) is the real answer for API keys — and it
-shares the vsock bridge with everything else here.
-
-**Deliberately not doing.** A multi-backend `VMManager` abstraction
-(Firecracker/Cloud Hypervisor/Docker): one runtime exists, and a lowest-common
--denominator interface would forfeit exec-over-vsock and per-sandbox gvproxy.
-Keep the four operations as a module boundary; extract a trait if a second
-backend ever appears. Also no separate `status` column duplicating mvm's.
-
-**Blocked on / related:** credentials injection, and pull memory usage (a
-750 MB image spikes RAM by its layer size on a box also running 40 VMs). The
-image-USER blocker is gone — the opencode image runs as `agent`, and mvm now
-honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
-agent counts grow.
 ## Done
+
+- **Devpts stacking investigation (TODO#5)** (2026-08-10) — the original item
+  reported that `tty` fails and `ls /dev/pts` is empty. Neither reproduces:
+  the agent mounts devpts *before* `openpty()`, so ptys land in the topmost
+  (visible) instance. Two devpts instances exist (libkrun init + agent), but
+  `tty`, `ls /dev/pts`, `ttyname`, and non-root access all work. Added 4
+  integration tests to `scripts/integration.sh` (devpts count, ls, ttyname,
+  non-root); all pass. The item is downgraded to a low-priority cleanup:
+  deduplicate the devpts mount.
 
 - **Raw socket creation banned in the guest (seccomp-bpf)** (2026-08-09) —
   the agent installs a hand-built `SECCOMP_MODE_FILTER` at the top of

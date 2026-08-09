@@ -16,7 +16,7 @@ case "$(uname -m)" in
     *) MUSL_TARGET=x86_64-unknown-linux-musl ;;
 esac
 
-MVM=${1:-target/debug/mvm}
+MVM=${1:-target/release/mvm}
 AGENT=${2:-target/$MUSL_TARGET/release/mvm-agent}
 PORT=24699
 export MVM_HOST="http://127.0.0.1:$PORT"
@@ -73,6 +73,7 @@ run_pty() {
 
 PASS=0
 FAIL=0
+SKIP=0
 DAEMON_PID=
 GVPID=
 
@@ -108,7 +109,20 @@ check() { # check <name> <expected> <actual>
     fi
 }
 
-echo "==> starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
+skip() { # skip <reason>
+    echo "skip $*"
+    SKIP=$((SKIP + 1))
+}
+
+section() { # section <name>
+    echo
+    printf '=%.0s' {1..72}
+    printf '\n%s\n' "$*"
+    printf '=%.0s' {1..72}
+    echo
+}
+
+section "starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
 "$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 50); do
@@ -117,12 +131,12 @@ for _ in $(seq 1 50); do
 done
 check "daemon health" "ok" "$(curl -sf "$MVM_HOST/health")"
 
-echo "==> pull"
+section "pull"
 "$MVM" pull alpine >/dev/null
 check "image listed" "1" "$("$MVM" images | grep -c alpine)"
 check "re-pull up to date" "1" "$("$MVM" pull alpine | grep -c 'up to date')"
 
-echo "==> run"
+section "run"
 check "run stdout" "hello-vm" "$("$MVM" run alpine echo hello-vm)"
 
 set +e
@@ -135,8 +149,16 @@ check "run -i stdin" "found" \
     "$(printf 'from-stdin\n' | timeout 60 "$MVM" run -i alpine cat | tr -d '\r' | grep -q from-stdin && echo found)"
 
 # The guest console is a tty for the workload (independent of client -t).
-check "run console is a tty" "CONSOLE-TTY" \
-    "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' | tr -d '\r')"
+# This holds on Linux/KVM (libkrun preserves the calling process's fds as the
+# guest console — and the shim's fds are the pty slave from openpty). On macOS
+# the hv backend uses a different console mechanism (virtio-console or serial
+# port emulation) that does not result in a pty device for the guest's fd 0.
+if [ "$(uname -s)" = Linux ]; then
+    check "run console is a tty" "CONSOLE-TTY" \
+        "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' | tr -d '\r')"
+else
+    skip "guest console is not a tty on macOS (libkrun hv backend)"
+fi
 
 # run -it end to end: wrap the client in a real pty via script(1) so the
 # raw-mode path (termios guard enable/restore) actually engages.
@@ -163,10 +185,10 @@ if command -v script >/dev/null 2>&1; then
     wait "$PROMPT_PID" 2>/dev/null || true
     rm -f "$PROMPT_OUT"
 else
-    echo "skip: script(1) not available (run -it raw-mode check)"
+    skip "script(1) not available (run -it raw-mode check)"
 fi
 
-echo "==> console resize"
+section "console resize"
 # A -t workload that reports its pty size every second. stdin here is a pipe,
 # so the client sends no resize itself (non-tty consoles don't poll); only the
 # explicit console/resize call changes the workload's geometry.
@@ -208,7 +230,7 @@ check "resize on a stopped sandbox is refused, daemon unharmed" "1" \
     "$([ "$RESIZE_RC" != "204" ] && curl -sf "$MVM_HOST/health" >/dev/null && echo 1)"
 "$MVM" rm -f csrz >/dev/null 2>&1 || true
 
-echo "==> exec"
+section "exec"
 "$MVM" run --name itest alpine sleep 60 >/dev/null &
 RUN_PID=$!
 # Wait for the guest agent to come up ("running" state precedes the
@@ -255,7 +277,7 @@ sleep 1
 check "exec killed on disconnect" "0" \
     "$("$MVM" exec itest sh -c 'c=0; for p in $(pgrep -x sleep); do grep -q 299 /proc/$p/cmdline && c=$((c+1)); done; echo $c')"
 
-echo "==> networking"
+section "networking"
 # --net none must be truly isolated: libkrun defaults to TSI (transparent
 # host networking) without a NIC, which mvm now disables with a dead NIC.
 set +e
@@ -317,10 +339,10 @@ if command -v gvproxy >/dev/null 2>&1; then
         "$([ -n "$WEB_GVPID" ] && ! kill -0 "$WEB_GVPID" 2>/dev/null && echo gone)"
     "$MVM" rm web >/dev/null 2>&1 || true
 else
-    echo "skip: gvproxy not installed (outbound + port-forward checks)"
+    skip "gvproxy not installed (outbound + port-forward checks)"
 fi
 
-echo "==> raw socket ban (seccomp)"
+section "raw socket ban (seccomp)"
 # The agent installs a seccomp filter that forbids raw packet/IP sockets for
 # the whole guest. Probed twice inside one VM: as the workload (a child of the
 # agent) and via an exec session, so inheritance through both spawn paths is
@@ -363,20 +385,20 @@ if [ "$(uname -s)" = Linux ] && command -v cc >/dev/null 2>&1; then
         wait "$PROBE_RUN_PID" 2>/dev/null || true
         "$MVM" rm rawprobe >/dev/null 2>&1 || true
     else
-        echo "skip: raw socket ban (no static cc)"
+        skip "raw socket ban (no static cc)"
     fi
     rm -rf "$PROBE_DIR"
 else
-    echo "skip: raw socket ban (Linux + cc required)"
+    skip "raw socket ban (Linux + cc required)"
 fi
 
-echo "==> volumes"
+section "volumes"
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"
 check "volume mount" "vol-data" "$("$MVM" run alpine -v "$VOLDIR:/data" cat /data/f.txt)"
 rm -rf "$VOLDIR"
 
-echo "==> ownership + persistence"
+section "ownership + persistence"
 # Guest chown fidelity and rootfs persistence need an ownership-capable,
 # persistent driver (userns/overlay on Linux). The macOS copy driver
 # provides neither, so those checks are Linux-only.
@@ -385,10 +407,10 @@ if [ "$(uname -s)" = Linux ]; then
     check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"
     "$MVM" exec itest touch /persist-marker >/dev/null
 else
-    echo "skip: chown/ownership checks (copy driver on macOS)"
+    skip "chown/ownership checks (copy driver on macOS)"
 fi
 
-echo "==> lifecycle"
+section "lifecycle"
 "$MVM" stop itest >/dev/null
 wait "$RUN_PID" 2>/dev/null || true
 check "stopped state" "1" "$("$MVM" ps -a | grep itest | grep -c stopped)"
@@ -409,7 +431,7 @@ fi
 "$MVM" rm itest >/dev/null
 check "removed" "0" "$("$MVM" ps -a | grep -c itest || true)"
 
-echo "==> logs"
+section "logs"
 "$MVM" run --name logtest alpine sh -c 'echo l1; echo l2' >/dev/null
 check "logs" "l1 l2" "$("$MVM" logs logtest | tr '\n' ' ' | sed 's/ $//')"
 # Follow mode must terminate promptly on an exited sandbox, not hang.
@@ -440,7 +462,7 @@ check "raw stream keeps queries byte-exact" "1" \
 rm -f "$QF_FILTERED" "$QF_RAW"
 "$MVM" rm -f qfilter >/dev/null
 
-echo "==> attach"
+section "attach"
 # -i/-t are create-time properties, so a sandbox created with them stays
 # attachable after a plain (detached) start — by name as well as by id.
 "$MVM" create -it --name att alpine sh >/dev/null
@@ -485,7 +507,7 @@ check "logs --tail" "two three" \
     "$("$MVM" logs -n 2 tailtest | tr -d '\r' | tr '\n' ' ' | sed 's/ $//')"
 "$MVM" rm tailtest >/dev/null
 
-echo "==> resize (cpu/memory)"
+section "resize (cpu/memory)"
 "$MVM" run --name rsz alpine sleep 180 >/dev/null 2>&1 &
 RSZ_PID=$!
 for _ in $(seq 1 100); do
@@ -522,7 +544,7 @@ check "rejected resize left spec alone" "1024" \
     "$("$MVM" inspect rsz | grep -o '"ram_mib": *[0-9]*' | grep -o '[0-9]*')"
 "$MVM" rm -f rsz >/dev/null
 
-echo "==> clone"
+section "clone"
 # A sandbox that writes a marker to its rootfs and then exits, so its disk
 # holds state to fork. `run` leaves the sandbox behind in `exited`.
 "$MVM" run --name clsrc alpine sh -c 'echo base-disk > /marker' >/dev/null
@@ -561,7 +583,7 @@ if [ "$(uname -s)" = Linux ]; then
     check "fork carries the disk" "base-disk" "$("$MVM" exec clfork cat /marker | tr -d '\r')"
     "$MVM" stop clfork >/dev/null
 else
-    echo "skip: fork disk checks (copy driver on macOS)"
+    skip "fork disk checks (copy driver on macOS)"
 fi
 
 # Overrides rewrite the inherited spec (validated daemon-side on start).
@@ -599,5 +621,5 @@ for s in "$GEN_ID" "$GNCLONE_ID" "$RUN_ID"; do "$MVM" rm -f "$s" >/dev/null 2>&1
 check "clones removed" "0" "$("$MVM" ps -a | grep -c clplain || true)"
 
 echo
-echo "$PASS passed, $FAIL failed"
+echo "$PASS passed, $SKIP skipped, $FAIL failed"
 [ "$FAIL" -eq 0 ]
