@@ -74,25 +74,17 @@ pub const SAVANNAH_ANIMALS: &[&str] = &[
 ];
 
 /// Pick a `<adjective>-<animal>` name that `taken` does not already reject.
-///
-/// No external rng: the word picks come from a xorshift64 seeded with the
-/// wall clock, so the crate keeps its zero-heavy-dependency budget.
 pub fn random_sandbox_name<F>(taken: F) -> String
 where
     F: Fn(&str) -> bool,
 {
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0) as u64;
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
     for _ in 0..128 {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
         let name = format!(
             "{}-{}",
-            ADJECTIVES[(seed & 0xffff) as usize % ADJECTIVES.len()],
-            SAVANNAH_ANIMALS[(seed >> 16) as usize % SAVANNAH_ANIMALS.len()]
+            ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())],
+            SAVANNAH_ANIMALS[rng.gen_range(0..SAVANNAH_ANIMALS.len())]
         );
         if !taken(&name) {
             return name;
@@ -100,13 +92,13 @@ where
     }
     // Only reachable if every adjective-animal pair is taken; don't spin
     // forever, just disambiguate with a numeric suffix.
+    let (adj, animal) = (
+        ADJECTIVES[rng.gen_range(0..ADJECTIVES.len())],
+        SAVANNAH_ANIMALS[rng.gen_range(0..SAVANNAH_ANIMALS.len())],
+    );
     let mut n = 0u32;
     loop {
-        let name = format!(
-            "{}-{}-{n}",
-            ADJECTIVES[(seed & 0xffff) as usize % ADJECTIVES.len()],
-            SAVANNAH_ANIMALS[(seed >> 16) as usize % SAVANNAH_ANIMALS.len()]
-        );
+        let name = format!("{adj}-{animal}-{n}");
         if !taken(&name) {
             return name;
         }
