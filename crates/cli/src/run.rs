@@ -93,12 +93,17 @@ pub fn run(client: &Client, args: BoxArgs) -> Result<i32, String> {
     if !keep {
         client.remove_sandbox(&id)?;
         // A name only outlives the run with --keep. Say so, or `mvm start
-        // <name>` afterwards just reports "sandbox not found".
-        if let Some(name) = &spec.name {
+        // <name>` afterwards just reports "sandbox not found". The daemon
+        // assigns a generated name when none was given, so read it off the
+        // sandbox it actually created.
+        if let Some(name) = &sb.spec.name {
             eprintln!("mvm: sandbox '{name}' removed on exit (use --keep to start it again)");
         }
     } else {
-        println!("sandbox {id} kept (state: exited)");
+        match &sb.spec.name {
+            Some(name) => println!("sandbox {id} kept (name: {name}, state: exited)"),
+            None => println!("sandbox {id} kept (state: exited)"),
+        }
     }
     Ok(exit_code)
 }

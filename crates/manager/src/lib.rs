@@ -134,13 +134,21 @@ impl Manager {
     /// Create a sandbox (does not start it).
     pub fn create(&self, spec: SandboxSpec) -> Result<Sandbox> {
         self.validate(&spec)?;
-        let sandbox = Sandbox::new(spec);
-        std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
-        self.inner
-            .sandboxes
-            .write()
-            .unwrap()
-            .insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+        let sandbox = {
+            // Generate + insert under the write lock so two concurrent
+            // unnamed creates can't both pick the same generated name.
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            let mut spec = spec;
+            if spec.name.is_none() {
+                let taken =
+                    |n: &str| sandboxes.values().any(|e| e.spec().name.as_deref() == Some(n));
+                spec.name = Some(mvm_common::names::random_sandbox_name(taken));
+            }
+            let sandbox = Sandbox::new(spec);
+            std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
+            sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+            sandbox
+        };
         self.persist()?;
         Ok(sandbox)
     }
@@ -152,18 +160,25 @@ impl Manager {
     pub fn clone_sandbox(&self, id_or_name: &str, spec: SandboxSpec, fork: bool) -> Result<Sandbox> {
         let source_id = self.resolve(id_or_name)?;
         self.validate(&spec)?;
-        let sandbox = Sandbox::new(spec);
+        // The disk copy can be slow (whole-rootfs on the `copy` driver), so it
+        // runs before the registry is locked; the name generation + insert
+        // below stay atomic under the write lock.
+        let mut sandbox = Sandbox::new(spec);
         std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
         if fork {
             self.inner
                 .storage
                 .duplicate(&SandboxId::from(source_id.clone()), &sandbox.id)?;
         }
-        self.inner
-            .sandboxes
-            .write()
-            .unwrap()
-            .insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+        {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            if sandbox.spec.name.is_none() {
+                let taken =
+                    |n: &str| sandboxes.values().any(|e| e.spec().name.as_deref() == Some(n));
+                sandbox.spec.name = Some(mvm_common::names::random_sandbox_name(taken));
+            }
+            sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
+        }
         self.persist()?;
         tracing::info!(sandbox = %sandbox.id, source = %source_id, fork, "sandbox cloned");
         Ok(sandbox)

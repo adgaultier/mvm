@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod id;
+pub mod names;
 pub mod paths;
 pub mod protocol;
 pub mod spec;

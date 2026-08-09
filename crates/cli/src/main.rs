@@ -175,9 +175,9 @@ pub(crate) struct BoxArgs {
     tty: bool,
 }
 
-/// `mvm clone` flag overrides. Absent = inherit from the source. Unlike
-/// `create`, no `--name` defaults the clone to being unnamed: the source's
-/// name is still taken by the source itself, so reusing it is an error.
+/// `mvm clone` flag overrides. Absent = inherit from the source. The source's
+/// *name* is never inherited (it is still the source's, so reusing it is an
+/// error); without `--name` the daemon assigns a generated name.
 #[derive(Args)]
 struct CloneArgs {
     /// Override the image.
@@ -282,6 +282,11 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         Command::Create(args) => {
             let sb = client.create_sandbox(&args.spec()?)?;
             println!("{}", sb.id);
+            if args.name.is_none() {
+                if let Some(n) = &sb.spec.name {
+                    eprintln!("mvm: created sandbox '{n}'");
+                }
+            }
             Ok(0)
         }
         Command::Clone {
@@ -290,8 +295,14 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
             overrides,
         } => {
             let source = client.get_sandbox(&sandbox)?;
+            let named = overrides.name.is_none();
             let sb = client.clone_sandbox(source.id.as_str(), &clone_spec(&source, overrides)?, fork)?;
             println!("{}", sb.id);
+            if named {
+                if let Some(n) = &sb.spec.name {
+                    eprintln!("mvm: cloned as sandbox '{n}'");
+                }
+            }
             Ok(0)
         }
         Command::Run(args) => run::run(client, args),
@@ -460,7 +471,7 @@ impl BoxArgs {
 /// Build the clone's spec: the source's, with every explicitly-given flag
 /// applied. Absent flags inherit — the only structural difference from
 /// `create` is that the source's *name* is not reused (it is still the
-/// source's), so an unnamed clone is the default.
+/// source's); without `--name` the daemon assigns a fresh generated name.
 fn clone_spec(source: &Sandbox, overrides: CloneArgs) -> Result<SandboxSpec, String> {
     validate_guest_command(&overrides.command)?;
     let mut spec = source.spec.clone();

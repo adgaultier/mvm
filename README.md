@@ -117,7 +117,10 @@ libc you don't control.
 
 `run`/`create` options: `--name`, `-e KEY=VAL`, `-v host:guest[:ro]`,
 `-p host:guest`, `--net none|tsi|gvproxy[:<socket>]|tap:<dev>`, `--cpus N`, `-m MiB`,
-`-w workdir`, `--keep`.
+`-w workdir`, `--keep`. Without `--name`, the sandbox gets a generated
+`<adjective>-<animal>` name (e.g. `bold-lion`), unique among existing
+sandboxes — `create`/`clone` print it to stderr, `run --keep` includes it in
+its "kept" message.
 
 Any command that takes a `SANDBOX` accepts its **id, a unique id prefix, or
 its `--name`** (names are unique; creating a second sandbox with a taken name

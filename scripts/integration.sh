@@ -483,7 +483,27 @@ set +e
 check "clone rejects a taken name" "1" "$?"
 set -e
 
+# Without --name, create and clone get a generated `<adj>-<animal>` name.
+GEN_ID=$("$MVM" create alpine)
+GEN_NAME=$("$MVM" ps -a | grep -w "$GEN_ID" | awk '{print $2}')
+check "no-name create gets a generated name" "1" \
+    "$(echo "$GEN_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
+GNCLONE_ID=$("$MVM" clone clsrc)
+GNCLONE_NAME=$("$MVM" ps -a | grep -w "$GNCLONE_ID" | awk '{print $2}')
+check "no-name clone gets a generated name" "1" \
+    "$(echo "$GNCLONE_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
+check "generated names are distinct" "1" "$([ "$GEN_NAME" != "$GNCLONE_NAME" ] && echo 1)"
+
+# run without --name too: --keep reports the generated name on exit.
+RUN_OUT=$("$MVM" run --keep alpine true)
+RUN_ID=${RUN_OUT#sandbox }
+RUN_ID=${RUN_ID%% *}
+RUN_NAME=$("$MVM" ps -a | grep -w "$RUN_ID" | awk '{print $2}')
+check "run without --name gets a generated name" "1" \
+    "$(echo "$RUN_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
+
 for s in clplain clfork clbig clsrc; do "$MVM" rm -f "$s" >/dev/null 2>&1 || true; done
+for s in "$GEN_ID" "$GNCLONE_ID" "$RUN_ID"; do "$MVM" rm -f "$s" >/dev/null 2>&1 || true; done
 check "clones removed" "0" "$("$MVM" ps -a | grep -c clplain || true)"
 
 echo
