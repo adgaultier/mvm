@@ -10,56 +10,71 @@ mvm's daemon + vsock architecture. Guiding principle: **real secrets never
 enter the guest** — not its env, not its filesystem; the guest sees
 sentinels and the host injects at the network boundary.
 
-**Milestone A — secret store + env injection (foundation):**
-- `mvm secret set|rm|ls` in the daemon. Backends: Linux Secret Service
-  (GNOME Keyring / KDE Wallet) via D-Bus, falling back to an encrypted
-  file under the data dir (0700 dir / 0600 file, same posture as
-  `~/.docker/config.json`).
-- Scopes, docker-style: global (all sandboxes, applied at create) vs
-  per-sandbox (immediate). `mvm run --secret NAME[=ENV_VAR]` resolves at
-  start. Secret *names* go in `SandboxSpec`; values are resolved at start
-  time only — never persisted in `sandboxes.json`, redacted in
-  `mvm inspect` output.
-- Weakness (accepted for A): the value still lands in the guest's env,
-  like `-e` today. A is about storage hygiene + UX, not isolation.
-
-**Milestone B — credential proxy with sentinel values (the real thing):**
-- Guest env gets `ANTHROPIC_API_KEY=mvm-proxy-managed` (sentinel), plus
-  `HTTP(S)_PROXY=http://127.0.0.1:<port>`. The agent bridges that
-  loopback port over **vsock** to a host-side proxy owned by the daemon —
-  works in every network mode including `none`/`tsi`, since egress
-  happens host-side.
-- The host proxy matches requests against a service map (api.anthropic.com,
-  api.openai.com, api.github.com, generativelanguage.googleapis.com, …)
-  and swaps the sentinel for the real header value on the way out.
-  Built-in service list + user-defined `(domain, header, secret)` triples.
-- HTTPS: header injection requires TLS termination at the proxy. Generate
-  a per-data-dir CA, terminate+re-originate TLS for *matched* domains
-  only, and have the agent install the CA into the guest trust store at
-  boot (append to `/etc/ssl/certs/ca-certificates.crt` + the common
-  distro variants). Unmatched domains get plain CONNECT tunneling — no
-  MITM outside the declared service list.
-- Egress policy falls out for free: the proxy can enforce a domain
-  allowlist per sandbox (deny-by-default option for agentic workloads).
-
-**Milestone C — forwarding, not copying:**
-- SSH agent forwarding over vsock (`SSH_AUTH_SOCK` bridged by the guest
-  agent) for git push/commit signing — keys never enter the guest.
-- OAuth-style flows (Claude Code, etc.): token lives host-side, proxy
-  injects; sandbox never sees it.
-
-Non-goals for now: console-log secret redaction; Windows/macOS keychains.
+SEE CREDENTIALS.md
 
 
 ## 4. Live window resize for `mvm run -it` / `mvm attach`
-The workload pty boots at the client's size and TERM is forwarded, but the
-size is fixed for the session: resizing the terminal mid-run leaves the guest
-on the old geometry (exec -it has full resize). `attach` is worse — it uses
-`tty_size` as recorded at *create* time, so attaching from a differently sized
-terminal starts out wrong. Needs a console-level resize path: a sandbox-keyed
-Resize message (the protocol's is keyed to an exec session) plus TIOCSWINSZ on
-the workload pty in the agent, with `run`/`attach` polling `term_size()` the
-way `exec` does.
+
+`exec -it` already tracks the terminal: a 500 ms poll thread posts
+`/sandboxes/{id}/exec/{session}/resize` and the agent runs `TIOCSWINSZ` on the
+exec pty master (`manager::exec_resize` → `AgentRequest::Resize`). The console
+has no such path — the workload pty is created at boot with the size from
+`MVM_CONSOLE_SIZE`, and the pty master is owned by the agent's console-bridge
+thread, so nothing can resize it mid-session. `attach` is worse: it uses
+`tty_size` recorded at *create* time, so attaching from a differently sized
+terminal starts out wrong.
+
+Plan (mirror the exec path):
+
+1. Agent `spawn_tty_workload` keeps the bridge owning the original pty master
+   (unchanged), but also `dup`s it for the agent. `Agent` stores an owned fd
+   (`OwnedFd`) as `console_pty: Option<_>` beside `console_output`. The bridge
+   and agent then have independent fd ownership while referring to the same
+   workload pty. The agent-owned fd is closed exactly once at agent shutdown.
+
+   Add `AgentRequest::ConsoleResize { cols, rows }`, a dedicated variant since
+   the console is sandbox-keyed rather than session-keyed. It runs `TIOCSWINSZ`
+   on `console_pty`. A failing `TIOCSWINSZ` (workload gone) is logged, not
+   fatal — like `exec_resize`, a resize that races VM teardown must not tear
+   down the console. `console_pty` is only accessed inside the agent's request
+   loop, so it cannot race teardown.
+
+2. Add `Manager::console_resize` → `send_to_agent(ConsoleResize)` and route
+   `POST /sandboxes/{id}/console/resize`, reusing `ResizeRequest { cols, rows }`.
+   Keep this endpoint console-specific rather than introducing a generic
+   sandbox-level resize endpoint.
+
+3. Add `Client::console_resize`. In `console_session`, when the local console
+   is a tty, obtain `term_size()` and send the **initial resize before starting
+   console I/O**. This makes the attaching/running terminal authoritative
+   immediately, eliminating the stale create-time geometry window in `attach`.
+   Then spawn the existing 500 ms poll thread and send subsequent changes.
+
+   The resize condition should be whether the local console session has a tty
+   whose dimensions should control the workload, rather than being coupled
+   solely to whether stdin is enabled.
+
+4. Non-tty consoles are unaffected. `--no-stdin` does not by itself disable
+   resizing; resizing still occurs when the console is attached to a local
+   tty. The agent-owned console pty fd lives for the VM's lifetime and is
+   closed when the agent exits.
+
+
+5. Add coverage for:
+
+   * initial console dimensions;
+   * `console_resize` changing the workload pty's `TIOCGWINSZ`;
+   * resize racing workload/VM teardown being non-fatal;
+   * `attach` from a differently sized terminal sending the local size
+     immediately;
+   * subsequent local terminal changes propagating;
+   * non-tty consoles not starting the resize poller;
+   * agent shutdown closing the duplicated console fd exactly once.
+
+Extract a shared "poll local tty size and invoke callback" helper for exec and
+console eventually — the 500 ms loop and `term_size()` check are identical;
+only the endpoint/request variant differs, so keep those paths separate until
+the console implementation is working.
 
 ## 5. Guest ptys are not reachable by path (`ttyname` fails)
 Inside a guest, `tty` reports "not a tty" and `ls /dev/pts` does not show the
@@ -76,6 +91,16 @@ Layer blobs are buffered fully in RAM during pull (fetch + sha256 +
 unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
+
+## 8. `clone --checkpoint`: carry a stopped VM's memory (blocked on libkrun)
+
+Snapshot the source VM's *memory* so `mvm clone --fork --checkpoint SRC` creates a clone that resumes where it left off — effectively suspend-to-disk for the VM. This extends `--fork`: the source is frozen, its VM state is captured, then it is stopped and its overlayfs duplicated; the clone restores the captured state on boot.
+
+**Firecracker comparison spike.** Firecracker's model is two files: a full guest-memory dump plus a versioned microVM state file. Device state is serialized through a `Persist` trait, with explicit restore invariants around compatible KVM/kernel semantics, CPU model/architecture, and externally-backed resources. libkrun today has only a small part of this: `krun_vm_pause`/`krun_vm_resume` exist on **main (2.0-dev)**, but only for macOS/Hypervisor.framework; they return `-ENOTSUP` on Linux/KVM and are absent from released 1.x branches. There is currently no snapshot/save/load API: nothing serializes guest RAM or vCPU/device state, and no restore-before-boot path.
+
+**Conclusion:** libkrun could implement the Firecracker model because it owns the relevant VM state, but this would be new libkrun functionality rather than something mvm can build against today. Conceptually, the flow would be a new save API in shim A producing VM state + RAM files in the sandbox, followed by a corresponding load API in shim B before `krun_start_enter`. This avoids the in-guest CRIU dependency entirely, but requires libkrun work for Linux/KVM pause, RAM/state serialization, a versioned state format, and restore invariants.
+
+The mvm-side plumbing remains valid and cheap to land independently: `common::protocol::Checkpoint`, a `checkpoint` spec flag alongside `fork`, and `Manager::clone_sandbox` doing **checkpoint → stop → duplicate**. `--fork` already stops before copying overlayfs, so `--checkpoint` simply adds VM execution state to the existing disk snapshot. Expose `clone --checkpoint` and, if useful, `mvm checkpoint SRC`.
 
 ## 9. Agent gateway — knative-style activation in front of mvm
 Internal company tool (not client-facing): one long-lived agent per
