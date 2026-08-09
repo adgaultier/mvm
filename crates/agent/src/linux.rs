@@ -76,6 +76,17 @@ pub fn main() {
     std::process::exit(code);
 }
 fn real_main(workload_argv: &[String]) -> i32 {
+    // 0. seccomp before anything else: the filter is inherited by every
+    // process we spawn and can never be weakened, so the raw-socket ban
+    // covers the workload, exec sessions and everything in between. It also
+    // runs before any code that touches the rootfs or the network, so a
+    // hostile workload cannot have prepared an environment that sidesteps it.
+    // Failure to install is fatal — a guest that can't be sandboxed won't.
+    if let Err(e) = crate::seccomp::install_raw_socket_filter() {
+        eprintln!("mvm-agent: seccomp: {e}");
+        return 125;
+    }
+
     // 1. Mount any virtiofs bind mounts passed via MVM_MOUNTS.
     mount_bind_shares();
 

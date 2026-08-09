@@ -226,6 +226,22 @@ candidate that is dynamically linked or not a Linux ELF at all.
   extend those rather than testing via pulls. Later OCI layers may replace an
   existing path with a hard link; remove the destination before
   `tar::Entry::unpack_in` or the unpack fails with `EEXIST`.
+- **Raw sockets are banned guest-wide, always.** The agent installs a
+  seccomp filter at the top of `real_main` (before mounts/network; a failed
+  install is fatal) that denies `socket(2)` for `AF_PACKET` (any type) and
+  `AF_INET`/`AF_INET6` with `(type & 0xf) == SOCK_RAW`. The check keys on the
+  *domain first* precisely because `AF_NETLINK` sockets are routinely created
+  with a raw type (`SOCK_RAW | SOCK_CLOEXEC` in the network bootstrap) — that
+  is legitimate and stays allowed. The filter is inherited and additive, so a
+  workload cannot weaken it, and it kills on an unexpected arch (a wrong
+  syscall number would otherwise be interpreted against the wrong table).
+  This breaks `tcpdump`, `arping`, old `ping`, and AF_PACKET DHCP clients
+  (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
+  DHCP — it needs the gvproxy-style static-IP bootstrap instead. Always-on
+  by design: there is no opt-out. Filter shape is probed in-VM by
+  `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
+  exec session).
+
 
 ## Runtime env vars
 

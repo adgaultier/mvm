@@ -9,6 +9,9 @@
 mod linux;
 
 #[cfg(target_os = "linux")]
+mod seccomp;
+
+#[cfg(target_os = "linux")]
 fn main() {
     linux::main()
 }

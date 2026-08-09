@@ -158,6 +158,19 @@ honors that. A watch/SSE endpoint on `/sandboxes` would beat polling once
 agent counts grow.
 ## Done
 
+- **Raw socket creation banned in the guest (seccomp-bpf)** (2026-08-09) —
+  the agent installs a hand-built `SECCOMP_MODE_FILTER` at the top of
+  `real_main` (before mounts/network; install failure is fatal, always-on, no
+  opt-out) that denies `socket(2)` for `AF_PACKET` (any type) and
+  `AF_INET`/`AF_INET6` with `(type & 0xf) == SOCK_RAW` → `ERRNO|EPERM`,
+  allows everything else (incl. `AF_NETLINK`, which the network bootstrap
+  creates with a raw type), and kills on a mismatched audit arch.
+  `crates/agent/src/seccomp.rs` builds the BPF with `libc::sock_filter` /
+  `sock_fprog` + `prctl` (no new deps, musl-safe); the filter is inherited by
+  every descendant (workload, exec sessions) and cannot be weakened.
+  `scripts/probes/rawprobe.c` probes the full matrix in-VM as both a workload
+  and an exec session via `integration.sh` (80/80 green).
+
 - **Live console window resize for `mvm run -it` / `mvm attach`** (2026-08-09) —
   the console now tracks the terminal like `exec` does. The agent `dup`s the
   workload pty master for itself (`console_pty: Option<OwnedFd>`, bridge keeps
