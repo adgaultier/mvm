@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use bytes::Bytes;
 use mvm_common::auth::{constant_time_eq, generate_token, hash_token};
 use mvm_common::{
-    protocol, DataDir, Error, Principal, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
+    protocol, DataDir, Error, Mount, Principal, Result, Sandbox, SandboxId, SandboxSpec,
+    SandboxState,
 };
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
@@ -204,6 +205,7 @@ impl Manager {
         for p in &spec.ports {
             mvm_network::parse_port_map(p)?;
         }
+        validate_mounts(&spec.mounts)?;
 
         if let Some(name) = &spec.name {
             let sandboxes = self.inner.sandboxes.read().unwrap();
@@ -1031,6 +1033,22 @@ impl SandboxEntry {
     }
 }
 
+/// Host mount paths must be absolute: libkrun's virtiofs opens them relative
+/// to the daemon's working directory, so a relative path only fails later, at
+/// VM boot, as a virtio-fs "BadActivate" panic (the CLI canonicalizes before
+/// it gets here; this rejects the same mistake from any other client).
+fn validate_mounts(mounts: &[Mount]) -> Result<()> {
+    for m in mounts {
+        if m.host.is_relative() {
+            return Err(Error::Other(format!(
+                "mount host path '{}' must be absolute",
+                m.host.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -1162,5 +1180,22 @@ mod tests {
         assert!(mgr.authenticate_vm(&token).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_relative_mount_host_paths() {
+        let mount = |host: &str| Mount {
+            host: PathBuf::from(host),
+            guest: PathBuf::from("/data"),
+            read_only: false,
+        };
+        // Absolute paths are fine.
+        assert!(validate_mounts(&[mount("/tmp/ok")]).is_ok());
+        assert!(validate_mounts(&[]).is_ok());
+        // Relative paths are refused before they reach libkrun.
+        assert!(matches!(
+            validate_mounts(&[mount("scripts/agents")]),
+            Err(Error::Other(_))
+        ));
     }
 }

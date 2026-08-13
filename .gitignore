@@ -10,6 +10,11 @@
 .vscode
 .mcp.json
 
+# Python (mvm-agent-mcp bridge)
+__pycache__/
+*.pyc
+.venv/
+
 # Sandbox mount artifacts (zero-byte placeholders, owned by nobody)
 /.bash_profile
 /.bashrc

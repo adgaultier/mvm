@@ -579,8 +579,14 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
     let host = parts.next().ok_or("missing host path")?;
     let guest = parts.next().ok_or("volume must be host:guest[:ro]")?;
     let read_only = parts.next() == Some("ro");
+    // Resolve the host path up front: libkrun's virtiofs opens it relative to
+    // the daemon's cwd, so a relative (or dangling) path only fails later, at
+    // VM boot, as a virtio-fs "BadActivate" panic. Canonicalize to an
+    // absolute, symlink-free path and reject mounts that don't exist.
+    let host = std::fs::canonicalize(host)
+        .map_err(|e| format!("volume host path '{host}' is not accessible: {e}"))?;
     Ok(Mount {
-        host: PathBuf::from(host),
+        host,
         guest: PathBuf::from(guest),
         read_only,
     })
@@ -678,5 +684,25 @@ mod tests {
         assert!(validate_guest_command(&cmd(&["sh", "-c", "echo --net gvproxy"])).is_ok());
         assert!(validate_guest_command(&cmd(&["grep", "-e", "pattern", "file"])).is_ok());
         assert!(validate_guest_command(&cmd(&["cat", "-v", "file"])).is_ok());
+    }
+
+    #[test]
+    fn volume_host_path_is_canonicalized_to_absolute() {
+        let dir = std::env::temp_dir().join(format!("mvm-vol-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let m = parse_volume(&format!("{}:/data", dir.display())).unwrap();
+        assert!(m.host.is_absolute(), "host path should be absolute");
+
+        let m = parse_volume(&format!("{}:/data:ro", dir.display())).unwrap();
+        assert!(m.read_only);
+        assert_eq!(m.guest, PathBuf::from("/data"));
+
+        // A path that does not exist is rejected up front.
+        assert!(parse_volume(&format!("{}/nope:/data", dir.display())).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

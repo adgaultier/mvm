@@ -249,9 +249,18 @@ candidate that is dynamically linked or not a Linux ELF at all.
   channel, which means it *is* readable by the workload from `/proc/cmdline`;
   the agent still scrubs it from its own env before spawning the workload, so
   it never appears in `env` or `/proc/1/environ` of the workload. The Agent
-  API routes carry no `{id}` — the sandbox is derived from the token, so a
-  caller can only act on itself. Token lookup uses a constant-time hash
-  compare over the sandbox list (no `HashMap` keyed on the secret).
+   API routes carry no `{id}` — the sandbox is derived from the token, so a
+   caller can only act on itself. Token lookup uses a constant-time hash
+   compare over the sandbox list (no `HashMap` keyed on the secret).
+- **Mount host paths must be absolute.** libkrun's virtiofs passthrough opens
+  the host dir with `openat(AT_FDCWD, …, O_NOFOLLOW)` from the *daemon's* cwd,
+  so a relative `-v` source fails with `ENOENT` at device activation — which
+  surfaces as a guest `fc_vcpu` panic `Failed to activate device: BadActivate`
+  (and `krun.log` records `virtio_fs: failed to create worker: No such file
+  or directory`). The CLI canonicalizes `-v` host paths (`parse_volume`), and
+  `Manager::validate_mounts` rejects any relative path that still slips in via
+  the API/TUI.
+
 
 
 
