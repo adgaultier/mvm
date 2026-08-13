@@ -241,17 +241,24 @@ candidate that is dynamically linked or not a Linux ELF at all.
    by design: there is no opt-out. Filter shape is probed in-VM by
    `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
    exec session).
- - **VM token: only the hash touches host disk.** The Agent API token is
-  minted in `Manager::start`, stored as `agent_token_hash` (SHA-256) on the
-  `Sandbox` record, and passed to the shim as a *process env var*
+ - **VM token: never persisted, never exposed — not even its hash.** The Agent
+  API token is minted in `Manager::start` and held as `agent_token_hash`
+  (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so
+  it is neither serialized into API responses nor written to `sandboxes.json`:
+  it lives only in the manager's memory for the VM's lifetime and is cleared
+  the moment the sandbox stops or exits (not merely gated on state). The
+  plaintext token is passed to the shim as a *process env var*
   (`MVM_AGENT_TOKEN`) — never through `ShimConfig`, so `shim.json` stays
-  token-free. The shim forwards it into the guest via the `MVM_*` env
+  token-free — and the shim forwards it into the guest via the `MVM_*` env
   channel, where it is deliberately **not scrubbed**: it must reach the
-  workload's environment so the tools it spawns (the `mvm-agent-mcp` bridge)
-  can authenticate to `/agent/v1`. The Agent API routes carry no `{id}` — the
-  sandbox is derived from the token, so a caller can only act on itself.
-  Token lookup uses a constant-time hash compare over the sandbox list (no
-  `HashMap` keyed on the secret).
+  workload's environment (and every exec session, via `baseline_env`) so the
+  tools it spawns (the `mvm-agent-mcp` bridge) can authenticate to
+  `/agent/v1`. The plaintext therefore exists only transiently — in the shim's
+  process environment, in the guest environment, and on `/proc/cmdline` (the
+  `MVM_*` channel rides the kernel cmdline) — and is never written to host
+  disk. The Agent API routes carry no `{id}` — the sandbox is derived from the
+  token, so a caller can only act on itself. Token lookup uses a constant-time
+  hash compare over the sandbox list (no `HashMap` keyed on the secret).
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
   driver writes the rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't

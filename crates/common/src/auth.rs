@@ -2,9 +2,11 @@
 //! Agent API (`/agent/v1`).
 //!
 //! A sandbox's VM is provisioned a cryptographically random token at boot;
-//! only its SHA-256 hash is ever stored on the host. The token is opaque: it
-//! identifies *who* is calling (`Principal::Vm(vm_id)`); what they may do is
-//! decided by the authorization layer, never by the token itself.
+//! only its SHA-256 hash is ever kept host-side, and only in the manager's
+//! memory — never persisted to disk or serialized into an API response. The
+//! token is opaque: it identifies *who* is calling (`Principal::Vm(vm_id)`);
+//! what they may do is decided by the authorization layer, never by the token
+//! itself.
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -40,8 +42,8 @@ pub fn generate_token() -> String {
     hex::encode(bytes)
 }
 
-/// SHA-256 hash of a token, hex-encoded. This is the only form ever stored
-/// on the host.
+/// SHA-256 hash of a token, hex-encoded. This is the only form ever kept
+/// host-side (in memory; never persisted or exposed over the API).
 pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }

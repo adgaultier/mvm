@@ -277,7 +277,10 @@ ownership work with full fidelity: image files appear root-owned, and
 This requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`,
 and degrades gracefully (with a warning) when they are missing. Opt out with
 `MVM_USERNS=0`. On macOS there is no userns; the daemon runs with host
-credentials.
+credentials, so guest `chown` and image ownership are **not** preserved — the
+`copy` driver writes the rootfs as the host user. To compensate, the agent
+repairs the workload's home directory ownership before spawning (gated by
+`MVM_HOST_OS=macos`), so a non-root workload can still write to its own home.
 
 ## Guest security
 
@@ -324,8 +327,8 @@ boundary** in its current form. Hardening and explicit security invariants for
 the control plane are tracked in [`TODO.SEC.md`](security/TODO.SEC.md).
 
 The **Agent API** (`/agent/v1`, a separate listener) is already VM-scoped:
-each VM authenticates with a per-boot bearer token (only its hash is stored on
-the host) and can only act on its own sandbox.
+each VM authenticates with a per-boot bearer token (never persisted; only a
+hash of it is kept in the daemon's memory) and can only act on its own sandbox.
 
 
 ## HTTP API
@@ -361,10 +364,13 @@ images in for now.
 The Agent API is a separate listener (`--agent-addr`, default
 `127.0.0.1:24643`) that a running sandbox can call back into. Every request
 must carry its VM-scoped bearer token (`Authorization: Bearer <token>`); the
-token is minted at boot, only its SHA-256 hash is stored on the host, and it
-is revoked when the sandbox stops or is removed. The caller's sandbox is
-derived from the token, so the routes carry no `{id}` — a VM can only act on
-itself:
+token is minted fresh at boot and revoked when the sandbox stops or is
+removed. The token is never persisted on the host: the manager keeps only a
+SHA-256 hash of it — in memory, and out of every API response — to verify
+incoming requests, while the plaintext exists transiently in the shim's
+process environment and inside the guest (where the workload's tooling reads
+it). The caller's sandbox is derived from the token, so the routes carry no
+`{id}` — a VM can only act on itself:
 
 ```
 GET    /agent/v1/sandbox                  (inspect self)

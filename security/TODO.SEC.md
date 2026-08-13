@@ -25,11 +25,13 @@ Ensure an authenticated API client cannot control another user's sandbox unless 
 > `Authorization: Bearer <token>`, resolved to `Principal::Vm(vm_id)` — the
 > routes carry no `{id}`, so a VM can only act on itself (`inspect`/`stop`/
 > `delegate`, the last still a stub). Token mechanics: 32 random bytes minted
-> in `Manager::start`, only `agent_token_hash` (SHA-256) persisted on the
-> `Sandbox`; the plaintext is passed to the shim as a process env var and
-> rides the `MVM_*` channel into the guest (readable via `/proc/cmdline`, but
-> scrubbed from the workload env by the agent). Regenerated on restart,
-> revoked on stop/removal; the control plane never accepts it.
+> in `Manager::start`; only `agent_token_hash` (SHA-256) is kept in the
+> manager's memory (`#[serde(skip)]`: not in API responses, not persisted),
+> cleared on stop/exit. The plaintext is passed to the shim as a process env
+> var and rides the `MVM_*` channel into the guest (readable via
+> `/proc/cmdline`, deliberately not scrubbed so the workload's tooling can
+> present it); it is never persisted. Regenerated on restart, revoked on
+> stop/removal; the control plane never accepts it.
 
 Provision each VM with a cryptographically random, VM-scoped bearer token for authenticating to the restricted Agent API.
 

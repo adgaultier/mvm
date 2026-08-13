@@ -11,10 +11,10 @@ cd "$(dirname "$0")/.."
 
 GUEST_HOME="${GUEST_HOME:-/root}"
 MVM=${1:-target/release/mvm}
-"$MVM" run  --rm -it --net tsi \
-  -e OPENCODE_CONFIG_DIR=/home/agent/opencode \
+"$MVM" create -it --net tsi \
   --name opencode-mcp \
   --cpus 2  -m 2048 \
-  -v "scripts/agents:/home/agent/opencode:rw" \
-  agent:latest bash
-
+   -e OPENCODE_CONFIG_DIR=/home/agent/opencode \
+  -v "$(pwd)/scripts/agents/opencode:/home/agent/opencode:rw" \
+  agent:latest opencode -c
+"$MVM" start -a opencode-mcp

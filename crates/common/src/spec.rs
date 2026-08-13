@@ -207,15 +207,17 @@ pub struct Sandbox {
     /// `/console/resize` calls and is None until one arrives.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
-    /// SHA-256 hash of the sandbox's VM-scoped bearer token, if the VM has
-    /// booted. Only the hash is ever stored — the plaintext token exists
-    /// solely inside the guest (provisioned over the `MVM_*` env channel)
-    /// and is scrubbed from the workload environment by the agent. Regenerated
-    /// on every start; revoked when the sandbox is removed.
-    #[serde(default)]
+    /// SHA-256 hash of the sandbox's VM-scoped bearer token, held only while
+    /// the VM is running. This is authentication material internal to the
+    /// manager: `#[serde(skip)]` keeps it out of every API response and out
+    /// of `sandboxes.json` (the plaintext token exists only transiently in
+    /// the shim's process environment and in the guest). Regenerated on every
+    /// start; cleared the moment the sandbox stops or exits.
+    #[serde(skip)]
     pub agent_token_hash: Option<String>,
-    /// When the current token was minted (its start time).
-    #[serde(default)]
+    /// When the current token was minted (its start time). Manager-internal
+    /// bookkeeping, like the hash it accompanies — never serialized.
+    #[serde(skip)]
     pub agent_token_created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

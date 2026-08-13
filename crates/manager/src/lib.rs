@@ -290,9 +290,10 @@ impl Manager {
         // `-u` wins over the image's USER, which wins over root.
         let user = spec.user.clone().or(image.config.user.clone());
         // VM-scoped bearer token for the Agent API: minted fresh on every
-        // boot, so a restart invalidates the previous token. Only its hash
-        // is kept on the host; the plaintext goes straight into the guest
-        // over the `MVM_*` env channel (never into shim.json).
+        // boot, so a restart invalidates the previous token. Only a hash is
+        // kept host-side (in memory, never exposed or persisted); the
+        // plaintext goes straight into the guest over the `MVM_*` env channel
+        // (never into shim.json).
         let agent_token = agent_socket.as_ref().map(|_| generate_token());
         let agent_token_hash = agent_token.as_deref().map(hash_token);
         let config = ShimConfig {
@@ -458,6 +459,11 @@ impl Manager {
                 return Err(Error::InvalidState("sandbox is not running".into()));
             }
             entry.stop_requested = true;
+            // Revoke the token immediately rather than waiting for the shim to
+            // actually die: a stop request is enough to invalidate it, even
+            // while the state still reads `running` for a moment.
+            entry.info.agent_token_hash = None;
+            entry.info.agent_token_created_at = None;
             entry.info.pid
         };
 
@@ -819,6 +825,8 @@ impl Manager {
             entry.agent = None;
             entry.exec_sessions.clear();
             entry.console_stdin = None;
+            entry.info.agent_token_hash = None;
+            entry.info.agent_token_created_at = None;
             entry.info.state = if entry.stop_requested {
                 SandboxState::Stopped
             } else if status.is_none() {
@@ -1177,6 +1185,17 @@ mod tests {
             .unwrap()
             .info
             .state = SandboxState::Stopped;
+        assert!(mgr.authenticate_vm(&token).is_none());
+
+        // Revocation is the hash being cleared, not merely the state: a
+        // sandbox that is still marked running but whose hash was cleared (as
+        // `stop`/`on_shim_exit` do) no longer authenticates either.
+        let mut sandboxes = mgr.inner.sandboxes.write().unwrap();
+        let entry = sandboxes.get_mut(id.as_str()).unwrap();
+        entry.info.state = SandboxState::Running;
+        entry.info.agent_token_hash = None;
+        entry.info.agent_token_created_at = None;
+        drop(sandboxes);
         assert!(mgr.authenticate_vm(&token).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
