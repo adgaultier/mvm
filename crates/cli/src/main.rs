@@ -40,6 +40,14 @@ enum Command {
     },
     /// Pull an OCI image.
     Pull { image: String },
+    /// Load an OCI image layout archive (.tar) into the local store.
+    Load {
+        /// Archive path (an OCI layout .tar, e.g. `podman save --format oci-archive`).
+        file: String,
+        /// Name/tag to store it under (the archive carries no name).
+        #[arg(long)]
+        name: String,
+    },
     /// List local images.
     Images,
     /// Remove a local image.
@@ -275,6 +283,7 @@ fn main() {
 fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
     match cmd {
         Command::Pull { image } => run::pull(client, &image),
+        Command::Load { file, name } => run::load(client, &file, &name),
         Command::Images => {
             let images = client.list_images()?;
             println!("{:<40} {:<20} {:>10}", "IMAGE", "DIGEST", "SIZE");

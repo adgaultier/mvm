@@ -115,6 +115,7 @@ don't control, and the daemon refuses a dynamically linked one.
 |---|---|
 | `mvm serve [--addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
+| `mvm load --name IMAGE FILE` | load an OCI image layout archive (`.tar`) into the local store |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
 | `mvm create IMAGE [CMD…]` | create a sandbox without starting it |
 | `mvm run IMAGE [CMD…]` | create + start + attach; the sandbox survives the workload unless `--rm` |
@@ -343,7 +344,14 @@ POST   /api/v1/sandboxes/{id}/exec/{session}/resize    {"cols":N,"rows":N}
 
 GET    /api/v1/images                    DELETE /api/v1/images/{name}
 POST   /api/v1/images/pull                             (JSON-lines progress)
+POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar; JSON-lines progress)
 ```
+
+`mvm load` ingests an **OCI image layout** archive — the `.tar` produced by
+`podman save --format oci-archive`, `buildah push oci:`, or `skopeo copy
+oci:`. Unlike a `docker save` archive it has no embedded name, so `--name`
+is required. `mvm build` is not implemented yet; pull + load cover getting
+images in for now.
 
 Exec and log streams use length-prefixed JSON frames (`u32` BE length + JSON),
 defined in `crates/common/src/protocol.rs`.

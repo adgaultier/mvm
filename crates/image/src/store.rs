@@ -92,7 +92,7 @@ impl ImageStore {
             Ok(PullOutcome::Pulled(pulled)) => pulled,
             Ok(PullOutcome::UpToDate { .. }) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                return self.load(&dir).map(|img| img.info);
+                return self.load_stored(&dir).map(|img| img.info);
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&staging);
@@ -125,6 +125,63 @@ impl ImageStore {
         })
     }
 
+    /// Load an OCI image layout archive (`.tar`) into the store under `name`.
+    /// The archive is unpacked into a staging dir and swapped in atomically,
+    /// mirroring `pull`; a failed load never destroys an existing image.
+    pub fn load(
+        &self,
+        name: &str,
+        archive_path: &Path,
+        on_event: impl FnMut(PullEvent),
+    ) -> Result<ImageInfo> {
+        let reference = ImageReference::parse(name)?;
+        let key = reference.store_key();
+        let _guard = self.lock_pull(&key);
+
+        let dir = self.data_dir.image_dir(&key);
+        let staging = self.data_dir.images_dir().join(format!(".loading-{key}"));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+        let rootfs = staging.join("rootfs");
+
+        let mut on_event = on_event;
+        on_event(PullEvent::Manifest {
+            reference: reference.familiar(),
+        });
+
+        let loaded = match crate::load::unpack_oci_archive(archive_path, &rootfs, &mut on_event) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
+
+        let meta = ImageMeta {
+            reference: reference.familiar(),
+            digest: loaded.digest,
+            size: loaded.size,
+            created_at: chrono::Utc::now(),
+            config: loaded.config,
+        };
+        std::fs::write(
+            staging.join("meta.json"),
+            serde_json::to_string_pretty(&meta)?,
+        )?;
+
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::rename(&staging, &dir)?;
+
+        Ok(ImageInfo {
+            reference: meta.reference,
+            digest: meta.digest,
+            size: meta.size,
+            created_at: meta.created_at,
+        })
+    }
+
     /// Resolve a user-supplied reference to a locally stored image.
     /// Matches exact reference or unique prefix of the reference name.
     pub fn get(&self, reference: &str) -> Result<StoredImage> {
@@ -132,7 +189,7 @@ impl ImageStore {
         if let Ok(r) = ImageReference::parse(reference) {
             let dir = self.data_dir.image_dir(&r.store_key());
             if dir.exists() {
-                return self.load(&dir);
+                return self.load_stored(&dir);
             }
         }
         // Fall back to matching by familiar reference prefix.
@@ -146,7 +203,7 @@ impl ImageStore {
         match matches.len() {
             1 => {
                 let key = ImageReference::parse(&matches[0].reference)?.store_key();
-                self.load(&self.data_dir.image_dir(&key))
+                self.load_stored(&self.data_dir.image_dir(&key))
             }
             0 => Err(Error::ImageNotFound(reference.to_string())),
             _ => Err(Error::Image(format!(
@@ -155,7 +212,7 @@ impl ImageStore {
         }
     }
 
-    fn load(&self, dir: &Path) -> Result<StoredImage> {
+    fn load_stored(&self, dir: &Path) -> Result<StoredImage> {
         let meta: ImageMeta =
             serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json"))?)?;
         Ok(StoredImage {

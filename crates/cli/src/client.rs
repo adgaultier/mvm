@@ -125,6 +125,25 @@ impl Client {
         Self::expect(resp, &[200])
     }
 
+    /// Streaming load of an OCI image layout archive. The file is streamed
+    /// straight into the daemon (it owns the image store); `name` is the
+    /// reference to store it under, since the archive carries none.
+    pub fn load(
+        &self,
+        name: &str,
+        file: &std::path::Path,
+    ) -> Result<reqwest::blocking::Response, String> {
+        let file = std::fs::File::open(file).map_err(|e| e.to_string())?;
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/images/load", self.base))
+            .query(&[("name", name)])
+            .body(file)
+            .send()
+            .map_err(|e| e.to_string())?;
+        Self::expect(resp, &[200])
+    }
+
     /// Streaming logs.
     /// `tail` caps the replayed backlog to that many trailing lines.
     /// `raw` keeps the live stream byte-exact, terminal queries included —
