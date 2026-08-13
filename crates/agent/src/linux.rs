@@ -128,8 +128,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_NET_TSI",
         "MVM_CONSOLE_TTY",
         "MVM_CONSOLE_SIZE",
-        "MVM_USER",
-        "MVM_AGENT_TOKEN",
+        "MVM_USER"
     ] {
         std::env::remove_var(var);
     }

@@ -106,16 +106,16 @@ trap cleanup EXIT
 
 check() { # check <name> <expected> <actual>
     if [ "$2" = "$3" ]; then
-        echo "ok   $1"
+        echo "✅   $1"
         PASS=$((PASS + 1))
     else
-        echo "FAIL $1: expected '$2', got '$3'"
+        echo "❌ $1: expected '$2', got '$3'"
         FAIL=$((FAIL + 1))
     fi
 }
 
 skip() { # skip <reason>
-    echo "skip $*"
+    echo "⏭️ $*"
     SKIP=$((SKIP + 1))
 }
 

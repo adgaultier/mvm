@@ -11,10 +11,10 @@ cd "$(dirname "$0")/.."
 
 GUEST_HOME="${GUEST_HOME:-/root}"
 MVM=${1:-target/release/mvm}
-"$MVM" run  -it --net tsi \
+"$MVM" run  --rm -it --net tsi \
   -e OPENCODE_CONFIG_DIR=/home/agent/opencode \
   --name opencode-mcp \
   --cpus 2  -m 2048 \
-  -u root  \
   -v "scripts/agents:/home/agent/opencode:rw" \
-  docker/sandbox-templates:opencode  bash
+  agent:latest bash
+
