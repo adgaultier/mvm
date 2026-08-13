@@ -63,13 +63,13 @@ struct Index {
 }
 
 #[derive(Debug, Deserialize)]
-struct ConfigBlob {
+pub(crate) struct ConfigBlob {
     #[serde(default)]
     config: ConfigInner,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct ConfigInner {
+pub(crate) struct ConfigInner {
     #[serde(default, rename = "Env")]
     env: Vec<String>,
     #[serde(default, rename = "Entrypoint")]
@@ -80,6 +80,28 @@ struct ConfigInner {
     workdir: String,
     #[serde(default, rename = "User")]
     user: String,
+}
+
+/// Parse an OCI/Docker image config blob into the shared `ImageConfig`.
+/// Shared by the registry pull path and `mvm load` (OCI layout archives
+/// store the exact same config JSON as a content-addressed blob).
+pub(crate) fn image_config_from_bytes(bytes: &[u8]) -> ImgResult<ImageConfig> {
+    let config_blob: ConfigBlob = serde_json::from_slice(bytes)?;
+    Ok(ImageConfig {
+        env: config_blob.config.env,
+        entrypoint: config_blob.config.entrypoint,
+        cmd: config_blob.config.cmd,
+        workdir: if config_blob.config.workdir.is_empty() {
+            None
+        } else {
+            Some(config_blob.config.workdir)
+        },
+        user: if config_blob.config.user.is_empty() {
+            None
+        } else {
+            Some(config_blob.config.user)
+        },
+    })
 }
 
 /// Blocking registry client with Bearer-token challenge auth.
@@ -149,22 +171,7 @@ impl RegistryClient {
             digest: manifest.config.digest.clone(),
         });
         let config_bytes = self.fetch_blob(reference, &manifest.config.digest)?;
-        let config_blob: ConfigBlob = serde_json::from_slice(&config_bytes)?;
-        let config = ImageConfig {
-            env: config_blob.config.env,
-            entrypoint: config_blob.config.entrypoint,
-            cmd: config_blob.config.cmd,
-            workdir: if config_blob.config.workdir.is_empty() {
-                None
-            } else {
-                Some(config_blob.config.workdir)
-            },
-            user: if config_blob.config.user.is_empty() {
-                None
-            } else {
-                Some(config_blob.config.user)
-            },
-        };
+        let config = image_config_from_bytes(&config_bytes)?;
 
         // 3. Layers.
         std::fs::create_dir_all(dest_rootfs)?;
@@ -424,7 +431,7 @@ fn is_index(content_type: &str, body: &[u8]) -> bool {
     false
 }
 
-fn verify_digest(digest: &str, bytes: &[u8]) -> ImgResult<()> {
+pub(crate) fn verify_digest(digest: &str, bytes: &[u8]) -> ImgResult<()> {
     if let Some(expected) = digest.strip_prefix("sha256:") {
         let actual = hex::encode(Sha256::digest(bytes));
         if actual != expected {
@@ -436,7 +443,7 @@ fn verify_digest(digest: &str, bytes: &[u8]) -> ImgResult<()> {
     Ok(())
 }
 
-fn host_platform() -> (String, String) {
+pub(crate) fn host_platform() -> (String, String) {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",

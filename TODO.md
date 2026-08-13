@@ -82,6 +82,18 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
 
 ## Done
 
+- **`mvm load` — OCI image layout archives** (2026-08-13) — `mvm load --name
+  IMAGE FILE` (docker `load` parity, OCI-layout only for now) imports a
+  `.tar` produced by `podman save --format oci-archive` / `buildah push oci:`.
+  The archive is streamed to the daemon (`POST /images/load`, spooled to a
+  temp file, never buffered), which resolves the platform manifest out of
+  `index.json`, verifies each `blobs/sha256/<digest>` against its filename,
+  and unpacks via the same `unpack_layer` + config parser the pull path uses.
+  `ImageStore::load` reuses the staging + atomic-rename swap; the shared
+  config parsing was lifted into `registry::image_config_from_bytes`.
+  docker-archive (`docker save`, with nested `manifest.json`/`layer.tar`)
+  is deliberately not handled yet.
+
 - **Devpts stacking investigation (TODO#5)** (2026-08-10) — the original item
   reported that `tty` fails and `ls /dev/pts` is empty. Neither reproduces:
   the agent mounts devpts *before* `openpty()`, so ptys land in the topmost

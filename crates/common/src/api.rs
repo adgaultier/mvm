@@ -46,6 +46,14 @@ pub struct PullRequest {
     pub reference: String,
 }
 
+/// POST /api/v1/images/load — query params (the body is the raw OCI-layout
+/// `.tar`, which carries no name of its own, hence the required `name`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoadQuery {
+    /// Name/tag to store the image under (e.g. "myimg:latest").
+    pub name: Option<String>,
+}
+
 /// POST /api/v1/sandboxes/{id}/clone — new sandbox from the source's spec.
 /// `fork` carries the source's current disk into the clone (mvm clone --fork).
 #[derive(Debug, Clone, Serialize, Deserialize)]

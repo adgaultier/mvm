@@ -7,7 +7,7 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use futures_util::stream::{self, StreamExt};
 use mvm_common::api::{
-    CloneRequest, ExecRequest, InfoResponse, LogsQuery, PullRequest, ResizeRequest,
+    CloneRequest, ExecRequest, InfoResponse, LoadQuery, LogsQuery, PullRequest, ResizeRequest,
     SandboxResizeRequest, StdinQuery,
 };
 use mvm_common::protocol::{encode_frame, AgentEvent};
@@ -34,6 +34,7 @@ pub fn api_routes() -> Router<AppState> {
         .route("/sandboxes/{id}/console/resize", post(console_resize))
         .route("/images", get(list_images))
         .route("/images/pull", post(pull_image))
+        .route("/images/load", post(load_image))
         .route("/images/{*name}", delete(remove_image))
 }
 
@@ -324,4 +325,76 @@ async fn pull_image(State(state): State<AppState>, Json(req): Json<PullRequest>)
         std::task::Poll::Pending => std::task::Poll::Pending,
     });
     Response::new(Body::from_stream(stream))
+}
+
+/// Load an OCI image layout archive (`.tar`). The request body is the raw
+/// archive, spooled to a temp file (never buffered — archives are large) and
+/// then unpacked off the async runtime; progress streams back as JSON lines,
+/// exactly like `pull`.
+async fn load_image(
+    State(state): State<AppState>,
+    Query(q): Query<LoadQuery>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let name = q
+        .name
+        .ok_or_else(|| mvm_common::Error::Image("load requires a `name` query param".into()))?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let manager = state.manager.clone();
+
+    let tmp = std::env::temp_dir().join(format!(
+        "mvm-load-{}-{:x}.tar",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            mvm_common::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        })?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+    }
+    tokio::io::AsyncWriteExt::shutdown(&mut file).await?;
+    drop(file);
+
+    let tmp2 = tmp.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = manager.images().load(&name, &tmp2, |event| {
+            if let Ok(line) = serde_json::to_string(&event) {
+                let _ = tx.send(line);
+            }
+        });
+        let _ = std::fs::remove_file(&tmp2);
+        match result {
+            Ok(info) => {
+                let _ = tx.send(
+                    serde_json::json!({
+                        "stage": "loaded",
+                        "reference": info.reference,
+                        "digest": info.digest,
+                    })
+                    .to_string(),
+                );
+            }
+            Err(e) => {
+                let _ = tx.send(
+                    serde_json::json!({"stage": "error", "error": e.to_string()}).to_string(),
+                );
+            }
+        }
+    });
+
+    let stream = stream::poll_fn(move |cx| match rx.poll_recv(cx) {
+        std::task::Poll::Ready(Some(line)) => {
+            std::task::Poll::Ready(Some(Ok::<_, Infallible>(Bytes::from(format!("{line}\n")))))
+        }
+        std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => std::task::Poll::Pending,
+    });
+    Ok(Response::new(Body::from_stream(stream)))
 }

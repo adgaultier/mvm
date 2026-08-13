@@ -9,7 +9,23 @@ use crate::BoxArgs;
 
 /// Pull an image, rendering progress from the daemon's JSON-line stream.
 pub fn pull(client: &Client, reference: &str) -> Result<i32, String> {
-    let mut resp = client.pull(reference)?;
+    let resp = client.pull(reference)?;
+    stream_progress(resp, print_pull_event)?;
+    Ok(0)
+}
+
+/// Load an OCI image layout archive, rendering progress.
+pub fn load(client: &Client, file: &str, name: &str) -> Result<i32, String> {
+    let resp = client.load(name, std::path::Path::new(file))?;
+    stream_progress(resp, print_load_event)?;
+    Ok(0)
+}
+
+/// Consume a JSON-lines progress stream, invoking `on_line` per line.
+fn stream_progress(
+    mut resp: reqwest::blocking::Response,
+    mut on_line: impl FnMut(&str),
+) -> Result<(), String> {
     let mut buf = String::new();
     let mut chunk = [0u8; 8192];
     loop {
@@ -20,13 +36,46 @@ pub fn pull(client: &Client, reference: &str) -> Result<i32, String> {
         buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..=pos).collect();
-            print_pull_event(line.trim());
+            on_line(line.trim());
         }
     }
     if !buf.trim().is_empty() {
-        print_pull_event(buf.trim());
+        on_line(buf.trim());
     }
-    Ok(0)
+    Ok(())
+}
+
+fn print_load_event(line: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let short = |d: &str| d.chars().take(19).collect::<String>();
+    match v.get("stage").and_then(|s| s.as_str()) {
+        Some("manifest") => {
+            println!("loading {}", v["reference"].as_str().unwrap_or_default());
+        }
+        Some("layerstart") => {
+            println!(
+                "  layer {} ({} bytes)",
+                short(v["digest"].as_str().unwrap_or("")),
+                v["size"].as_u64().unwrap_or(0)
+            );
+        }
+        Some("unpacking") => {
+            println!("  unpack {}", short(v["digest"].as_str().unwrap_or("")));
+        }
+        Some("loaded") => {
+            println!(
+                "loaded {} ({})",
+                v["reference"].as_str().unwrap_or_default(),
+                short(v["digest"].as_str().unwrap_or(""))
+            );
+        }
+        Some("error") => {
+            eprintln!("load error: {}", v["error"].as_str().unwrap_or_default());
+        }
+        _ => {}
+    }
 }
 
 fn print_pull_event(line: &str) {

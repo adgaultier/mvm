@@ -1,5 +1,6 @@
 //! OCI image handling: registry pull, layer unpacking, local store.
 
+pub mod load;
 pub mod reference;
 pub mod registry;
 pub mod store;
