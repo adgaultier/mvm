@@ -22,16 +22,25 @@ pub struct ShimHandle {
 
 /// Write the shim config and spawn the shim with a pty-backed console. The
 /// guest workload must see a terminal even when the client is not attached.
+///
+/// `agent_token` is the VM's plaintext bearer token. It is passed to the shim
+/// as a process environment variable (so the shim can forward it into the
+/// guest over the `MVM_*` channel) and deliberately NOT written to shim.json —
+/// the host must only ever persist its hash.
 pub fn spawn_shim(
     config: &ShimConfig,
     sandbox_dir: &Path,
     attach_stdin: bool,
+    agent_token: Option<&str>,
 ) -> Result<ShimHandle> {
     let config_path = sandbox_dir.join("shim.json");
     config.save(&config_path)?;
 
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
+    if let Some(token) = agent_token {
+        cmd.env("MVM_AGENT_TOKEN", token);
+    }
     let (master, slave) = openpty()?;
     // This pty is plumbing, not a terminal anyone types on: it exists so the
     // guest console is a tty. Its default line discipline (ICANON + ECHO)

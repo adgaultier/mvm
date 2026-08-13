@@ -113,7 +113,7 @@ don't control, and the daemon refuses a dynamically linked one.
 
 | Command | Description |
 |---|---|
-| `mvm serve [--addr HOST:PORT]` | run the daemon |
+| `mvm serve [--addr HOST:PORT] [--agent-addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm load --name IMAGE FILE` | load an OCI image layout archive (`.tar`) into the local store |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
@@ -323,6 +323,10 @@ reachable only through loopback. It is **not a remote or multi-tenant security
 boundary** in its current form. Hardening and explicit security invariants for
 the control plane are tracked in [`TODO.SEC.md`](security/TODO.SEC.md).
 
+The **Agent API** (`/agent/v1`, a separate listener) is already VM-scoped:
+each VM authenticates with a per-boot bearer token (only its hash is stored on
+the host) and can only act on its own sandbox.
+
 
 ## HTTP API
 
@@ -352,6 +356,21 @@ POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar
 oci:`. Unlike a `docker save` archive it has no embedded name, so `--name`
 is required. `mvm build` is not implemented yet; pull + load cover getting
 images in for now.
+### Agent API (`/agent/v1`, VM-authenticated)
+
+The Agent API is a separate listener (`--agent-addr`, default
+`127.0.0.1:24643`) that a running sandbox can call back into. Every request
+must carry its VM-scoped bearer token (`Authorization: Bearer <token>`); the
+token is minted at boot, only its SHA-256 hash is stored on the host, and it
+is revoked when the sandbox stops or is removed. The caller's sandbox is
+derived from the token, so the routes carry no `{id}` — a VM can only act on
+itself:
+
+```
+GET    /agent/v1/sandbox                  (inspect self)
+POST   /agent/v1/sandbox/stop             (stop self)
+POST   /agent/v1/sandbox/delegate         (not yet implemented; authenticated+authorized)
+```
 
 Exec and log streams use length-prefixed JSON frames (`u32` BE length + JSON),
 defined in `crates/common/src/protocol.rs`.
@@ -366,6 +385,7 @@ terminal and answers them — i.e. `mvm attach` / `mvm run -it`.
 | Variable | Effect |
 |---|---|
 | `MVM_HOST` | daemon address for clients (default `http://127.0.0.1:24642`) |
+| `MVM_AGENT_ADDR` | Agent API listen address (default `127.0.0.1:24643`) |
 | `MVM_DATA_DIR` | state root (default `~/.local/share/mvm`, `/var/lib/mvm` as root) |
 | `MVM_AGENT_PATH` | guest agent binary |
 | `MVM_STORAGE_DRIVER` | force `overlay` or `copy` |

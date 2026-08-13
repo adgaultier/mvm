@@ -93,6 +93,19 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   config parsing was lifted into `registry::image_config_from_bytes`.
   docker-archive (`docker save`, with nested `manifest.json`/`layer.tar`)
   is deliberately not handled yet.
+- **VM-scoped authentication for the Agent API (P0 sub-item)** (2026-08-13) —
+  a second listener (`--agent-addr`/`MVM_AGENT_ADDR`, default
+  `127.0.0.1:24643`) serves `/agent/v1` (`inspect`/`stop`/`delegate`-stub),
+  authenticated per request by `Authorization: Bearer <token>` and resolved
+  to `Principal::Vm(vm_id)` — routes carry no `{id}`, so a VM can only act
+  on itself. 32-byte token minted in `Manager::start`, only its SHA-256 hash
+  (`agent_token_hash`) persisted; plaintext passed to the shim as a process
+  env var (never `shim.json`) and forwarded into the guest over the `MVM_*`
+  channel (readable via `/proc/cmdline`, scrubbed from the workload env by
+  the agent). Constant-time hash compare over the sandbox list. Regenerated
+  on restart, revoked on stop/removal; never accepted on the control plane.
+  Delegate mechanics + in-guest transport/MCP bridge + control-plane human
+  auth remain deferred.
 
 - **Devpts stacking investigation (TODO#5)** (2026-08-10) — the original item
   reported that `tty` fails and `ls /dev/pts` is empty. Neither reproduces:

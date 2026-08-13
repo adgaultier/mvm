@@ -19,7 +19,9 @@ esac
 MVM=${1:-target/release/mvm}
 AGENT=${2:-target/$MUSL_TARGET/release/mvm-agent}
 PORT=24699
+AGENT_PORT=24700
 export MVM_HOST="http://127.0.0.1:$PORT"
+export MVM_AGENT_ADDR="127.0.0.1:$AGENT_PORT"
 export MVM_DATA_DIR=$(mktemp -d /tmp/mvm-itest.XXXXXX)
 export MVM_AGENT_PATH="$PWD/$AGENT"
 export MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
@@ -126,7 +128,7 @@ section() { # section <name>
 }
 
 section "starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
-"$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
+"$MVM" serve --addr "127.0.0.1:$PORT" --agent-addr "127.0.0.1:$AGENT_PORT" >/dev/null 2>&1 &
 DAEMON_PID=$!
 for _ in $(seq 1 50); do
     curl -sf "$MVM_HOST/health" >/dev/null 2>&1 && break
@@ -654,6 +656,48 @@ check "run without --name gets a generated name" "1" \
 for s in clplain clfork clbig clsrc; do "$MVM" rm -f "$s" >/dev/null 2>&1 || true; done
 for s in "$GEN_ID" "$GNCLONE_ID" "$RUN_ID"; do "$MVM" rm -f "$s" >/dev/null 2>&1 || true; done
 check "clones removed" "0" "$("$MVM" ps -a | grep -c clplain || true)"
+
+section "agent API (VM-scoped bearer token)"
+AGENT_HOST="http://127.0.0.1:$AGENT_PORT"
+
+AGENT_SB=$("$MVM" create --name agenttest alpine sleep infinity)
+"$MVM" start agenttest >/dev/null
+for _ in $(seq 1 100); do "$MVM" exec agenttest true >/dev/null 2>&1 && break; sleep 0.2; done
+
+# The token is provisioned to the agent, not the workload: exec sessions must
+# not see it (the agent scrubs MVM_* before spawning anything).
+check "agent token not in exec env" "0" \
+    "$("$MVM" exec agenttest sh -c 'env | grep -c MVM_AGENT_TOKEN' || true)"
+
+# The token rides the guest kernel cmdline (documented exposure); read it to
+# exercise the positive auth path.
+AGENT_TOKEN=$("$MVM" exec agenttest sh -c 'cat /proc/cmdline' \
+    | grep -o 'MVM_AGENT_TOKEN=[^ ]*' | head -n1 | cut -d= -f2- | tr -d '"\r')
+check "agent token provisioned" "1" "$(test "${#AGENT_TOKEN}" -eq 64 && echo 1)"
+
+# The vm id is derived from the token, so the paths carry no {id}.
+check "agent API rejects missing token" "401" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$AGENT_HOST/agent/v1/sandbox")"
+check "agent API rejects bad token" "401" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer deadbeef' "$AGENT_HOST/agent/v1/sandbox")"
+check "agent API inspect self" "1" \
+    "$(curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$AGENT_HOST/agent/v1/sandbox" | grep -c "\"id\":\"$AGENT_SB\"")"
+check "agent API delegate not implemented" "501" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $AGENT_TOKEN" -H 'Content-Type: application/json' -d '{"timeout":1,"command":["true"]}' "$AGENT_HOST/agent/v1/sandbox/delegate")"
+# The agent surface is not reachable through the control-plane listener.
+check "agent API not on control port" "404" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$MVM_HOST/agent/v1/sandbox")"
+
+# The agent can stop its own sandbox...
+check "agent API stop self" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $AGENT_TOKEN" "$AGENT_HOST/agent/v1/sandbox/stop")"
+# ...and once it has actually stopped, the token is revoked. (Stop is async:
+# SIGTERM to the shim, so wait for the sandbox to leave `mvm ps`.)
+for _ in $(seq 1 100); do "$MVM" ps | grep -q agenttest || break; sleep 0.1; done
+check "agent token revoked after stop" "401" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $AGENT_TOKEN" "$AGENT_HOST/agent/v1/sandbox")"
+
+"$MVM" rm -f agenttest >/dev/null 2>&1 || true
 
 echo
 echo "$PASS passed, $SKIP skipped, $FAIL failed"

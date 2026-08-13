@@ -1113,9 +1113,11 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
+ "hex",
  "rand 0.8.7",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "uuid",
 ]

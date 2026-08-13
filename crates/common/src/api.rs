@@ -65,6 +65,19 @@ pub struct CloneRequest {
     pub fork: bool,
 }
 
+/// POST /agent/v1/sandboxes/{id}/delegate — ask the host to launch a child
+/// clone of the calling sandbox, bounded by `timeout`. Not yet implemented:
+/// the route authenticates and authorizes, then reports that delegation is
+/// still in progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegateRequest {
+    /// Seconds the child may run before it is stopped.
+    pub timeout: u64,
+    /// Command for the child sandbox (image/env/etc. inherit from the caller;
+    /// mounts are supplied by the host policy, not the caller).
+    pub command: Vec<String>,
+}
+
 /// Uniform error body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {

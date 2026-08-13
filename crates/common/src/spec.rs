@@ -207,6 +207,16 @@ pub struct Sandbox {
     /// `/console/resize` calls and is None until one arrives.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
+    /// SHA-256 hash of the sandbox's VM-scoped bearer token, if the VM has
+    /// booted. Only the hash is ever stored — the plaintext token exists
+    /// solely inside the guest (provisioned over the `MVM_*` env channel)
+    /// and is scrubbed from the workload environment by the agent. Regenerated
+    /// on every start; revoked when the sandbox is removed.
+    #[serde(default)]
+    pub agent_token_hash: Option<String>,
+    /// When the current token was minted (its start time).
+    #[serde(default)]
+    pub agent_token_created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Sandbox {
@@ -222,6 +232,8 @@ impl Sandbox {
             started_at: None,
             finished_at: None,
             console_size: None,
+            agent_token_hash: None,
+            agent_token_created_at: None,
         }
     }
 

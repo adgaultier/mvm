@@ -37,6 +37,9 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:24642")]
         addr: SocketAddr,
+        /// Address for the VM-authenticated Agent API (`/agent/v1`).
+        #[arg(long, env = "MVM_AGENT_ADDR", default_value = "127.0.0.1:24643")]
+        agent_addr: SocketAddr,
     },
     /// Pull an OCI image.
     Pull { image: String },
@@ -251,12 +254,12 @@ fn main() {
         .init();
 
     let code = match cli.command {
-        Command::Serve { addr } => {
+        Command::Serve { addr, agent_addr } => {
             // Must run before the tokio runtime exists (single-threaded
             // requirement of unshare) — may re-exec and never return.
             #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
-            serve(addr)
+            serve(addr, agent_addr)
         }
         Command::VmShim { config } => vm_shim(&config),
         other => {
@@ -583,7 +586,7 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
     })
 }
 
-fn serve(addr: SocketAddr) -> i32 {
+fn serve(addr: SocketAddr, agent_addr: SocketAddr) -> i32 {
     let data_dir = match DataDir::resolve() {
         Ok(d) => d,
         Err(e) => {
@@ -611,7 +614,7 @@ fn serve(addr: SocketAddr) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = runtime.block_on(mvm_api::serve(addr, manager)) {
+    if let Err(e) = runtime.block_on(mvm_api::serve(addr, agent_addr, manager)) {
         eprintln!("error: server: {e}");
         return 1;
     }

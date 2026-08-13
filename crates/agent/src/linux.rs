@@ -68,6 +68,12 @@ struct Agent {
     /// the console (`AgentRequest::ConsoleResize`) without coupling to the
     /// bridge threads' lifetimes. Closed exactly once when the agent drops.
     console_pty: Option<OwnedFd>,
+    /// VM-scoped bearer token for the host's Agent API (`/agent/v1`). Not
+    /// yet used here (no in-guest HTTP client), but captured and held so the
+    /// MCP bridge can present it when that lands. Scrubbbed from the workload
+    /// environment before it spawns.
+    #[allow(dead_code)]
+    agent_token: Option<String>,
 }
 
 pub fn main() {
@@ -111,6 +117,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     let user_spec = std::env::var("MVM_USER").ok();
 
+    // VM-scoped bearer token for the host's Agent API. Captured before the
+    // scrub: it belongs to the agent, never to the workload.
+    let agent_token = std::env::var("MVM_AGENT_TOKEN").ok();
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_MOUNTS",
@@ -119,6 +129,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_CONSOLE_TTY",
         "MVM_CONSOLE_SIZE",
         "MVM_USER",
+        "MVM_AGENT_TOKEN",
     ] {
         std::env::remove_var(var);
     }
@@ -222,6 +233,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         workload_user: user,
         console_output,
         console_pty,
+        agent_token,
     };
     agent.send(&AgentEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,

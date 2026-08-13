@@ -188,6 +188,13 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         if let Some(user) = &config.user {
             env.push(format!("MVM_USER={user}"));
         }
+        // VM-scoped bearer token for the host's Agent API. It arrives here as
+        // a shim *process* env var (not from shim.json — only the token hash
+        // is ever persisted on the host), then rides the `MVM_*` channel into
+        // the guest; the agent scrubs it before spawning the workload.
+        if let Ok(token) = std::env::var("MVM_AGENT_TOKEN") {
+            env.push(format!("MVM_AGENT_TOKEN={token}"));
+        }
         ctx.set_exec(protocol::GUEST_AGENT_PATH, &argv, &env)?;
     } else {
         let exec = config
