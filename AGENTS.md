@@ -241,17 +241,27 @@ candidate that is dynamically linked or not a Linux ELF at all.
    by design: there is no opt-out. Filter shape is probed in-VM by
    `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
    exec session).
-- **VM token: only the hash touches host disk.** The Agent API token is
+ - **VM token: only the hash touches host disk.** The Agent API token is
   minted in `Manager::start`, stored as `agent_token_hash` (SHA-256) on the
   `Sandbox` record, and passed to the shim as a *process env var*
   (`MVM_AGENT_TOKEN`) — never through `ShimConfig`, so `shim.json` stays
   token-free. The shim forwards it into the guest via the `MVM_*` env
-  channel, which means it *is* readable by the workload from `/proc/cmdline`;
-  the agent still scrubs it from its own env before spawning the workload, so
-  it never appears in `env` or `/proc/1/environ` of the workload. The Agent
-   API routes carry no `{id}` — the sandbox is derived from the token, so a
-   caller can only act on itself. Token lookup uses a constant-time hash
-   compare over the sandbox list (no `HashMap` keyed on the secret).
+  channel, where it is deliberately **not scrubbed**: it must reach the
+  workload's environment so the tools it spawns (the `mvm-agent-mcp` bridge)
+  can authenticate to `/agent/v1`. The Agent API routes carry no `{id}` — the
+  sandbox is derived from the token, so a caller can only act on itself.
+  Token lookup uses a constant-time hash compare over the sandbox list (no
+  `HashMap` keyed on the secret).
+- **macOS rootfs loses image ownership (host uid owns everything).** The copy
+  driver writes the rootfs as the host user and macOS has no userns, so
+  `/home/agent` ends up owned by the host uid and a non-root workload can't
+  write its own home (`PermissionDenied` on opencode's log). The shim sets
+  `MVM_HOST_OS=macos` (host-gated via `#[cfg(target_os = "macos")]`), and the
+  agent — before spawning a non-root workload whose home is owned by someone
+  else — recursively `lchown`s the home to the workload's uid/gid. macOS
+  virtiofs `LinuxComplete` semantics turns that chown into a
+  `user.containers.override_stat` xattr, so it sticks for the boot; it's a
+  no-op on Linux (userns already owns the files, and the uid check skips it).
 - **Mount host paths must be absolute.** libkrun's virtiofs passthrough opens
   the host dir with `openat(AT_FDCWD, …, O_NOFOLLOW)` from the *daemon's* cwd,
   so a relative `-v` source fails with `ENOENT` at device activation — which
@@ -274,9 +284,11 @@ default `127.0.0.1:24643`), `MVM_DATA_DIR` (state root),
 (control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port
 maps).
 
-Daemon → guest agent (set by the shim, scrubbed by the agent before it
-spawns the workload): `MVM_MOUNTS`, `MVM_NET_CONFIG`, `MVM_NET_TSI`,
-`MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`, `MVM_AGENT_TOKEN`.
+Daemon → guest agent (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
+`MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
+`MVM_HOST_OS` — scrubbed by the agent before it spawns the workload — plus
+`MVM_AGENT_TOKEN`, which is deliberately *not* scrubbed so the workload's
+tooling (the `mvm-agent-mcp` bridge) can authenticate to `/agent/v1`.
 
 ## Conventions
 

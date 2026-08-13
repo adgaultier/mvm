@@ -147,6 +147,11 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         let argv: Vec<String> = config.exec.clone();
         // Tell the agent which virtiofs tags to mount where.
         let mut env = config.env.clone();
+        // The agent always runs inside a Linux guest, so it can't know the
+        // host OS on its own; this is how macOS-specific behavior in the
+        // agent (home-ownership repair) is gated. Linux needs no signal.
+        #[cfg(target_os = "macos")]
+        env.push("MVM_HOST_OS=macos".to_string());
         if config.console_tty {
             env.push("MVM_CONSOLE_TTY=1".to_string());
             if let Some((cols, rows)) = config.console_size {
