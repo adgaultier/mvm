@@ -73,7 +73,7 @@ async fn clone_sandbox(
     Path(id): Path<String>,
     Json(req): Json<CloneRequest>,
 ) -> Result<(StatusCode, Json<Sandbox>), ApiError> {
-    let sb = state.manager.clone_sandbox(&id, req.spec, req.fork)?;
+    let sb = state.manager.clone_sandbox(&id, req.spec, req.fork).await?;
     Ok((StatusCode::CREATED, Json(sb)))
 }
 
@@ -89,7 +89,19 @@ async fn start_sandbox(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Sandbox>, ApiError> {
-    Ok(Json(state.manager.start(&id).await?))
+    // Run detached from the request: on large images (e.g. opencode-agent)
+    // the rootfs copy can take seconds, and a client that gives up and drops
+    // the connection must not cancel the boot mid-flight — the sandbox keeps
+    // starting and its lifecycle op still gets recorded.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let manager = state.manager.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(manager.start(&id).await);
+    });
+    let sb = rx
+        .await
+        .map_err(|_| mvm_common::Error::Runtime("start task dropped".into()))??;
+    Ok(Json(sb))
 }
 
 async fn stop_sandbox(

@@ -162,6 +162,29 @@ fn preserve_owner(dst: &Path, src_meta: &std::fs::Metadata) {
     }
 }
 
+/// One-shot CoW clone of a whole directory tree (APFS `clonefile(2)`), when
+/// the filesystem supports it. `dst` must not exist. Returns `Ok(true)` on
+/// success, `Ok(false)` when the fs can't do it (caller falls back to a
+/// per-file copy). Compared with walking the tree and `clonefile`-ing each
+/// file, this turns a multi-second copy of a large image into a single
+/// near-instant clone.
+#[cfg(target_os = "macos")]
+pub(crate) fn clone_dir(src: &Path, dst: &Path) -> Result<bool> {
+    use std::ffi::CString;
+    let (Ok(s), Ok(d)) = (
+        CString::new(src.as_os_str().as_encoded_bytes()),
+        CString::new(dst.as_os_str().as_encoded_bytes()),
+    ) else {
+        return Ok(false);
+    };
+    Ok(unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), 0) } == 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn clone_dir(_src: &Path, _dst: &Path) -> Result<bool> {
+    Ok(false)
+}
+
 pub(crate) fn is_root() -> bool {
     unsafe extern "C" {
         fn geteuid() -> u32;
