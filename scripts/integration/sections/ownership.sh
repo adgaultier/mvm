@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== ownership + persistence =="
 # Reuse exec's `itest` sandbox; create it if this section runs standalone.
 ensure_sandbox itest alpine sleep 60

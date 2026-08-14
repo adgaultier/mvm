@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== run =="
 check "run stdout" "hello-vm" "$("$MVM" run alpine echo hello-vm 2>/dev/null)"
 

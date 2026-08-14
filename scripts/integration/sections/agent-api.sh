@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== agent API (VM-scoped bearer token) =="
 if [ "$AGENT_API" = 1 ]; then
 AGENT_HOST="http://127.0.0.1:$AGENT_PORT"

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== exec =="
 "$MVM" run --name itest alpine sleep 60 >/dev/null 2>&1 &
 RUN_PID=$!

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== lifecycle =="
 # exec's `itest`; create it if this section runs standalone.
 ensure_sandbox itest alpine sleep 60

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== load (OCI image layout archive) =="
 # Build a minimal image with podman, save it as an oci-archive, and load it
 # with `mvm load` — the no-registry path for getting images in. Gated on

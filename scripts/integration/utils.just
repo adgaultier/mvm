@@ -19,7 +19,11 @@ _serve:
     AGENT_PORT=24700
     MVM_HOST="http://127.0.0.1:$PORT"
     MVM_AGENT_ADDR="127.0.0.1:$AGENT_PORT"
-    MVM_DATA_DIR="{{RUNTIME}}/data"
+    # Keep the data dir SHORT: gvproxy binds unix sockets under
+    # <data>/sandboxes/<id>/, and macOS's sockaddr_un.sun_path is limited to
+    # 104 bytes. A repo-relative .runtime/data/... path runs past that and
+    # gvproxy fails with "bind: invalid argument" (EINVAL).
+    MVM_DATA_DIR="/tmp/mvm-itest-$$"
     MVM_AGENT_PATH="$(cd {{justfile_directory()}}/../.. && pwd)/$AGENT"
     MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
     AGENT_API=0

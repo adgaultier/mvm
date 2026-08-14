@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== guest kernel eBPF probe (bpfprobe) =="
 # Informs the Phase 2 plan (in-guest cgroup_skb egress policy): whether the
 # libkrunfw guest kernel can load and attach eBPF programs at all. The probe

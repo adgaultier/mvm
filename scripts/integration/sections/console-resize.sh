@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== console resize =="
 # A -t workload that reports its pty size every second. stdin here is a pipe,
 # so the client sends no resize itself (non-tty consoles don't poll); only the

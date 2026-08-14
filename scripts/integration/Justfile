@@ -1,9 +1,9 @@
 # mvm integration suite — run against real microVMs.
 #
-# One recipe per section; each runs a plain bash script (sections/exec.sh, ...),
-# boots a fresh daemon via `_serve`, and tears it down via `cleanup` (both from
-# utils.just). Every section is self-contained: `just exec` and `just all`
-# behave identically per section.
+# One recipe per section; each runs a plain bash script (sections/exec.sh, ...)
+# inside a bash block that boots a fresh daemon via the `_serve` dependency
+# (utils.just) and tears it down via `trap cleanup EXIT` — so a failing section
+# still cleans up. Every section is self-contained.
 #
 #   just              # list sections (default recipe -> @just --list)
 #   just exec         # run one section (boots a fresh daemon, cleans up after)
@@ -17,16 +17,20 @@ set positional-arguments
 default:
     @just --list
 
-# Run every section, each self-contained (serve -> script -> cleanup).
-all:
+# Run every section against ONE shared daemon: `_serve` boots it once, the
+# loop sources each section script in this shell, and `trap cleanup EXIT`
+# tears it down at the end. Individual section recipes below boot their own
+# daemon for standalone `just <name>` runs.
+all: _serve
     #!/usr/bin/env bash
     set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
     rc=0
     for sh in {{justfile_directory()}}/sections/*.sh; do
-        name=$(basename "$sh" .sh)
         echo ""
-        if ! just --justfile {{justfile_directory()}}/Justfile "$name"; then
-            echo "❌ section $name failed"
+        if ! source "$sh"; then
+            echo "❌ section $(basename "$sh" .sh) failed"
             rc=1
         fi
     done
@@ -35,65 +39,113 @@ all:
 # --- sections (each boots the daemon via `_serve`, tears it down after) ------
 
 pull: _serve
-    @{{justfile_directory()}}/sections/pull.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/pull.sh
 
 load: _serve
-    @{{justfile_directory()}}/sections/load.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/load.sh
 
 run: _serve
-    @{{justfile_directory()}}/sections/run.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/run.sh
 
 console-resize: _serve
-    @{{justfile_directory()}}/sections/console-resize.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/console-resize.sh
 
 exec: _serve
-    @{{justfile_directory()}}/sections/exec.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/exec.sh
 
 networking: _serve
-    @{{justfile_directory()}}/sections/networking.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/networking.sh
 
 raw-seccomp: _serve
-    @{{justfile_directory()}}/sections/raw-seccomp.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/raw-seccomp.sh
 
 bpfprobe: _serve
-    @{{justfile_directory()}}/sections/bpfprobe.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/bpfprobe.sh
 
 volumes: _serve
-    @{{justfile_directory()}}/sections/volumes.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/volumes.sh
 
 ownership: _serve
-    @{{justfile_directory()}}/sections/ownership.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/ownership.sh
 
 lifecycle: _serve
-    @{{justfile_directory()}}/sections/lifecycle.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/lifecycle.sh
 
 logs: _serve
-    @{{justfile_directory()}}/sections/logs.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/logs.sh
 
 attach: _serve
-    @{{justfile_directory()}}/sections/attach.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/attach.sh
 
 resize: _serve
-    @{{justfile_directory()}}/sections/resize.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/resize.sh
 
 clone: _serve
-    @{{justfile_directory()}}/sections/clone.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/clone.sh
 
 agent-api: _serve
-    @{{justfile_directory()}}/sections/agent-api.sh
-    @just _cleanup
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/agent-api.sh

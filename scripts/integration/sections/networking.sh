@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== networking =="
 # --net none must be truly isolated: libkrun defaults to TSI (transparent
 # host networking) without a NIC, which mvm now disables with a dead NIC.

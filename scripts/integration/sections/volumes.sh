@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== volumes =="
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"

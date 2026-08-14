@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== raw socket ban (seccomp) =="
 # The agent installs a seccomp filter that forbids raw packet/IP sockets for
 # the whole guest. Probed twice inside one VM: as the workload (a child of the

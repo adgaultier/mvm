@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== resize (cpu/memory) =="
 "$MVM" run --name rsz alpine sleep 180 >/dev/null 2>&1 &
 RSZ_PID=$!

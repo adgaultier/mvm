@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== attach =="
 # -i/-t are create-time properties, so a sandbox created with them stays
 # attachable after a plain (detached) start — by name as well as by id.

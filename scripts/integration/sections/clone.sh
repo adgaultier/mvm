@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== clone =="
 # A sandbox that writes a marker to its rootfs and then exits, so its disk
 # holds state to fork. `run` leaves the sandbox behind in `exited`.

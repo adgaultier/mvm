@@ -42,7 +42,9 @@ skip() { # skip <reason>
 cleanup() {
     for p in $(port_pids); do kill -9 "$p" 2>/dev/null || true; done
     sleep 0.5
-    rm -rf "$RUNTIME"
+    # The data dir lives in /tmp (kept short for macOS sun_path limits), so
+    # remove it alongside the repo-local runtime state.
+    rm -rf "${MVM_DATA_DIR:-}" "$RUNTIME"
 }
 
 # Ensure a named sandbox exists and its guest agent is reachable. Used by

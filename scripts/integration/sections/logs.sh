@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib.sh"
 echo "== logs =="
 "$MVM" run --name logtest alpine sh -c 'echo l1; echo l2' >/dev/null 2>&1
 check "logs" "l1 l2" "$("$MVM" logs logtest | tr '\n' ' ' | sed 's/ $//')"
