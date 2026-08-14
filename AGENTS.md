@@ -237,10 +237,24 @@ candidate that is dynamically linked or not a Linux ELF at all.
   syscall number would otherwise be interpreted against the wrong table).
    This breaks `tcpdump`, `arping`, old `ping`, and AF_PACKET DHCP clients
    (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
-   DHCP — it needs the gvproxy-style static-IP bootstrap instead. Always-on
+   DHCP — it needs the gvproxy-style static-IP bootstrap instead.    Always-on
    by design: there is no opt-out. Filter shape is probed in-VM by
    `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
    exec session).
+- **`--security=strict` is a workload-scoped *second* seccomp filter.** The
+  raw-socket ban above is installed on the agent (PID 1) at boot and inherited
+  by everything. The strict filter is different: it is installed in the
+  workload's `pre_exec` (`apply_strict_seccomp` in `linux.rs`, *before*
+  `apply_user`'s privilege drop), so only the workload — and exec sessions —
+  lose `bpf`/`keyctl`/`perf_event_open`/`userfaultfd`/`io_uring_*`, while the
+  agent keeps the full syscall surface it needs for exec/pty plumbing. The
+  var rides the `MVM_*` channel as `MVM_SECURITY_STRICT` and is scrubbed like
+  the other plumbing vars. This matters for the Aya plan: the agent can still
+  load eBPF programs itself (Phase 2) even in strict mode — the workload just
+  can't. Plumbed: `--security` on `create`/`run`/`clone` → `SandboxSpec` →
+  `ShimConfig` → shim env → agent. Probe the guest kernel's BPF capability
+  with `scripts/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict) before
+  assuming any in-guest eBPF enforcement is possible.
  - **VM token: never persisted, never exposed — not even its hash.** The Agent
   API token is minted in `Manager::start` and held as `agent_token_hash`
   (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so

@@ -371,6 +371,7 @@ impl Manager {
             console_size: spec.tty_size,
             user,
             krun_log: Some(sb_dir.join("krun.log")),
+            security: spec.security,
         };
 
         // 6. Register gvproxy port forwards before booting the guest.

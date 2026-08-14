@@ -45,6 +45,28 @@ const SYS_SOCKET: u32 = 41;
 #[cfg(target_arch = "aarch64")]
 const SYS_SOCKET: u32 = 198;
 
+// High-risk syscalls denied in strict mode (arch-specific numbers).
+#[cfg(target_arch = "x86_64")]
+const SYS_BPF: u32 = 321;
+#[cfg(target_arch = "aarch64")]
+const SYS_BPF: u32 = 280;
+#[cfg(target_arch = "x86_64")]
+const SYS_KEYCTL: u32 = 250;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEYCTL: u32 = 219;
+#[cfg(target_arch = "x86_64")]
+const SYS_PERF_EVENT_OPEN: u32 = 298;
+#[cfg(target_arch = "aarch64")]
+const SYS_PERF_EVENT_OPEN: u32 = 241;
+#[cfg(target_arch = "x86_64")]
+const SYS_USERFAULTFD: u32 = 323;
+#[cfg(target_arch = "aarch64")]
+const SYS_USERFAULTFD: u32 = 282;
+// io_uring numbers are the same on both arches.
+const SYS_IO_URING_SETUP: u32 = 425;
+const SYS_IO_URING_ENTER: u32 = 426;
+const SYS_IO_URING_REGISTER: u32 = 427;
+
 // Offsets into struct seccomp_data.
 const OFF_SYSCALL: u32 = 0;
 const OFF_ARCH: u32 = 4;
@@ -178,10 +200,10 @@ fn build() -> Vec<libc::sock_filter> {
     f.insns
 }
 
-/// Install the raw-socket ban. Failure is fatal: a guest that cannot be
-/// sandboxed will not be trusted to run.
-pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
-    let prog = build();
+/// Install a seccomp filter on the calling process. The filter applies to
+/// every process spawned from here on; it can never be removed or weakened
+/// by a child.
+fn install(prog: Vec<libc::sock_filter>) -> Result<(), std::io::Error> {
     let mut fprog = libc::sock_fprog {
         len: prog.len() as u16,
         filter: prog.as_ptr().cast_mut(),
@@ -197,4 +219,175 @@ pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Install the raw-socket ban. Failure is fatal: a guest that cannot be
+/// sandboxed will not be trusted to run.
+pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
+    install(build())
+}
+
+/// Build the strict-mode filter: deny a fixed set of high-risk syscalls
+/// (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring_*`) while
+/// letting everything else pass. Returns `EPERM` for the denied set (the
+/// same action as the raw-socket ban: a denied call is an error, not a
+/// silent pass), and kills on an unexpected arch like the raw-socket filter.
+///
+/// Unlike the always-on raw-socket filter, this one is *workload-scoped*:
+/// the agent installs it in the workload's `pre_exec` (see
+/// `apply_strict_seccomp` in linux.rs), so the agent itself keeps the full
+/// syscall surface it needs for exec/pty plumbing while the workload and
+/// everything it spawns lose the high-risk kernel interfaces.
+fn build_strict() -> Vec<libc::sock_filter> {
+    let mut f = Filter {
+        insns: Vec::new(),
+        pending: Vec::new(),
+    };
+
+    // 0: load arch
+    f.ld_abs(OFF_ARCH);
+    // 1: not the expected arch → kill
+    f.jeq(AUDIT_ARCH, None, Some(Label::Kill));
+    // 2: load syscall number
+    f.ld_abs(OFF_SYSCALL);
+    // 3..: denied syscalls → deny, else fall through to allow
+    for sys in [
+        SYS_BPF,
+        SYS_KEYCTL,
+        SYS_PERF_EVENT_OPEN,
+        SYS_USERFAULTFD,
+        SYS_IO_URING_SETUP,
+        SYS_IO_URING_ENTER,
+        SYS_IO_URING_REGISTER,
+    ] {
+        f.jeq(sys, Some(Label::Deny), None);
+    }
+    // terminals
+    let allow = f.ret(SECCOMP_RET_ALLOW);
+    let deny = f.ret(SECCOMP_RET_ERRNO | EPERM);
+    let kill = f.ret(SECCOMP_RET_KILL_PROCESS);
+
+    for (idx, is_jt, label) in &f.pending {
+        let target = match *label {
+            Label::Allow => allow,
+            Label::Deny => deny,
+            Label::TypeCheck => unreachable!("strict filter has no type check"),
+            Label::Kill => kill,
+        };
+        let off = target as i64 - *idx as i64 - 1;
+        assert!(
+            (0..=u8::MAX as i64).contains(&off),
+            "seccomp jump out of range"
+        );
+        let off = off as u8;
+        if *is_jt {
+            f.insns[*idx].jt = off;
+        } else {
+            f.insns[*idx].jf = off;
+        }
+    }
+
+    f.insns
+}
+
+/// Install the strict-mode filter on the calling process. Used from the
+/// workload's `pre_exec` hook, so it is inherited by the workload and every
+/// process it spawns.
+pub fn install_strict_filter() -> Result<(), std::io::Error> {
+    install(build_strict())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal classic-BPF interpreter over a fake `seccomp_data`. Runs the
+    /// generated program against (arch, syscall, arg0, arg1) and returns the
+    /// SECCOMP_RET_* action (or the raw result for ERRNO). This exercises the
+    /// exact instruction stream the kernel would execute, so the deny/allow
+    /// mapping is verified without needing an actual seccomp install.
+    fn run(prog: &[libc::sock_filter], arch: u32, syscall: u32, arg0: u32, arg1: u32) -> u32 {
+        let mut pc = 0usize;
+        let mut acc = 0u32;
+        loop {
+            let insn = &prog[pc];
+            match insn.code {
+                BPF_LD_W_ABS => {
+                    acc = match insn.k {
+                        OFF_ARCH => arch,
+                        OFF_SYSCALL => syscall,
+                        OFF_ARG0 => arg0,
+                        OFF_ARG1 => arg1,
+                        _ => panic!("unknown abs offset {}", insn.k),
+                    };
+                    pc += 1;
+                }
+                BPF_JMP_JEQ_K => {
+                    let take = acc == insn.k;
+                    let off = if take { insn.jt } else { insn.jf };
+                    pc = if off > 0 { pc + 1 + off as usize } else { pc + 1 };
+                }
+                BPF_ALU_AND_K => {
+                    acc &= insn.k;
+                    pc += 1;
+                }
+                BPF_RET_K => return insn.k,
+                other => panic!("unexpected opcode {other:#x}"),
+            }
+        }
+    }
+
+    fn assert_action(prog: &[libc::sock_filter], syscall: u32, want: u32) {
+        let got = run(prog, AUDIT_ARCH, syscall, 0, 0);
+        assert_eq!(got, want, "syscall {syscall}");
+    }
+
+    #[test]
+    fn strict_denies_high_risk_syscalls_and_allows_others() {
+        let prog = build_strict();
+        let deny = SECCOMP_RET_ERRNO | EPERM;
+        for sys in [
+            SYS_BPF,
+            SYS_KEYCTL,
+            SYS_PERF_EVENT_OPEN,
+            SYS_USERFAULTFD,
+            SYS_IO_URING_SETUP,
+            SYS_IO_URING_ENTER,
+            SYS_IO_URING_REGISTER,
+        ] {
+            assert_action(&prog, sys, deny);
+        }
+        // Ordinary syscalls pass untouched (read/write/execve/socket...).
+        for sys in [0, 1, 41, 59, 198, 257] {
+            assert_action(&prog, sys, SECCOMP_RET_ALLOW);
+        }
+    }
+
+    #[test]
+    fn strict_kills_unexpected_arch() {
+        let prog = build_strict();
+        let got = run(&prog, 0xdead_beef, SYS_BPF, 0, 0);
+        assert_eq!(got, SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn raw_socket_filter_still_denies_packet_raw() {
+        let prog = build();
+        // AF_PACKET (17) + SOCK_RAW (3) → deny.
+        let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, AF_PACKET, SOCK_RAW);
+        assert_eq!(got, SECCOMP_RET_ERRNO | EPERM);
+        // AF_INET + SOCK_RAW → deny.
+        let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, AF_INET, SOCK_RAW);
+        assert_eq!(got, SECCOMP_RET_ERRNO | EPERM);
+        // AF_INET + SOCK_DGRAM (2) → allow.
+        let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, AF_INET, 2);
+        assert_eq!(got, SECCOMP_RET_ALLOW);
+        // netlink (16) with a raw *type* (SOCK_RAW | CLOEXEC) → allow (the
+        // filter keys on the domain first; agent network bootstrap uses it).
+        let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, 16, SOCK_RAW | 0x8000);
+        assert_eq!(got, SECCOMP_RET_ALLOW);
+        // A non-socket syscall → allow.
+        let got = run(&prog, AUDIT_ARCH, 59, 0, 0);
+        assert_eq!(got, SECCOMP_RET_ALLOW);
+    }
 }

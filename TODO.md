@@ -93,6 +93,20 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
 
 ## Done
 
+- **`--security=strict` guest syscall hardening** (2026-08-14) — `mvm
+  create/run/clone --security=strict` plumbs `SandboxSpec.security` →
+  `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the agent installs a
+  workload-scoped second seccomp filter (`build_strict` in
+  `crates/agent/src/seccomp.rs`, applied via `apply_strict_seccomp` in the
+  workload's `pre_exec` *before* the privilege drop, and in exec sessions)
+  denying `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, and the
+  `io_uring_*` trio with `EPERM`. The agent keeps the full syscall surface
+  (needed for exec/pty — and, later, for the agent itself loading eBPF in
+  Phase 2). `scripts/probes/bpfprobe.c` (wired into `integration.sh`) probes
+  the libkrunfw guest kernel's BTF/cgroup2/prog-load+attach capabilities;
+  `progl=0`+`attach=0` is the gate for the planned in-guest cgroup_skb/egress
+  policy. This is the P2 syscall-hardening baseline from `security/TODO.SEC.md`.
+
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
   records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
   `total_ms`, ordered `phases`) using monotonic `Instant`s, stored bounded

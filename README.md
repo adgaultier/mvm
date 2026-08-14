@@ -147,6 +147,7 @@ refused; without `--name` the daemon generates one.
 | `-w DIR` | working directory in the guest |
 | `-u USER` | run the workload as this user (`name/uid[:group/gid]`), overriding the image's `USER`; resolved against the *guest's* `/etc/passwd` |
 | `-i` / `-t` | keep the console's stdin open / give the workload its own guest pty |
+| `--security PROFILE` | `default` \| `strict` — strict installs an extra guest-side seccomp filter in the workload's spawn path denying high-risk syscalls (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring`); for hostile/untrusted workloads |
 | `--rm` | (`run` only) remove the sandbox when the workload exits |
 
 `-i` and `-t` are **properties of the sandbox, fixed at create time** (as in

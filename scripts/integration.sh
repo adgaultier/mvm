@@ -133,6 +133,27 @@ section() { # section <name>
     echo
 }
 
+# Build a static Linux probe binary for the guest. The probe runs *inside*
+# the VM (a Linux guest with no compiler), so the binary must be a static
+# Linux ELF. On a Linux host plain `cc -static` works; anywhere else (macOS)
+# we cross-compile with zig, which the agent cross-build already requires.
+# Prints nothing; returns 0 on success.
+build_probe() { # build_probe <src.c> <outdir> <name>
+    local src=$1 outdir=$2 name=$3 zt
+    case "$MUSL_TARGET" in
+        aarch64-unknown-linux-musl) zt=aarch64-linux-musl ;;
+        x86_64-unknown-linux-musl)  zt=x86_64-linux-musl ;;
+        *) return 1 ;;
+    esac
+    if [ "$(uname -s)" = Linux ] && command -v cc >/dev/null 2>&1; then
+        cc -static -O2 -o "$outdir/$name" "$src" 2>/dev/null
+    elif command -v zig >/dev/null 2>&1; then
+        zig cc -static -O2 -target "$zt" -o "$outdir/$name" "$src" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
 section "starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
 if [ "$AGENT_API" = 1 ]; then
     "$MVM" serve --addr "127.0.0.1:$PORT" --agent-addr "127.0.0.1:$AGENT_PORT" >/dev/null 2>&1 &
@@ -147,7 +168,7 @@ done
 check "daemon health" "ok" "$(curl -sf "$MVM_HOST/health")"
 
 section "pull"
-"$MVM" pull alpine >/dev/null
+"$MVM" pull alpine >/dev/null 2>&1
 check "image listed" "1" "$("$MVM" images | grep -c alpine)"
 check "re-pull up to date" "1" "$("$MVM" pull alpine | grep -c 'up to date')"
 
@@ -168,13 +189,13 @@ EOF
         # mvm keeps its own copy in the store; don't leave a podman image.
         podman rmi mvm-itest-load:latest >/dev/null 2>&1 || true
 
-        "$MVM" load --name itest-load:latest "$BUILD_DIR/load.tar" >/dev/null
+        "$MVM" load --name itest-load:latest "$BUILD_DIR/load.tar" >/dev/null 2>&1
         check "load lists the image" "1" "$("$MVM" images | grep -c itest-load)"
         # The marker proves the archive actually unpacked and the image boots.
         # --rm: don't leave the sandbox behind (run keeps by default), or the
         # later `ps -a | grep itest` lifecycle checks would match its image.
         check "loaded image runs" "load-marker" \
-            "$("$MVM" run --rm itest-load:latest cat /mvm-load.txt | tr -d '\r')"
+            "$("$MVM" run --rm itest-load:latest cat /mvm-load.txt 2>/dev/null | tr -d '\r')"
     else
         skip "podman build/save (podman machine down or no network)"
     fi
@@ -184,7 +205,7 @@ else
 fi
 
 section "run"
-check "run stdout" "hello-vm" "$("$MVM" run alpine echo hello-vm)"
+check "run stdout" "hello-vm" "$("$MVM" run alpine echo hello-vm 2>/dev/null)"
 
 set +e
 "$MVM" run alpine sh -c 'exit 7' >/dev/null 2>&1
@@ -202,7 +223,7 @@ check "run -i stdin" "found" \
 # port emulation) that does not result in a pty device for the guest's fd 0.
 if [ "$(uname -s)" = Linux ]; then
     check "run console is a tty" "CONSOLE-TTY" \
-        "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' | tr -d '\r')"
+        "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' 2>/dev/null | tr -d '\r')"
 else
     skip "guest console is not a tty on macOS (libkrun hv backend)"
 fi
@@ -278,7 +299,7 @@ check "resize on a stopped sandbox is refused, daemon unharmed" "1" \
 "$MVM" rm -f csrz >/dev/null 2>&1 || true
 
 section "exec"
-"$MVM" run --name itest alpine sleep 60 >/dev/null &
+"$MVM" run --name itest alpine sleep 60 >/dev/null 2>&1 &
 RUN_PID=$!
 # Wait for the guest agent to come up ("running" state precedes the
 # agent's vsock connection by a moment).
@@ -337,7 +358,7 @@ check "none profile is isolated" "isolated" "$([ "$NONE_RC" -ne 0 ] && echo isol
 # zero host setup.
 check "tsi outbound + dns" "TSI-OK" \
     "$("$MVM" run --net tsi alpine sh -c \
-        'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo TSI-OK')"
+        'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo TSI-OK' 2>/dev/null)"
 
 if command -v gvproxy >/dev/null 2>&1; then
     # `gvproxy:<socket>` attaches to a gvproxy the caller runs. Its vfkit
@@ -354,7 +375,7 @@ if command -v gvproxy >/dev/null 2>&1; then
 
     check "gvproxy outbound + dns (external socket)" "NET-OK" \
         "$("$MVM" run --net "gvproxy:$GVSOCK" alpine sh -c \
-            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
+            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK' 2>/dev/null)"
     kill "$GVPID" 2>/dev/null || true
     GVPID=
 
@@ -363,10 +384,10 @@ if command -v gvproxy >/dev/null 2>&1; then
     # served the first VM, silently leaving later ones with no route at all.
     check "gvproxy managed outbound" "NET-OK" \
         "$("$MVM" run --net gvproxy alpine sh -c \
-            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
+            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK' 2>/dev/null)"
     check "gvproxy managed outbound (later sandbox)" "NET-OK" \
         "$("$MVM" run --net gvproxy alpine sh -c \
-            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK')"
+            'timeout 15 wget -q -O /dev/null http://detectportal.firefox.com/success.txt && echo NET-OK' 2>/dev/null)"
 
     # Port forwarding: a guest TCP listener reachable from the host.
     "$MVM" run --name web --net gvproxy -p 18080:8000 alpine \
@@ -393,56 +414,100 @@ section "raw socket ban (seccomp)"
 # The agent installs a seccomp filter that forbids raw packet/IP sockets for
 # the whole guest. Probed twice inside one VM: as the workload (a child of the
 # agent) and via an exec session, so inheritance through both spawn paths is
-# covered. Compiling the static probe needs a Linux host with `cc -static`.
-if [ "$(uname -s)" = Linux ] && command -v cc >/dev/null 2>&1; then
-    PROBE_DIR=$(mktemp -d /tmp/mvm-itest-probe.XXXXXX)
-    if cc -static -O2 -o "$PROBE_DIR/rawprobe" scripts/probes/rawprobe.c 2>/dev/null; then
-        # Workload probe results go to the mounted volume; sleep keeps the
-        # sandbox alive long enough for the exec-session probe below.
-        "$MVM" run --name rawprobe -v "$PROBE_DIR:/probe" alpine \
-            sh -c '/probe/rawprobe > /probe/workload.out; sleep 300' \
-            >/dev/null 2>&1 &
-        PROBE_RUN_PID=$!
-        for _ in $(seq 1 100); do
-            "$MVM" exec rawprobe true >/dev/null 2>&1 && break
-            sleep 0.2
-        done
-        for _ in $(seq 1 50); do
-            [ -s "$PROBE_DIR/workload.out" ] && break
-            sleep 0.2
-        done
-        WORKLOAD_OUT=$(cat "$PROBE_DIR/workload.out" 2>/dev/null || true)
-        EXEC_OUT=$("$MVM" exec rawprobe /probe/rawprobe 2>/dev/null || true)
-        for spec in "packet_raw:1:AF_PACKET raw denied" \
-                    "inet_raw:1:AF_INET raw denied" \
-                    "inet6_raw:1:AF_INET6 raw denied" \
-                    "inet_raw_nonblock:1:AF_INET raw+nonblock denied" \
-                    "inet_raw_cloexec:1:AF_INET raw+cloexec denied" \
-                    "inet_dgram:0:AF_INET datagram allowed" \
-                    "netlink_dgram:0:AF_NETLINK datagram allowed"; do
-            KEY=${spec%%:*}
-            EXPECTED=$(printf '%s' "$spec" | cut -d: -f2)
-            NAME=$(printf '%s' "$spec" | cut -d: -f3-)
-            check "rawprobe(w) $NAME" "$EXPECTED" \
-                "$(printf '%s' "$WORKLOAD_OUT" | grep -o "$KEY=[0-9]*" | cut -d= -f2 | head -1)"
-            check "rawprobe(e) $NAME" "$EXPECTED" \
-                "$(printf '%s' "$EXEC_OUT" | grep -o "$KEY=[0-9]*" | cut -d= -f2 | head -1)"
-        done
-        "$MVM" stop rawprobe >/dev/null 2>&1 || true
-        wait "$PROBE_RUN_PID" 2>/dev/null || true
-        "$MVM" rm rawprobe >/dev/null 2>&1 || true
-    else
-        skip "raw socket ban (no static cc)"
-    fi
-    rm -rf "$PROBE_DIR"
+# covered. The static probe is built with `build_probe` (cc -static on Linux,
+# zig cross-compile elsewhere — see the helper above).
+PROBE_DIR=$(mktemp -d /tmp/mvm-itest-probe.XXXXXX)
+if build_probe scripts/probes/rawprobe.c "$PROBE_DIR" rawprobe; then
+    # Workload probe results go to the mounted volume; sleep keeps the
+    # sandbox alive long enough for the exec-session probe below.
+    "$MVM" run --name rawprobe -v "$PROBE_DIR:/probe" alpine \
+        sh -c '/probe/rawprobe > /probe/workload.out; sleep 300' \
+        >/dev/null 2>&1 &
+    PROBE_RUN_PID=$!
+    for _ in $(seq 1 100); do
+        "$MVM" exec rawprobe true >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    for _ in $(seq 1 50); do
+        [ -s "$PROBE_DIR/workload.out" ] && break
+        sleep 0.2
+    done
+    WORKLOAD_OUT=$(cat "$PROBE_DIR/workload.out" 2>/dev/null || true)
+    EXEC_OUT=$("$MVM" exec rawprobe /probe/rawprobe 2>/dev/null || true)
+    for spec in "packet_raw:1:AF_PACKET raw denied" \
+                "inet_raw:1:AF_INET raw denied" \
+                "inet6_raw:1:AF_INET6 raw denied" \
+                "inet_raw_nonblock:1:AF_INET raw+nonblock denied" \
+                "inet_raw_cloexec:1:AF_INET raw+cloexec denied" \
+                "inet_dgram:0:AF_INET datagram allowed" \
+                "netlink_dgram:0:AF_NETLINK datagram allowed"; do
+        KEY=${spec%%:*}
+        EXPECTED=$(printf '%s' "$spec" | cut -d: -f2)
+        NAME=$(printf '%s' "$spec" | cut -d: -f3-)
+        check "rawprobe(w) $NAME" "$EXPECTED" \
+            "$(printf '%s' "$WORKLOAD_OUT" | grep -o "$KEY=[0-9]*" | cut -d= -f2 | head -1)"
+        check "rawprobe(e) $NAME" "$EXPECTED" \
+            "$(printf '%s' "$EXEC_OUT" | grep -o "$KEY=[0-9]*" | cut -d= -f2 | head -1)"
+    done
+    "$MVM" stop rawprobe >/dev/null 2>&1 || true
+    wait "$PROBE_RUN_PID" 2>/dev/null || true
+    "$MVM" rm rawprobe >/dev/null 2>&1 || true
 else
-    skip "raw socket ban (Linux + cc required)"
+    skip "raw socket ban (no static cc or zig)"
 fi
+rm -rf "$PROBE_DIR"
+
+section "guest kernel eBPF probe (bpfprobe)"
+# Informs the Phase 2 plan (in-guest cgroup_skb egress policy): whether the
+# libkrunfw guest kernel can load and attach eBPF programs at all. The probe
+# runs as guest root (the threat model's hostile-root assumption), so bpf()
+# and the cgroup2/bpffs mounts it attempts are exactly what the trusted
+# agent-init would do. Not a hard pass/fail on any value — it records the
+# kernel's capabilities — but it must *run* and produce the full key set.
+PROBE_DIR=$(mktemp -d /tmp/mvm-itest-bpf.XXXXXX)
+if build_probe scripts/probes/bpfprobe.c "$PROBE_DIR" bpfprobe; then
+    "$MVM" run --name bpfprobe -v "$PROBE_DIR:/probe" alpine \
+            sh -c '/probe/bpfprobe > /probe/out; sleep 300' \
+            >/dev/null 2>&1 &
+    PROBE_RUN_PID=$!
+    for _ in $(seq 1 100); do
+        "$MVM" exec bpfprobe true >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    for _ in $(seq 1 50); do
+        [ -s "$PROBE_DIR/out" ] && break
+        sleep 0.2
+    done
+    BPF_OUT=$(cat "$PROBE_DIR/out" 2>/dev/null || true)
+    # Every key must be present; the values are informational (they
+    # depend on the pinned libkrunfw kernel, not on mvm). The greps are
+    # guarded: a missing key (or an empty probe output) must yield an
+    # empty value, not a non-zero pipeline that set -e turns into an exit.
+    for key in btf configgz jit cgroup2 bpffs progl attach; do
+        VAL=$(printf '%s' "$BPF_OUT" | grep -o "$key=[0-9a-z]*" | cut -d= -f2 | head -1 || true)
+        check "bpfprobe $key reported" "yes" "$([ -n "$VAL" ] && echo yes || echo no)"
+    done
+    # Surface the verdict for humans reviewing the log.
+    printf '%s\n' "$BPF_OUT" | sed 's/^/  bpfprobe: /' || true
+    PROG_L=$(printf '%s' "$BPF_OUT" | grep -o 'progl=[0-9]*' | cut -d= -f2 | head -1 || true)
+    ATTACH_L=$(printf '%s' "$BPF_OUT" | grep -o 'attach=[0-9]*' | cut -d= -f2 | head -1 || true)
+    if [ "$PROG_L" = 0 ] && [ "$ATTACH_L" = 0 ]; then
+        echo "  ✅ bpfprobe: cgroup_skb load+attach works — Phase 2 (in-guest egress policy) is viable"
+    else
+        echo "  ℹ️ bpfprobe: cgroup_skb load+attach unavailable — Phase 2 stays behind the strict-mode probe gate"
+    fi
+    "$MVM" stop bpfprobe >/dev/null 2>&1 || true
+    wait "$PROBE_RUN_PID" 2>/dev/null || true
+    "$MVM" rm bpfprobe >/dev/null 2>&1 || true
+else
+    skip "bpfprobe (no static cc or zig)"
+fi
+rm -rf "$PROBE_DIR"
 
 section "volumes"
 VOLDIR=$(mktemp -d /tmp/mvm-itest-vol.XXXXXX)
 echo vol-data > "$VOLDIR/f.txt"
-check "volume mount" "vol-data" "$("$MVM" run alpine -v "$VOLDIR:/data" cat /data/f.txt)"
+check "volume mount" "vol-data" "$("$MVM" run alpine -v "$VOLDIR:/data" cat /data/f.txt 2>/dev/null)"
 rm -rf "$VOLDIR"
 
 section "ownership + persistence"
@@ -452,17 +517,17 @@ section "ownership + persistence"
 if [ "$(uname -s)" = Linux ]; then
     check "guest chown" "daemon" "$("$MVM" exec itest sh -c 'chown daemon:daemon /tmp && stat -c %U /tmp')"
     check "root-owned files" "0" "$("$MVM" exec itest stat -c %u /bin/busybox)"
-    "$MVM" exec itest touch /persist-marker >/dev/null
+    "$MVM" exec itest touch /persist-marker >/dev/null 2>&1
 else
     skip "chown/ownership checks (copy driver on macOS)"
 fi
 
 section "lifecycle"
-"$MVM" stop itest >/dev/null
+"$MVM" stop itest >/dev/null 2>&1
 wait "$RUN_PID" 2>/dev/null || true
 check "stopped state" "1" "$("$MVM" ps -a | grep itest | grep -c stopped)"
 
-"$MVM" start itest >/dev/null
+"$MVM" start itest >/dev/null 2>&1
 for _ in $(seq 1 100); do
     "$MVM" exec itest true >/dev/null 2>&1 && break
     sleep 0.2
@@ -473,18 +538,18 @@ if [ "$(uname -s)" = Linux ]; then
     check "rootfs persists across restart" "0" "$?"
     set -e
 fi
-"$MVM" stop itest >/dev/null
+"$MVM" stop itest >/dev/null 2>&1
 
-"$MVM" rm itest >/dev/null
+"$MVM" rm itest >/dev/null 2>&1
 check "removed" "0" "$("$MVM" ps -a | grep -c itest || true)"
 
 section "logs"
-"$MVM" run --name logtest alpine sh -c 'echo l1; echo l2' >/dev/null
+"$MVM" run --name logtest alpine sh -c 'echo l1; echo l2' >/dev/null 2>&1
 check "logs" "l1 l2" "$("$MVM" logs logtest | tr '\n' ' ' | sed 's/ $//')"
 # Follow mode must terminate promptly on an exited sandbox, not hang.
 check "logs -f terminates" "l1 l2" \
     "$(timeout 10 "$MVM" logs -f logtest | tr '\n' ' ' | sed 's/ $//')"
-"$MVM" rm logtest >/dev/null
+"$MVM" rm logtest >/dev/null 2>&1
 
 # Terminal *queries* must not reach a reader that never answers them: the
 # reply lands in the reader's own input buffer instead. The recording drops
@@ -494,8 +559,8 @@ check "logs -f terminates" "l1 l2" \
 # the live path rather than the replayed backlog.
 QF_FILTERED=$(mktemp /tmp/mvm-itest-qf.XXXXXX)
 QF_RAW=$(mktemp /tmp/mvm-itest-qr.XXXXXX)
-"$MVM" create --name qfilter alpine sh -c 'sleep 4; printf "Q\033[6nZ\n"' >/dev/null
-"$MVM" start qfilter >/dev/null
+"$MVM" create --name qfilter alpine sh -c 'sleep 4; printf "Q\033[6nZ\n"' >/dev/null 2>&1
+"$MVM" start qfilter >/dev/null 2>&1
 timeout 30 "$MVM" logs -f qfilter > "$QF_FILTERED" 2>/dev/null &
 QF_PID=$!
 curl -sN "$MVM_HOST/api/v1/sandboxes/qfilter/logs?follow=true&raw=true" > "$QF_RAW" 2>/dev/null &
@@ -507,14 +572,14 @@ check "logs -f strips queries from the live tail" "QZ" \
 check "raw stream keeps queries byte-exact" "1" \
     "$(grep -acF "$(printf 'Q\033[6nZ')" "$QF_RAW" || true)"
 rm -f "$QF_FILTERED" "$QF_RAW"
-"$MVM" rm -f qfilter >/dev/null
+"$MVM" rm -f qfilter >/dev/null 2>&1
 
 section "attach"
 # -i/-t are create-time properties, so a sandbox created with them stays
 # attachable after a plain (detached) start — by name as well as by id.
-"$MVM" create -it --name att alpine sh >/dev/null
+"$MVM" create -it --name att alpine sh >/dev/null 2>&1
 ATT_ID=$("$MVM" ps -a | grep att | awk '{print $1}')
-"$MVM" start att >/dev/null
+"$MVM" start att >/dev/null 2>&1
 for _ in $(seq 1 100); do
     "$MVM" exec att true >/dev/null 2>&1 && break
     sleep 0.2
@@ -546,13 +611,13 @@ set +e
 "$MVM" attach nosuchsandbox >/dev/null 2>&1
 check "attach rejects unknown sandbox" "1" "$?"
 set -e
-"$MVM" rm -f att >/dev/null
+"$MVM" rm -f att >/dev/null 2>&1
 
 # Console backlog can be capped (what attach uses to avoid dumping history).
-"$MVM" run --name tailtest alpine sh -c 'echo one; echo two; echo three' >/dev/null
+"$MVM" run --name tailtest alpine sh -c 'echo one; echo two; echo three' >/dev/null 2>&1
 check "logs --tail" "two three" \
     "$("$MVM" logs -n 2 tailtest | tr -d '\r' | tr '\n' ' ' | sed 's/ $//')"
-"$MVM" rm tailtest >/dev/null
+"$MVM" rm tailtest >/dev/null 2>&1
 
 section "resize (cpu/memory)"
 "$MVM" run --name rsz alpine sleep 180 >/dev/null 2>&1 &
@@ -571,7 +636,7 @@ check "resize persisted in spec" "1024" \
     "$("$MVM" inspect rsz | grep -o '"ram_mib": *[0-9]*' | grep -o '[0-9]*')"
 check "running guest keeps its size" "1" "$("$MVM" exec rsz nproc | tr -d '\r')"
 
-"$MVM" resize rsz --cpus 2 -m 1024 --restart >/dev/null
+"$MVM" resize rsz --cpus 2 -m 1024 --restart >/dev/null 2>&1
 wait "$RSZ_PID" 2>/dev/null || true
 for _ in $(seq 1 100); do
     "$MVM" exec rsz true >/dev/null 2>&1 && break
@@ -589,23 +654,23 @@ check "resize rejects tiny ram" "1" "$?"
 set -e
 check "rejected resize left spec alone" "1024" \
     "$("$MVM" inspect rsz | grep -o '"ram_mib": *[0-9]*' | grep -o '[0-9]*')"
-"$MVM" rm -f rsz >/dev/null
+"$MVM" rm -f rsz >/dev/null 2>&1
 
 section "clone"
 # A sandbox that writes a marker to its rootfs and then exits, so its disk
 # holds state to fork. `run` leaves the sandbox behind in `exited`.
-"$MVM" run --name clsrc alpine sh -c 'echo base-disk > /marker' >/dev/null
+"$MVM" run --name clsrc alpine sh -c 'echo base-disk > /marker' >/dev/null 2>&1
 CLSRC_ID=$("$MVM" ps -a | grep clsrc | awk '{print $1}')
 
 # A plain clone inherits the spec but starts from a fresh disk. The inherited
 # command (which writes the marker) is overridden with a keep-alive so the
 # sandbox stays up long enough to inspect its disk.
-CLONE_ID=$("$MVM" clone clsrc --name clplain sleep 60)
+CLONE_ID=$("$MVM" clone clsrc --name clplain sleep 60 2>/dev/null)
 check "clone prints the new id" "1" \
     "$([ -n "$CLONE_ID" ] && [ "$CLONE_ID" != "$CLSRC_ID" ] && echo 1)"
 check "clone inherits the image" '"image": "alpine"' \
     "$("$MVM" inspect clplain | grep -o '"image": *"alpine"')"
-"$MVM" start clplain >/dev/null
+"$MVM" start clplain >/dev/null 2>&1
 for _ in $(seq 1 100); do
     "$MVM" exec clplain true >/dev/null 2>&1 && break
     sleep 0.2
@@ -614,27 +679,27 @@ if [ "$(uname -s)" = Linux ]; then
     check "clone disk is fresh" "fresh" \
         "$("$MVM" exec clplain sh -c 'cat /marker 2>/dev/null || echo fresh' | tr -d '\r')"
 fi
-"$MVM" stop clplain >/dev/null
+"$MVM" stop clplain >/dev/null 2>&1
 
 # Forking carries the current disk. Needs the persistent overlay upper layer
 # (Linux userns); the macOS copy driver rebuilds rootfs on every boot. A
 # keep-alive command again, since the marker was already written to the
 # source's disk when it ran.
 if [ "$(uname -s)" = Linux ]; then
-    "$MVM" clone clsrc --fork --name clfork sleep 60 >/dev/null
-    "$MVM" start clfork >/dev/null
+    "$MVM" clone clsrc --fork --name clfork sleep 60 >/dev/null 2>&1
+    "$MVM" start clfork >/dev/null 2>&1
     for _ in $(seq 1 100); do
         "$MVM" exec clfork true >/dev/null 2>&1 && break
         sleep 0.2
     done
     check "fork carries the disk" "base-disk" "$("$MVM" exec clfork cat /marker | tr -d '\r')"
-    "$MVM" stop clfork >/dev/null
+    "$MVM" stop clfork >/dev/null 2>&1
 else
     skip "fork disk checks (copy driver on macOS)"
 fi
 
 # Overrides rewrite the inherited spec (validated daemon-side on start).
-CLBIG_ID=$("$MVM" clone clsrc --fork --name clbig --cpus 2 -m 768)
+CLBIG_ID=$("$MVM" clone clsrc --fork --name clbig --cpus 2 -m 768 2>/dev/null)
 check "clone flags override the spec" "768" \
     "$("$MVM" inspect clbig | grep -o '"ram_mib": *[0-9]*' | grep -o '[0-9]*')"
 
@@ -645,11 +710,11 @@ check "clone rejects a taken name" "1" "$?"
 set -e
 
 # Without --name, create and clone get a generated `<adj>-<animal>` name.
-GEN_ID=$("$MVM" create alpine)
+GEN_ID=$("$MVM" create alpine 2>/dev/null)
 GEN_NAME=$("$MVM" ps -a | grep -w "$GEN_ID" | awk '{print $2}')
 check "no-name create gets a generated name" "1" \
     "$(echo "$GEN_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
-GNCLONE_ID=$("$MVM" clone clsrc)
+GNCLONE_ID=$("$MVM" clone clsrc 2>/dev/null)
 GNCLONE_NAME=$("$MVM" ps -a | grep -w "$GNCLONE_ID" | awk '{print $2}')
 check "no-name clone gets a generated name" "1" \
     "$(echo "$GNCLONE_NAME" | grep -Eq '^[a-z]+-[a-z_]+$' && echo 1)"
@@ -681,10 +746,10 @@ wait_agent() { # wait_agent <name>
 }
 
 # Two live sandboxes to prove the token is VM-scoped.
-SB_A=$("$MVM" create --name agent-a alpine sleep infinity)
-SB_B=$("$MVM" create --name agent-b alpine sleep infinity)
-"$MVM" start agent-a >/dev/null
-"$MVM" start agent-b >/dev/null
+SB_A=$("$MVM" create --name agent-a alpine sleep infinity 2>/dev/null)
+SB_B=$("$MVM" create --name agent-b alpine sleep infinity 2>/dev/null)
+"$MVM" start agent-a >/dev/null 2>&1
+"$MVM" start agent-b >/dev/null 2>&1
 wait_agent agent-a
 wait_agent agent-b
 
@@ -735,7 +800,7 @@ check "agent token revoked after stop" "401" \
 
 # ...and restarting a VM invalidates the previous token: the old one is dead
 # while the boot mints a fresh one.
-"$MVM" start agent-a >/dev/null
+"$MVM" start agent-a >/dev/null 2>&1
 wait_agent agent-a
 check "old token invalid after restart" "401" \
     "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN_A" "$AGENT_HOST/agent/v1/sandbox")"
