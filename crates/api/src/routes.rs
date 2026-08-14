@@ -356,7 +356,7 @@ async fn load_image(
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
-            mvm_common::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            mvm_common::Error::Io(std::io::Error::other(e.to_string()))
         })?;
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
     }

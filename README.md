@@ -181,16 +181,8 @@ snapshot is point-in-time, not crash-consistent.
 
 ### `mvm-tui`
 
-Live dashboard over the same HTTP API. Console output is `mvm logs`, not a TUI pane.
-
-| Key | Action |
-|---|---|
-| `tab` / `1` / `2` | switch between the Sandboxes and Images tabs |
-| `j` / `k` (or arrows), `g` | move the selection / jump to top |
-| `s` / `x` / `d` | start / stop / delete (with confirmation) |
-| `i` | inspect pane (`j`/`k`, PgUp/PgDn to scroll, `esc` closes) |
-| `r` | resize form — `tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts |
-| `q` / `esc` | quit / close the open modal |
+Tui to interact with sandbox and images
+Currently limited to sandboxes start/stop/resize/inspect
 
 ## Networking
 
@@ -398,7 +390,7 @@ terminal and answers them — i.e. `mvm attach` / `mvm run -it`.
 | `MVM_USERNS=0` | disable rootless userns mode (Linux) |
 | `MVM_GVPROXY_BIN` | gvproxy binary for managed `--net gvproxy` |
 | `MVM_GVPROXY_CONTROL` | control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port maps |
-| `RUST_LOG` | daemon log verbosity (default `mvm=info,warn`; e.g. `RUST_LOG=mvm=debug mvm serve`) |
+| `RUST_LOG` | daemon log verbosity (default `mvm=info,warn`; e.g. `RUST_LOG=mvm=debug mvm serve`; add `mvm::api=debug` for per-request HTTP logs) |
 
 State layout under the data dir:
 

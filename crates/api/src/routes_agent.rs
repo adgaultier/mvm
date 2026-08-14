@@ -54,7 +54,7 @@ async fn delegate(
     ))
 }
 
-fn vm_id<'a>(principal: &'a VmPrincipal) -> Result<&'a str, ApiError> {
+fn vm_id(principal: &VmPrincipal) -> Result<&str, ApiError> {
     principal
         .0
         .vm_id()
