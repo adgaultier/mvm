@@ -16,7 +16,7 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{App, DeleteConfirm, Inspect, PollUpdate, ResizeForm, Tab};
+use app::{App, DeleteConfirm, Inspect, InspectPane, PollUpdate, ResizeForm, Tab};
 use client::Client;
 
 #[derive(Parser)]
@@ -220,18 +220,49 @@ fn handle_confirm_key(
     }
 }
 
-/// Keys for the inspect viewer. `j`/`k` (or arrows and page keys) scroll; the
-/// close keys are the only thing the footer advertises — scrolling is not.
+/// Keys for the inspect viewer. `tab` switches which pane (field table /
+/// flamegraph) `j`/`k` scroll; the close keys are the only thing the footer
+/// advertises — scrolling is not.
 fn handle_inspect_key(app: &mut App, key: crossterm::event::KeyEvent) {
     let Some(ins) = app.inspect.as_mut() else {
         return;
     };
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => app.inspect = None,
-        KeyCode::Char('j') | KeyCode::Down => ins.scroll = ins.scroll.saturating_add(1),
-        KeyCode::Char('k') | KeyCode::Up => ins.scroll = ins.scroll.saturating_sub(1),
-        KeyCode::PageDown | KeyCode::Char(' ') => ins.scroll = ins.scroll.saturating_add(10),
-        KeyCode::PageUp => ins.scroll = ins.scroll.saturating_sub(10),
+        KeyCode::Tab | KeyCode::BackTab => {
+            ins.pane = match ins.pane {
+                InspectPane::Info => InspectPane::Flame,
+                InspectPane::Flame => InspectPane::Info,
+            };
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            let s = match ins.pane {
+                InspectPane::Info => &mut ins.scroll,
+                InspectPane::Flame => &mut ins.flame_scroll,
+            };
+            *s = s.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            let s = match ins.pane {
+                InspectPane::Info => &mut ins.scroll,
+                InspectPane::Flame => &mut ins.flame_scroll,
+            };
+            *s = s.saturating_sub(1);
+        }
+        KeyCode::PageDown | KeyCode::Char(' ') => {
+            let s = match ins.pane {
+                InspectPane::Info => &mut ins.scroll,
+                InspectPane::Flame => &mut ins.flame_scroll,
+            };
+            *s = s.saturating_add(10);
+        }
+        KeyCode::PageUp => {
+            let s = match ins.pane {
+                InspectPane::Info => &mut ins.scroll,
+                InspectPane::Flame => &mut ins.flame_scroll,
+            };
+            *s = s.saturating_sub(10);
+        }
         _ => {}
     }
 }
