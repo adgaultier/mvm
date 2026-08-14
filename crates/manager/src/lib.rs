@@ -77,7 +77,7 @@ pub struct Manager {
 struct ManagerInner {
     data_dir: DataDir,
     images: ImageStore,
-    storage: Box<dyn StorageDriver>,
+    storage: Arc<dyn StorageDriver>,
     sandboxes: RwLock<HashMap<String, SandboxEntry>>,
     session_counter: AtomicU32,
     persist_lock: Mutex<()>,
@@ -126,7 +126,7 @@ impl Manager {
             inner: Arc::new(ManagerInner {
                 data_dir,
                 images,
-                storage,
+                storage: Arc::from(storage),
                 sandboxes: RwLock::new(sandboxes),
                 session_counter: AtomicU32::new(1),
                 persist_lock: Mutex::new(()),
@@ -180,7 +180,7 @@ impl Manager {
     /// and — when `fork` — the source's current disk carried over.
     /// Copying only the spec keeps the clone's runtime state clean; the disk
     /// is duplicated by the storage driver into the clone's fresh sandbox dir.
-    pub fn clone_sandbox(
+    pub async fn clone_sandbox(
         &self,
         id_or_name: &str,
         spec: SandboxSpec,
@@ -191,14 +191,19 @@ impl Manager {
         self.validate(&spec)?;
         timings.mark("validate");
         // The disk copy can be slow (whole-rootfs on the `copy` driver), so it
-        // runs before the registry is locked; the name generation + insert
-        // below stay atomic under the write lock.
+        // runs before the registry is locked and off the async runtime; the
+        // name generation + insert below stay atomic under the write lock.
         let mut sandbox = Sandbox::new(spec);
         std::fs::create_dir_all(self.inner.data_dir.sandbox_dir(&sandbox.id))?;
         if fork {
-            self.inner
-                .storage
-                .duplicate(&SandboxId::from(source_id.clone()), &sandbox.id)?;
+            let from = SandboxId::from(source_id.clone());
+            let to = sandbox.id.clone();
+            tokio::task::spawn_blocking({
+                let storage = self.inner.storage.clone();
+                move || storage.duplicate(&from, &to)
+            })
+            .await
+            .map_err(|e| Error::Runtime(format!("disk fork task panicked: {e}")))??;
         }
         timings.mark("disk");
         {
@@ -270,10 +275,25 @@ impl Manager {
         let sandbox_id = SandboxId::from(id.clone());
         let sb_dir = self.inner.data_dir.sandbox_dir(&sandbox_id);
 
-        // 1. Writable rootfs.
-        let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
-        tracing::debug!(sandbox = %id, driver = %self.inner.storage.name(), "rootfs prepared");
+        // 1. Writable rootfs. The `copy` driver duplicates the whole image
+        // rootfs here — for large images that's seconds of blocking file IO,
+        // so it runs on a blocking thread rather than the async runtime
+        // (which must keep serving the control plane while a VM boots).
+        let prepared = tokio::task::spawn_blocking({
+            let storage = self.inner.storage.clone();
+            let sandbox_id = sandbox_id.clone();
+            let rootfs = image.rootfs.clone();
+            move || storage.create(&sandbox_id, &rootfs)
+        })
+        .await
+        .map_err(|e| Error::Runtime(format!("rootfs prepare task panicked: {e}")))??;
         timings.mark("rootfs");
+        tracing::debug!(
+            sandbox = %id,
+            driver = %self.inner.storage.name(),
+            rootfs_ms = timings.phase_ms("rootfs"),
+            "rootfs prepared"
+        );
 
         // 2. Inject the guest agent (enables exec). Not fatal if missing.
         let injected = self.inject_agent(&prepared.rootfs);
@@ -625,7 +645,14 @@ impl Manager {
         }
 
         let sandbox_id = SandboxId::from(id.clone());
-        self.inner.storage.destroy(&sandbox_id)?;
+        // Teardown can unmount/remove the whole rootfs; off the async runtime.
+        tokio::task::spawn_blocking({
+            let storage = self.inner.storage.clone();
+            let sandbox_id = sandbox_id.clone();
+            move || storage.destroy(&sandbox_id)
+        })
+        .await
+        .map_err(|e| Error::Runtime(format!("rootfs destroy task panicked: {e}")))??;
         let sb_dir = self.inner.data_dir.sandbox_dir(&sandbox_id);
         if sb_dir.exists() {
             std::fs::remove_dir_all(&sb_dir)?;

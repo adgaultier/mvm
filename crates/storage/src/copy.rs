@@ -4,7 +4,7 @@
 use mvm_common::{DataDir, Result, SandboxId};
 use std::path::Path;
 
-use crate::{copy_tree, PreparedRootfs, StorageDriver};
+use crate::{clone_dir, copy_tree, PreparedRootfs, StorageDriver};
 
 pub struct CopyDriver {
     data_dir: DataDir,
@@ -30,8 +30,18 @@ impl StorageDriver for CopyDriver {
         if dest.exists() {
             std::fs::remove_dir_all(&dest)?;
         }
-        std::fs::create_dir_all(&dest)?;
-        copy_tree(image_rootfs, &dest)?;
+        // APFS: one CoW clone instead of a per-file walk — large images go
+        // from seconds to milliseconds. Off-APFS clonefile fails and we fall
+        // back to the recursive copy.
+        if !clone_dir(image_rootfs, &dest)? {
+            #[cfg(target_os = "macos")]
+            tracing::warn!(
+                sandbox = %id,
+                "copy driver: clonefile rootfs clone unavailable (non-APFS?), falling back to per-file copy"
+            );
+            std::fs::create_dir_all(&dest)?;
+            copy_tree(image_rootfs, &dest)?;
+        }
         Ok(PreparedRootfs { rootfs: dest })
     }
 
@@ -41,8 +51,14 @@ impl StorageDriver for CopyDriver {
         if dst.exists() {
             std::fs::remove_dir_all(&dst)?;
         }
-        std::fs::create_dir_all(&dst)?;
-        if src.exists() {
+        if src.exists() && !clone_dir(&src, &dst)? {
+            #[cfg(target_os = "macos")]
+            tracing::warn!(
+                from = %from,
+                to = %to,
+                "copy driver: clonefile clone unavailable (non-APFS?), falling back to per-file copy"
+            );
+            std::fs::create_dir_all(&dst)?;
             copy_tree(&src, &dst)?;
         }
         Ok(())
