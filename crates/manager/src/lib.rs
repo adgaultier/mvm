@@ -13,11 +13,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::Bytes;
-use mvm_common::auth::{constant_time_eq, generate_token, hash_token};
+#[cfg(feature = "agent-api")]
+use mvm_common::auth::constant_time_eq;
+use mvm_common::auth::{generate_token, hash_token};
 use mvm_common::{
-    protocol, DataDir, Error, Mount, Principal, Result, Sandbox, SandboxId, SandboxSpec,
-    SandboxState,
+    protocol, DataDir, Error, Mount, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
 };
+#[cfg(feature = "agent-api")]
+use mvm_common::Principal;
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
@@ -1080,6 +1083,7 @@ impl Manager {
     /// live sandbox currently holds a matching hash. `None` means the token
     /// is unknown, stale, or the VM is no longer running — the caller should
     /// reject the request. Constant-time over the small sandbox list.
+    #[cfg(feature = "agent-api")]
     pub fn authenticate_vm(&self, token: &str) -> Option<SandboxId> {
         let hash = hash_token(token);
         let hash = hash.as_bytes();
@@ -1097,6 +1101,7 @@ impl Manager {
 
     /// Authorize a principal to act on `target_id`. A VM may only operate on
     /// its own sandbox; anything else is `Forbidden`.
+    #[cfg(feature = "agent-api")]
     pub fn authorize(&self, principal: &Principal, target_id: &str) -> Result<()> {
         match principal {
             Principal::Vm(id) if id.as_str() == target_id => Ok(()),
@@ -1232,6 +1237,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "agent-api")]
     fn authenticate_vm_resolves_and_authorize_is_scoped() {
         let dir = std::env::temp_dir().join(format!("mvm-auth-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

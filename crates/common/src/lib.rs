@@ -8,6 +8,7 @@ pub mod paths;
 pub mod protocol;
 pub mod spec;
 
+#[cfg(feature = "agent-api")]
 pub use auth::Principal;
 pub use id::*;
 pub use paths::*;

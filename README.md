@@ -353,6 +353,12 @@ is required. `mvm build` is not implemented yet; pull + load cover getting
 images in for now.
 ### Agent API (`/agent/v1`, VM-authenticated)
 
+> This whole surface is gated behind the `agent-api` cargo feature of the
+> `mvm` binary (on by default). Build with `--no-default-features` to compile
+> the daemon without it — no `/agent/v1` listener, no `--agent-addr` flag, and
+> the token-verification code is left out (token *minting* into the guest env
+> stays, as it is part of the boot plumbing).
+
 The Agent API is a separate listener (`--agent-addr`, default
 `127.0.0.1:24643`) that a running sandbox can call back into. Every request
 must carry its VM-scoped bearer token (`Authorization: Bearer <token>`); the

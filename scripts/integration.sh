@@ -26,6 +26,12 @@ export MVM_DATA_DIR=$(mktemp -d /tmp/mvm-itest.XXXXXX)
 export MVM_AGENT_PATH="$PWD/$AGENT"
 export MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
 
+# The Agent API (`/agent/v1`, `--agent-addr`) is built behind the `agent-api`
+# cargo feature (on by default). When it is compiled out the daemon has no
+# `--agent-addr` flag and the /agent/v1 section must be skipped.
+AGENT_API=0
+"$MVM" serve --help 2>&1 | grep -q -- '--agent-addr' && AGENT_API=1
+
 if [ "$(uname -s)" = Darwin ]; then
     [ -f "$(brew --prefix)/lib/libkrun.dylib" ] || {
         echo "SKIP: libkrun not installed (run scripts/install-darwin.sh)"; exit 0; }
@@ -128,7 +134,11 @@ section() { # section <name>
 }
 
 section "starting daemon (data dir $MVM_DATA_DIR, port $PORT)"
-"$MVM" serve --addr "127.0.0.1:$PORT" --agent-addr "127.0.0.1:$AGENT_PORT" >/dev/null 2>&1 &
+if [ "$AGENT_API" = 1 ]; then
+    "$MVM" serve --addr "127.0.0.1:$PORT" --agent-addr "127.0.0.1:$AGENT_PORT" >/dev/null 2>&1 &
+else
+    "$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
+fi
 DAEMON_PID=$!
 for _ in $(seq 1 50); do
     curl -sf "$MVM_HOST/health" >/dev/null 2>&1 && break
@@ -657,6 +667,7 @@ for s in clplain clfork clbig clsrc; do "$MVM" rm -f "$s" >/dev/null 2>&1 || tru
 for s in "$GEN_ID" "$GNCLONE_ID" "$RUN_ID"; do "$MVM" rm -f "$s" >/dev/null 2>&1 || true; done
 check "clones removed" "0" "$("$MVM" ps -a | grep -c clplain || true)"
 
+if [ "$AGENT_API" = 1 ]; then
 section "agent API (VM-scoped bearer token)"
 AGENT_HOST="http://127.0.0.1:$AGENT_PORT"
 
@@ -734,6 +745,10 @@ check "fresh token works after restart" "1" \
     "$(curl -s -H "Authorization: Bearer $TOKEN_A2" "$AGENT_HOST/agent/v1/sandbox" | grep -c "\"id\":\"$SB_A\"")"
 
 "$MVM" rm -f agent-a agent-b >/dev/null 2>&1 || true
+
+else
+    skip "agent API (mvm built without the agent-api feature)"
+fi
 
 echo
 echo "$PASS passed, $SKIP skipped, $FAIL failed"

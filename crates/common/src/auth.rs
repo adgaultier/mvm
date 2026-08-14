@@ -11,17 +11,23 @@
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "agent-api")]
 use crate::SandboxId;
 
 /// Who is making an API request. Today only VMs authenticate (via the Agent
 /// API); the privileged control-plane surface is deliberately left
 /// unauthenticated for now and will gain a `Human` principal later.
+///
+/// Gated behind the `agent-api` feature: only the Agent API (and its manager
+/// side) ever constructs or inspects a principal.
+#[cfg(feature = "agent-api")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
     /// A sandbox VM, authenticated by its VM-scoped bearer token.
     Vm(SandboxId),
 }
 
+#[cfg(feature = "agent-api")]
 impl Principal {
     /// The sandbox this principal is authorized to act on, if any.
     pub fn vm_id(&self) -> Option<&SandboxId> {
@@ -54,6 +60,8 @@ pub fn hash_token(token: &str) -> String {
 /// `==` (or a `HashMap` keyed on it) would leak the hash prefix through
 /// timing. Tokens are unique 256-bit random values, so the manager scans the
 /// (small) sandbox list and compares hashes with this fixed-time routine.
+/// Only the Agent API's token verification uses it.
+#[cfg(feature = "agent-api")]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -87,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "agent-api")]
     fn constant_time_eq_compares_bytes() {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));

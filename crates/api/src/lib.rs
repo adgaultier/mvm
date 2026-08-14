@@ -6,9 +6,11 @@
 //!   each VM's scoped bearer token and authorized against the caller's own
 //!   sandbox only.
 
-mod auth;
 mod error;
 mod routes;
+#[cfg(feature = "agent-api")]
+mod auth;
+#[cfg(feature = "agent-api")]
 mod routes_agent;
 
 use axum::Router;
@@ -104,6 +106,7 @@ pub fn router(manager: Manager) -> Router {
 }
 
 /// Agent API router: every route requires a valid VM-scoped bearer token.
+#[cfg(feature = "agent-api")]
 pub fn agent_router(manager: Manager) -> Router {
     let state = AppState { manager };
     with_trace_layer(Router::new().nest("/agent/v1", routes_agent::agent_routes()))
@@ -112,6 +115,7 @@ pub fn agent_router(manager: Manager) -> Router {
 
 /// Serve the control plane and the Agent API on their own listeners until one
 /// of them stops.
+#[cfg(feature = "agent-api")]
 pub async fn serve(
     control_addr: SocketAddr,
     agent_addr: SocketAddr,
@@ -132,4 +136,12 @@ pub async fn serve(
         r = control => r,
         r = agent => r,
     }
+}
+
+/// Serve the control plane until interrupted.
+#[cfg(not(feature = "agent-api"))]
+pub async fn serve(control_addr: SocketAddr, manager: Manager) -> std::io::Result<()> {
+    let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
+    tracing::info!("mvm daemon listening on http://{control_addr}");
+    axum::serve(control_listener, router(manager)).await
 }
