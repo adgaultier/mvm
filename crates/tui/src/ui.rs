@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, ResizeField, Tab};
+use crate::app::{App, InspectPane, ResizeField, Tab};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -222,7 +222,8 @@ fn draw_resize(f: &mut Frame, app: &App) {
     f.render_widget(popup, area);
 }
 
-/// Modal `mvm inspect` viewer: the full sandbox record as a key/value table.
+/// Modal `mvm inspect` viewer: the full sandbox record as a key/value table,
+/// with the lifecycle latency flamegraph below it.
 fn draw_inspect(f: &mut Frame, app: &mut App) {
     let Some(ins) = app.inspect.as_mut() else {
         return;
@@ -241,9 +242,30 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
 
     match &ins.sandbox {
         Some(sb) => {
+            // Two equal panes: the field table and the lifecycle flamegraph.
+            // `tab` focuses one; j/k scroll it.
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+            let (info_area, flame_area, hint_area) = (chunks[0], chunks[1], chunks[2]);
+
+            // --- info pane -------------------------------------------------
+            let info_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if ins.pane == InspectPane::Info {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }))
+                .title(format!(" inspect: {} ", ins.label));
             let pairs = inspect_rows(sb);
             // Header row + its bottom margin + the two borders.
-            let visible = area.height.saturating_sub(4) as usize;
+            let visible = info_area.height.saturating_sub(4) as usize;
             ins.scroll = (ins.scroll as usize).min(pairs.len().saturating_sub(visible)) as u16;
 
             let header = Row::new(["FIELD", "VALUE"])
@@ -271,8 +293,41 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
             *state.offset_mut() = ins.scroll as usize;
             let table = Table::new(rows, [Constraint::Length(14), Constraint::Min(24)])
                 .header(header)
-                .block(block);
-            f.render_stateful_widget(table, area, &mut state);
+                .block(info_block);
+            f.render_stateful_widget(table, info_area, &mut state);
+
+            // --- flamegraph pane -------------------------------------------
+            let flame_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if ins.pane == InspectPane::Flame {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }))
+                .title(" lifecycle timings ");
+            let ops = visible_lifecycle(sb);
+            let lines = flame_lines(&ops, flame_area.width.saturating_sub(2) as usize);
+            let viewport = flame_area.height.saturating_sub(2) as usize;
+            ins.flame_scroll =
+                (ins.flame_scroll as usize).min(lines.len().saturating_sub(viewport)) as u16;
+            let para = Paragraph::new(lines)
+                .scroll((ins.flame_scroll, 0))
+                .block(flame_block);
+            f.render_widget(para, flame_area);
+
+            // --- hint ------------------------------------------------------
+            let hint = Line::from(vec![
+                Span::styled("tab", Style::default().fg(Color::Yellow)),
+                Span::raw(" pane  "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(" scroll  "),
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(" close"),
+            ]);
+            f.render_widget(
+                Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+                hint_area,
+            );
         }
         None => {
             let line = match &ins.error {
@@ -289,6 +344,136 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
             f.render_widget(para, area);
         }
     }
+}
+
+/// Which lifecycle ops to render: the full recorded history, oldest first.
+/// Nothing is hidden — a sandbox that has been started and stopped a few times
+/// shows every op, and the pane scrolls when they don't fit.
+fn visible_lifecycle(sb: &mvm_common::Sandbox) -> Vec<&mvm_common::LifecycleOp> {
+    sb.lifecycle.iter().collect()
+}
+
+/// One `Line` per flamegraph row: for each op, its segmented bar followed by
+/// its legend. The caller renders these in a scrollable `Paragraph`.
+fn flame_lines(ops: &[&mvm_common::LifecycleOp], bar_w: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    if ops.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no lifecycle timing recorded yet",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for op in ops {
+            lines.push(flame_bar_line(op, bar_w));
+            lines.push(flame_legend(op));
+        }
+    }
+    lines
+}
+
+/// `HH:MM:SS  start  ████…████  1234ms` — timestamp left, total right.
+fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize) -> Line<'static> {
+    let ts = op.at.format("%H:%M:%S").to_string();
+    let label = format!("{:<6}", op.op);
+    let total = format!("{:>6}ms", op.total_ms);
+    let bar_w = width.saturating_sub(ts.len() + label.len() + total.len() + 3);
+
+    let mut spans = vec![
+        Span::styled(ts, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(label, Style::default().fg(Color::Gray)),
+    ];
+    let total_ms = op.total_ms.max(1);
+    let mut remaining = bar_w;
+    if op.phases.is_empty() {
+        spans.push(Span::styled(
+            "█".repeat(bar_w),
+            Style::default().fg(Color::DarkGray),
+        ));
+        remaining = 0;
+    } else {
+        for (i, (name, ms)) in op.phases.iter().enumerate() {
+            // The last phase absorbs whatever the rounded earlier ones left,
+            // so the bar always sums to the full width.
+            let cols = if i + 1 == op.phases.len() {
+                remaining
+            } else {
+                ((*ms as f64 / total_ms as f64) * bar_w as f64).round() as usize
+            };
+            let cols = cols.min(remaining);
+            if cols > 0 {
+                spans.push(Span::styled(
+                    "█".repeat(cols),
+                    Style::default().fg(phase_color(name)),
+                ));
+                remaining -= cols;
+            }
+        }
+    }
+    // Phases that don't add up to the total leave a faint tail.
+    if remaining > 0 {
+        spans.push(Span::styled(
+            "░".repeat(remaining),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(total, Style::default().fg(Color::Gray)));
+    Line::from(spans)
+}
+
+fn flame_legend(op: &mvm_common::LifecycleOp) -> Line<'static> {
+    let mut spans = vec![Span::raw("   ")];
+    if op.phases.is_empty() {
+        spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
+    } else {
+        for (name, ms) in op.phases.iter() {
+            spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
+            spans.push(Span::raw(format!(" {name}={ms}ms  ")));
+        }
+    }
+    Line::from(spans)
+}
+
+/// A fixed color per phase *name*, so `rootfs` is always the same color in
+/// every op and every lifecycle record — never dependent on a phase's rank.
+/// Known phases get hand-picked (visually distinct) colors; anything else is
+/// hashed deterministically into the same palette.
+fn phase_color(name: &str) -> Color {
+    const PALETTE: [Color; 8] = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Yellow,
+        Color::Green,
+        Color::Blue,
+        Color::Red,
+        Color::LightBlue,
+        Color::LightMagenta,
+    ];
+    match name {
+        "validate" => Color::Cyan,
+        "register" => Color::LightCyan,
+        "disk" => Color::Blue,
+        "rootfs" => Color::Yellow,
+        "agent" => Color::Magenta,
+        "gvproxy" => Color::LightMagenta,
+        "ports" => Color::LightBlue,
+        "shim" => Color::Green,
+        "boot" => Color::Red,
+        "persist" => Color::DarkGray,
+        "terminate" => Color::LightRed,
+        other => PALETTE[fnv32(other) % PALETTE.len()],
+    }
+}
+
+/// FNV-1a 32-bit — deterministic across runs and processes, so unknown phase
+/// names always resolve to the same color.
+fn fnv32(s: &str) -> usize {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    h as usize
 }
 
 /// The inspect table body: every field `mvm inspect` reports, as label/value
@@ -491,4 +676,63 @@ fn human_size(bytes: u64) -> String {
         unit += 1;
     }
     format!("{size:.1}{}", UNITS[unit])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_common::{LifecycleOp, Sandbox, SandboxSpec, SandboxState};
+
+    fn op(name: &str, at_seconds: i64) -> LifecycleOp {
+        LifecycleOp {
+            op: name.to_string(),
+            at: chrono::DateTime::from_timestamp(at_seconds, 0).unwrap(),
+            total_ms: 1000,
+            phases: vec![("a".to_string(), 400), ("b".to_string(), 600)],
+        }
+    }
+
+    fn sandbox() -> Sandbox {
+        Sandbox::new(SandboxSpec {
+            name: Some("web".into()),
+            image: "alpine".into(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn shows_all_recorded_ops_in_order_even_while_running() {
+        let mut sb = sandbox();
+        sb.lifecycle = vec![
+            op("create", 100),
+            op("start", 200),
+            op("stop", 300),
+            op("start", 400),
+        ];
+        sb.state = SandboxState::Running;
+        let seen = visible_lifecycle(&sb);
+        let ops: Vec<&str> = seen.iter().map(|o| o.op.as_str()).collect();
+        // Nothing is hidden between start/stop cycles: the whole history stays.
+        assert_eq!(ops, vec!["create", "start", "stop", "start"]);
+    }
+
+    #[test]
+    fn phase_color_is_fixed_per_name_not_rank() {
+        // The same name gets the same color no matter its position.
+        assert_eq!(phase_color("boot"), phase_color("boot"));
+        assert_eq!(phase_color("persist"), phase_color("persist"));
+        // Different names differ (hand-picked palette), and a name's color
+        // never depends on how many phases precede it in a given op.
+        assert_eq!(phase_color("rootfs"), Color::Yellow);
+        assert_eq!(phase_color("agent"), Color::Magenta);
+        assert_eq!(phase_color("boot"), Color::Red);
+        assert_eq!(phase_color("terminate"), Color::LightRed);
+        // Unknown names hash to a stable palette color.
+        assert_eq!(phase_color("future-phase"), phase_color("future-phase"));
+    }
+
+    #[test]
+    fn empty_history_renders_nothing() {
+        assert!(visible_lifecycle(&sandbox()).is_empty());
+    }
 }

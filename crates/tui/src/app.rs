@@ -49,17 +49,29 @@ impl DeleteConfirm {
     }
 }
 
-/// Modal `mvm inspect`: the full sandbox record as a key/value table. The
-/// record is fetched fresh on open so state, PID and exit code match reality
-/// at the moment of inspection, not whenever the last poll happened.
+/// Which pane of the inspect modal the scroll keys act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectPane {
+    Info,
+    Flame,
+}
+
+/// Modal `mvm inspect`: the full sandbox record as a key/value table, with the
+/// lifecycle latency flamegraph below it. The record is fetched fresh on open
+/// so state, PID and exit code match reality at the moment of inspection, not
+/// whenever the last poll happened.
 pub struct Inspect {
     pub id: String,
     pub label: String,
     /// Fetched record; None while loading or after an error.
     pub sandbox: Option<Sandbox>,
     pub error: Option<String>,
-    /// Rows scrolled past in the viewer (j/k).
+    /// Rows scrolled past in the info pane (j/k).
     pub scroll: u16,
+    /// Rows scrolled past in the flamegraph pane.
+    pub flame_scroll: u16,
+    /// Which pane j/k scroll; `tab` switches.
+    pub pane: InspectPane,
 }
 
 impl Inspect {
@@ -70,6 +82,8 @@ impl Inspect {
             sandbox: None,
             error: None,
             scroll: 0,
+            flame_scroll: 0,
+            pane: InspectPane::Info,
         }
     }
 }
@@ -271,7 +285,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Inspect};
+    use super::{App, Inspect, InspectPane};
     use mvm_common::{Sandbox, SandboxSpec};
 
     fn sandbox(name: &str) -> Sandbox {
@@ -308,6 +322,9 @@ mod tests {
         assert!(ins.sandbox.is_none());
         assert!(ins.error.is_none());
         assert_eq!(ins.scroll, 0);
+        assert_eq!(ins.flame_scroll, 0);
+        // The info pane is the default scroll target.
+        assert_eq!(ins.pane, InspectPane::Info);
     }
 
     #[test]

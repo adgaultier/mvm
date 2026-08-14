@@ -17,7 +17,8 @@ use bytes::Bytes;
 use mvm_common::auth::constant_time_eq;
 use mvm_common::auth::{generate_token, hash_token};
 use mvm_common::{
-    protocol, DataDir, Error, Mount, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
+    protocol, DataDir, Error, LifecycleOp, Mount, Result, Sandbox, SandboxId, SandboxSpec,
+    SandboxState,
 };
 #[cfg(feature = "agent-api")]
 use mvm_common::Principal;
@@ -30,6 +31,8 @@ use agent_conn::AgentConn;
 
 const LOG_BROADCAST_CAP: usize = 256;
 const REGISTRY_FILE: &str = "sandboxes.json";
+/// How many lifecycle latency records to keep per sandbox (newest wins).
+const MAX_LIFECYCLE_OPS: usize = 16;
 
 /// A live exec session inside one sandbox.
 struct ExecSession {
@@ -142,8 +145,10 @@ impl Manager {
 
     /// Create a sandbox (does not start it).
     pub fn create(&self, spec: SandboxSpec) -> Result<Sandbox> {
+        let mut timings = OpTimings::begin("create");
         self.validate(&spec)?;
-        let sandbox = {
+        timings.mark("validate");
+        let mut sandbox = {
             // Generate + insert under the write lock so two concurrent
             // unnamed creates can't both pick the same generated name.
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
@@ -161,7 +166,12 @@ impl Manager {
             sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
             sandbox
         };
+        timings.mark("register");
         self.persist()?;
+        timings.mark("persist");
+        let op = timings.finish(chrono::Utc::now());
+        self.push_lifecycle(sandbox.id.as_str(), op.clone());
+        sandbox.lifecycle.push(op);
         tracing::info!(sandbox = %sandbox.id, image = %sandbox.spec.image, name = %sandbox.name(), "sandbox created");
         Ok(sandbox)
     }
@@ -176,8 +186,10 @@ impl Manager {
         spec: SandboxSpec,
         fork: bool,
     ) -> Result<Sandbox> {
+        let mut timings = OpTimings::begin("clone");
         let source_id = self.resolve(id_or_name)?;
         self.validate(&spec)?;
+        timings.mark("validate");
         // The disk copy can be slow (whole-rootfs on the `copy` driver), so it
         // runs before the registry is locked; the name generation + insert
         // below stay atomic under the write lock.
@@ -188,6 +200,7 @@ impl Manager {
                 .storage
                 .duplicate(&SandboxId::from(source_id.clone()), &sandbox.id)?;
         }
+        timings.mark("disk");
         {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if sandbox.spec.name.is_none() {
@@ -200,7 +213,12 @@ impl Manager {
             }
             sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
         }
+        timings.mark("register");
         self.persist()?;
+        timings.mark("persist");
+        let op = timings.finish(chrono::Utc::now());
+        self.push_lifecycle(sandbox.id.as_str(), op.clone());
+        sandbox.lifecycle.push(op);
         tracing::info!(sandbox = %sandbox.id, source = %source_id, fork, "sandbox cloned");
         Ok(sandbox)
     }
@@ -240,7 +258,7 @@ impl Manager {
                 return Err(Error::InvalidState("sandbox is already running".into()));
             }
         }
-        let started_at = std::time::Instant::now();
+        let mut timings = OpTimings::begin("start");
 
         let (spec, log_tx) = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
@@ -255,6 +273,7 @@ impl Manager {
         // 1. Writable rootfs.
         let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
         tracing::debug!(sandbox = %id, driver = %self.inner.storage.name(), "rootfs prepared");
+        timings.mark("rootfs");
 
         // 2. Inject the guest agent (enables exec). Not fatal if missing.
         let injected = self.inject_agent(&prepared.rootfs);
@@ -267,6 +286,7 @@ impl Manager {
             let _ = std::fs::remove_file(&sock);
             sock
         });
+        timings.mark("agent");
 
         // 3. Open the control-channel listener before the guest boots.
         let agent_listener = match &agent_socket {
@@ -290,6 +310,7 @@ impl Manager {
                 "gvproxy started"
             );
         }
+        timings.mark("gvproxy");
         let network = match (&spec.network, &gvproxy) {
             (mvm_common::NetworkMode::Gvproxy { socket: None }, Some(gv)) => {
                 mvm_common::NetworkMode::Gvproxy {
@@ -353,6 +374,7 @@ impl Manager {
                 return Err(error);
             }
         };
+        timings.mark("ports");
 
         // 7. Spawn the shim.
         let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin, agent_token.as_deref()) {
@@ -368,7 +390,7 @@ impl Manager {
         };
         let pid = handle.child.id();
         tracing::debug!(sandbox = %id, pid, "shim spawned");
-        let t_shim = std::time::Instant::now();
+        timings.mark("shim");
         let console_stdin = handle.console_stdin.map(|s| Arc::new(Mutex::new(s)));
         let mut child = handle.child;
 
@@ -422,6 +444,7 @@ impl Manager {
             entry.info.agent_token_created_at = agent_token.map(|_| chrono::Utc::now());
         }
         self.persist()?;
+        timings.mark("persist");
 
         // 9. Agent control channel accept task.
         if let Some(listener) = agent_listener {
@@ -452,7 +475,6 @@ impl Manager {
         // agent has connected (or the sandbox died / never had an agent).
         // Callers that exec immediately after start would otherwise race the
         // agent's vsock connection.
-        let mut agent_ready = None;
         if agent_socket.is_some() {
             const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
             let deadline = std::time::Instant::now() + AGENT_WAIT;
@@ -460,10 +482,7 @@ impl Manager {
                 {
                     let sandboxes = self.inner.sandboxes.read().unwrap();
                     match sandboxes.get(&id) {
-                        Some(e) if e.agent.is_some() => {
-                            agent_ready = Some(std::time::Instant::now());
-                            break;
-                        }
+                        Some(e) if e.agent.is_some() => break,
                         Some(e) if !e.info.state.is_alive() => break,
                         None => break,
                         _ => {}
@@ -476,10 +495,13 @@ impl Manager {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
+        timings.mark("boot");
 
+        let total_ms = timings.total_ms();
+        let boot_ms = timings.phase_ms("boot");
+        let op = timings.finish(chrono::Utc::now());
+        self.push_lifecycle(&id, op);
         let sb = self.get(&id)?;
-        let total = started_at.elapsed();
-        let boot = agent_ready.map(|t| t.saturating_duration_since(t_shim));
         tracing::info!(
             sandbox = %id,
             pid,
@@ -489,8 +511,8 @@ impl Manager {
             tty = spec.tty,
             attach_stdin = spec.attach_stdin,
             has_agent = agent_socket.is_some(),
-            total_ms = total.as_millis() as u64,
-            boot_ms = boot.map(|d| d.as_millis() as u64),
+            total_ms,
+            boot_ms,
             "sandbox started"
         );
         Ok(sb)
@@ -499,6 +521,7 @@ impl Manager {
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
     pub async fn stop(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
+        let mut timings = OpTimings::begin("stop");
         let pid = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
@@ -520,8 +543,12 @@ impl Manager {
         if let Some(pid) = pid {
             terminate(pid, true).await;
         }
+        timings.mark("terminate");
 
         self.persist()?;
+        timings.mark("persist");
+        let op = timings.finish(chrono::Utc::now());
+        self.push_lifecycle(&id, op);
         self.get(&id)
     }
 
@@ -1123,11 +1150,70 @@ impl Manager {
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
+
+    /// Record a finished lifecycle operation on a sandbox, keeping the history
+    /// bounded (oldest entries are dropped).
+    fn push_lifecycle(&self, id: &str, op: LifecycleOp) {
+        let mut sandboxes = self.inner.sandboxes.write().unwrap();
+        if let Some(entry) = sandboxes.get_mut(id) {
+            entry.info.lifecycle.push(op);
+            let n = entry.info.lifecycle.len();
+            if n > MAX_LIFECYCLE_OPS {
+                entry.info.lifecycle.drain(0..n - MAX_LIFECYCLE_OPS);
+            }
+        }
+    }
 }
 
 impl SandboxEntry {
     fn spec(&self) -> &SandboxSpec {
         &self.info.spec
+    }
+}
+
+/// Accumulates wall-time phases of one lifecycle operation, for the TUI's
+/// latency flamegraph. `begin` stamps the operation start; each `mark` closes
+/// the previous phase and opens the next; `finish` produces the record.
+struct OpTimings {
+    op: &'static str,
+    started: std::time::Instant,
+    last: std::time::Instant,
+    phases: Vec<(String, u64)>,
+}
+
+impl OpTimings {
+    fn begin(op: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            op,
+            started: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, name: &'static str) {
+        let now = std::time::Instant::now();
+        let ms = now.saturating_duration_since(self.last).as_millis() as u64;
+        self.phases.push((name.to_string(), ms));
+        self.last = now;
+    }
+
+    fn total_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn phase_ms(&self, name: &str) -> Option<u64> {
+        self.phases.iter().find(|(n, _)| n == name).map(|(_, ms)| *ms)
+    }
+
+    fn finish(self, at: chrono::DateTime<chrono::Utc>) -> LifecycleOp {
+        LifecycleOp {
+            op: self.op.to_string(),
+            at,
+            total_ms: self.started.elapsed().as_millis() as u64,
+            phases: self.phases,
+        }
     }
 }
 
@@ -1234,6 +1320,29 @@ mod tests {
         assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
         assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
         assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
+    }
+
+    #[test]
+    fn op_timings_record_phases_and_total() {
+        let mut t = OpTimings::begin("create");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        t.mark("validate");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        t.mark("persist");
+        assert_eq!(t.phase_ms("validate"), Some(t.phases[0].1));
+        assert!(t.phase_ms("persist").is_some());
+        assert!(t.phase_ms("nope").is_none());
+
+        let op = t.finish(chrono::Utc::now());
+        assert_eq!(op.op, "create");
+        assert!(op.total_ms >= 10, "total={}", op.total_ms);
+        assert_eq!(op.phases.len(), 2);
+        assert_eq!(op.phases[0].0, "validate");
+        assert_eq!(op.phases[1].0, "persist");
+        // The recorded phases are sequential slices; their sum must not
+        // exceed the total (there is at most an untimed tail).
+        let sum: u64 = op.phases.iter().map(|(_, ms)| *ms).sum();
+        assert!(sum <= op.total_ms + 2, "sum={sum} total={}", op.total_ms);
     }
 
     #[test]

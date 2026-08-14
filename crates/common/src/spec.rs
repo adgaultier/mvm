@@ -185,6 +185,23 @@ impl std::fmt::Display for SandboxState {
     }
 }
 
+/// One measured lifecycle operation (create / start / stop / clone) with its
+/// phase timings. Recorded by the manager for the TUI's latency flamegraph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleOp {
+    /// Operation name: "create" | "start" | "stop" | "clone".
+    pub op: String,
+    /// When the operation ran.
+    pub at: chrono::DateTime<chrono::Utc>,
+    /// Wall time of the whole operation, in milliseconds.
+    pub total_ms: u64,
+    /// Phase name -> milliseconds, in execution order. Phases are the
+    /// operation's steps; they may not sum exactly to `total_ms` (a small
+    /// untimed tail), so renderers scale them against `total_ms`.
+    #[serde(default)]
+    pub phases: Vec<(String, u64)>,
+}
+
 /// Full record of a sandbox as tracked by the manager.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sandbox {
@@ -207,6 +224,10 @@ pub struct Sandbox {
     /// `/console/resize` calls and is None until one arrives.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
+    /// Latency breakdowns of recent lifecycle operations, oldest first
+    /// (bounded by the manager). The TUI renders these as flamegraph bars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle: Vec<LifecycleOp>,
     /// SHA-256 hash of the sandbox's VM-scoped bearer token, held only while
     /// the VM is running. This is authentication material internal to the
     /// manager: `#[serde(skip)]` keeps it out of every API response and out
@@ -234,6 +255,7 @@ impl Sandbox {
             started_at: None,
             finished_at: None,
             console_size: None,
+            lifecycle: Vec::new(),
             agent_token_hash: None,
             agent_token_created_at: None,
         }
