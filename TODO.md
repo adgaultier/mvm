@@ -58,6 +58,9 @@ Plan (mirror the gvproxy flow):
 - [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md)
 - [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md)
 
+## 4. Daemon logging & tracing
+Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for agent-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line, and wire the `boot_ms`/`total_ms` already logged at `start` into the TODO#6 `StartupTimings` struct.
+
 ## 6. Add startup latency instrumentation
 introduce a `StartupTimings` struct with `total`, `vm_boot`, `guest_agent`, and `exec` `Duration`s, measured with monotonic `Instant`s at the actual VM boot, guest-agent-ready, and exec-complete lifecycle events. Add `--timings` output (VM boot / guest ready / exec / total), then benchmark `mvm run --rm alpine true` over 100 runs and report min/median/p95/max.
 
@@ -67,7 +70,8 @@ unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## 8. `clone --checkpoint`: carry a stopped VM's memory (blocked on libkrun)
+## ~~ 8. clone --checkpoint: carry a stopped VM's memory ~~ 
+-> (check availibility on libkrun v2.x.x )
 
 Snapshot the source VM's *memory* so `mvm clone --fork --checkpoint SRC` creates a clone that resumes where it left off — effectively suspend-to-disk for the VM. This extends `--fork`: the source is frozen, its VM state is captured, then it is stopped and its overlayfs duplicated; the clone restores the captured state on boot.
 
@@ -77,7 +81,7 @@ Snapshot the source VM's *memory* so `mvm clone --fork --checkpoint SRC` creates
 
 The mvm-side plumbing remains valid and cheap to land independently: `common::protocol::Checkpoint`, a `checkpoint` spec flag alongside `fork`, and `Manager::clone_sandbox` doing **checkpoint → stop → duplicate**. `--fork` already stops before copying overlayfs, so `--checkpoint` simply adds VM execution state to the existing disk snapshot. Expose `clone --checkpoint` and, if useful, `mvm checkpoint SRC`.
 
-## 9. Agent gateway — knative-style activation in front of mvm
+## ~~9. Agent gateway — knative-style activation in front of mvm~~
 ...
 
 ## Done
@@ -93,6 +97,21 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   config parsing was lifted into `registry::image_config_from_bytes`.
   docker-archive (`docker save`, with nested `manifest.json`/`layer.tar`)
   is deliberately not handled yet.
+- **VM-scoped authentication for the Agent API (P0 sub-item)** (2026-08-13) —
+  a second listener (`--agent-addr`/`MVM_AGENT_ADDR`, default
+  `127.0.0.1:24643`) serves `/agent/v1` (`inspect`/`stop`/`delegate`-stub),
+  authenticated per request by `Authorization: Bearer <token>` and resolved
+  to `Principal::Vm(vm_id)` — routes carry no `{id}`, so a VM can only act
+  on itself. 32-byte token minted in `Manager::start`; only a SHA-256 hash
+  (`agent_token_hash`) is kept in the manager's memory (`#[serde(skip)]`:
+  never in API responses, never persisted), cleared on stop/exit. Plaintext
+  passed to the shim as a process env var (never `shim.json`) and forwarded
+  into the guest over the `MVM_*` channel (readable via `/proc/cmdline`, and
+  deliberately *not* scrubbed so workload tooling — the MCP bridge — can
+  present it). Constant-time hash compare over the sandbox list. Regenerated
+  on restart, revoked on stop/removal; never accepted on the control plane.
+  Delegate mechanics + in-guest transport/MCP bridge + control-plane human
+  auth remain deferred.
 
 - **Devpts stacking investigation (TODO#5)** (2026-08-10) — the original item
   reported that `tty` fails and `ls /dev/pts` is empty. Neither reproduces:

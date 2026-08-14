@@ -147,6 +147,11 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         let argv: Vec<String> = config.exec.clone();
         // Tell the agent which virtiofs tags to mount where.
         let mut env = config.env.clone();
+        // The agent always runs inside a Linux guest, so it can't know the
+        // host OS on its own; this is how macOS-specific behavior in the
+        // agent (home-ownership repair) is gated. Linux needs no signal.
+        #[cfg(target_os = "macos")]
+        env.push("MVM_HOST_OS=macos".to_string());
         if config.console_tty {
             env.push("MVM_CONSOLE_TTY=1".to_string());
             if let Some((cols, rows)) = config.console_size {
@@ -187,6 +192,14 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         // `USER` against its own user database.
         if let Some(user) = &config.user {
             env.push(format!("MVM_USER={user}"));
+        }
+        // VM-scoped bearer token for the host's Agent API. It arrives here as
+        // a shim *process* env var (never from shim.json, and the plaintext is
+        // never persisted anywhere on the host), then rides the `MVM_*` channel
+        // into the guest. Deliberately not scrubbed there: the workload's own
+        // tooling (the mvm-agent-mcp bridge) presents it to `/agent/v1`.
+        if let Ok(token) = std::env::var("MVM_AGENT_TOKEN") {
+            env.push(format!("MVM_AGENT_TOKEN={token}"));
         }
         ctx.set_exec(protocol::GUEST_AGENT_PATH, &argv, &env)?;
     } else {

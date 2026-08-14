@@ -23,6 +23,8 @@ impl IntoResponse for ApiError {
         let status = match &self.0 {
             Error::SandboxNotFound(_) | Error::ImageNotFound(_) => StatusCode::NOT_FOUND,
             Error::InvalidState(_) => StatusCode::CONFLICT,
+            Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Error::Forbidden(_) => StatusCode::FORBIDDEN,
             Error::Other(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };

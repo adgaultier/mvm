@@ -1,12 +1,15 @@
 //! Shared types for the mvm microVM sandbox platform.
 
 pub mod api;
+pub mod auth;
 pub mod id;
 pub mod names;
 pub mod paths;
 pub mod protocol;
 pub mod spec;
 
+#[cfg(feature = "agent-api")]
+pub use auth::Principal;
 pub use id::*;
 pub use paths::*;
 pub use spec::*;
@@ -43,6 +46,12 @@ pub enum Error {
 
     #[error("network error: {0}")]
     Network(String),
+
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 
     #[error("{0}")]
     Other(String),

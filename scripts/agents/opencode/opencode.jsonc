@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [],
+  "mcp": {
+    "mvm-agent": {
+      "type": "local",
+      "command": ["uvx", "mvm-agent-mcp"],
+      "enabled": true,
+      "environment": {
+        "MVM_AGENT_ADDR": "http://127.0.0.1:24643",
+        "MVM_AGENT_TOKEN": "{env:MVM_AGENT_TOKEN}"
+      }
+    }
+  }
+}
+  

@@ -21,3 +21,10 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+# VM-authenticated Agent API (`/agent/v1`): exposes `serve --agent-addr` and
+# enables the agent listener. On by default; build with `--no-default-features`
+# to compile mvm without the Agent API surface.
+default = ["agent-api"]
+agent-api = ["mvm-api/agent-api"]

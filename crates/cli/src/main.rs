@@ -37,6 +37,10 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:24642")]
         addr: SocketAddr,
+        /// Address for the VM-authenticated Agent API (`/agent/v1`).
+        #[cfg(feature = "agent-api")]
+        #[arg(long, env = "MVM_AGENT_ADDR", default_value = "127.0.0.1:24643")]
+        agent_addr: SocketAddr,
     },
     /// Pull an OCI image.
     Pull { image: String },
@@ -251,12 +255,23 @@ fn main() {
         .init();
 
     let code = match cli.command {
-        Command::Serve { addr } => {
+        Command::Serve {
+            addr,
+            #[cfg(feature = "agent-api")]
+            agent_addr,
+        } => {
             // Must run before the tokio runtime exists (single-threaded
             // requirement of unshare) — may re-exec and never return.
             #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
-            serve(addr)
+            #[cfg(feature = "agent-api")]
+            {
+                serve(addr, agent_addr)
+            }
+            #[cfg(not(feature = "agent-api"))]
+            {
+                serve(addr)
+            }
         }
         Command::VmShim { config } => vm_shim(&config),
         other => {
@@ -576,13 +591,56 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
     let host = parts.next().ok_or("missing host path")?;
     let guest = parts.next().ok_or("volume must be host:guest[:ro]")?;
     let read_only = parts.next() == Some("ro");
+    // Resolve the host path up front: libkrun's virtiofs opens it relative to
+    // the daemon's cwd, so a relative (or dangling) path only fails later, at
+    // VM boot, as a virtio-fs "BadActivate" panic. Canonicalize to an
+    // absolute, symlink-free path and reject mounts that don't exist.
+    let host = std::fs::canonicalize(host)
+        .map_err(|e| format!("volume host path '{host}' is not accessible: {e}"))?;
     Ok(Mount {
-        host: PathBuf::from(host),
+        host,
         guest: PathBuf::from(guest),
         read_only,
     })
 }
 
+#[cfg(feature = "agent-api")]
+fn serve(addr: SocketAddr, agent_addr: SocketAddr) -> i32 {
+    let data_dir = match DataDir::resolve() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot resolve data dir: {e}");
+            return 1;
+        }
+    };
+    eprintln!("mvm: data dir {}", data_dir.root().display());
+    // The manager owns a reqwest::blocking registry client, which must be
+    // constructed outside the tokio runtime.
+    let manager = match mvm_manager::Manager::new(data_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: cannot initialize manager: {e}");
+            return 1;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: cannot start async runtime: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = runtime.block_on(mvm_api::serve(addr, agent_addr, manager)) {
+        eprintln!("error: server: {e}");
+        return 1;
+    }
+    0
+}
+
+#[cfg(not(feature = "agent-api"))]
 fn serve(addr: SocketAddr) -> i32 {
     let data_dir = match DataDir::resolve() {
         Ok(d) => d,
@@ -675,5 +733,25 @@ mod tests {
         assert!(validate_guest_command(&cmd(&["sh", "-c", "echo --net gvproxy"])).is_ok());
         assert!(validate_guest_command(&cmd(&["grep", "-e", "pattern", "file"])).is_ok());
         assert!(validate_guest_command(&cmd(&["cat", "-v", "file"])).is_ok());
+    }
+
+    #[test]
+    fn volume_host_path_is_canonicalized_to_absolute() {
+        let dir = std::env::temp_dir().join(format!("mvm-vol-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let m = parse_volume(&format!("{}:/data", dir.display())).unwrap();
+        assert!(m.host.is_absolute(), "host path should be absolute");
+
+        let m = parse_volume(&format!("{}:/data:ro", dir.display())).unwrap();
+        assert!(m.read_only);
+        assert_eq!(m.guest, PathBuf::from("/data"));
+
+        // A path that does not exist is rejected up front.
+        assert!(parse_volume(&format!("{}/nope:/data", dir.display())).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

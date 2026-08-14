@@ -18,6 +18,31 @@ Reject or warn on --addr 0.0.0.0 / non-loopback listeners without an explicit au
 Introduce sandbox ownership/tenant identity and enforce authorization on every sandbox operation.
 Define capabilities such as inspect, exec, start, stop, delete, mount, and network.
 Ensure an authenticated API client cannot control another user's sandbox unless explicitly authorized.
+####  VM-scoped authentication for Agent API
+
+> **DONE (2026-08-13).** A separate `/agent/v1` listener (`--agent-addr` /
+> `MVM_AGENT_ADDR`, default `127.0.0.1:24643`) authenticates every request with
+> `Authorization: Bearer <token>`, resolved to `Principal::Vm(vm_id)` — the
+> routes carry no `{id}`, so a VM can only act on itself (`inspect`/`stop`/
+> `delegate`, the last still a stub). Token mechanics: 32 random bytes minted
+> in `Manager::start`; only `agent_token_hash` (SHA-256) is kept in the
+> manager's memory (`#[serde(skip)]`: not in API responses, not persisted),
+> cleared on stop/exit. The plaintext is passed to the shim as a process env
+> var and rides the `MVM_*` channel into the guest (readable via
+> `/proc/cmdline`, deliberately not scrubbed so the workload's tooling can
+> present it); it is never persisted. Regenerated on restart, revoked on
+> stop/removal; the control plane never accepts it.
+
+Provision each VM with a cryptographically random, VM-scoped bearer token for authenticating to the restricted Agent API.
+
+- [x] Generate 32 random bytes when the VM is created.
+- [x] Store only a hash of the token on the host, associated with the VM identity and expiry/revocation state.
+- [x] Provision the plaintext token to the VM at startup without putting it on disk or in command-line arguments.
+- [x] Authenticate Agent API requests with Authorization: Bearer <token>.
+- [x] Resolve the token to Principal::Vm(vm_id), then apply the existing authorization/delegation rules.
+- [x] Never accept this token on the privileged control-plane API.
+- [x] Revoke the token when the VM is destroyed; generate a new token on restart.
+- [x] Keep the token opaque: permissions/capabilities must come from the authorization system, not from the token itself.
 ### P0 — Resource governance / DoS protection
 Add per-sandbox limits for:
 - vCPUs

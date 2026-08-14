@@ -113,7 +113,7 @@ don't control, and the daemon refuses a dynamically linked one.
 
 | Command | Description |
 |---|---|
-| `mvm serve [--addr HOST:PORT]` | run the daemon |
+| `mvm serve [--addr HOST:PORT] [--agent-addr HOST:PORT]` | run the daemon |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm load --name IMAGE FILE` | load an OCI image layout archive (`.tar`) into the local store |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
@@ -181,16 +181,8 @@ snapshot is point-in-time, not crash-consistent.
 
 ### `mvm-tui`
 
-Live dashboard over the same HTTP API. Console output is `mvm logs`, not a TUI pane.
-
-| Key | Action |
-|---|---|
-| `tab` / `1` / `2` | switch between the Sandboxes and Images tabs |
-| `j` / `k` (or arrows), `g` | move the selection / jump to top |
-| `s` / `x` / `d` | start / stop / delete (with confirmation) |
-| `i` | inspect pane (`j`/`k`, PgUp/PgDn to scroll, `esc` closes) |
-| `r` | resize form — `tab` switches field, `+`/`-` adjust, `enter` applies, `^r` applies and restarts |
-| `q` / `esc` | quit / close the open modal |
+Tui to interact with sandbox and images
+Currently limited to sandboxes start/stop/resize/inspect
 
 ## Networking
 
@@ -277,7 +269,10 @@ ownership work with full fidelity: image files appear root-owned, and
 This requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`,
 and degrades gracefully (with a warning) when they are missing. Opt out with
 `MVM_USERNS=0`. On macOS there is no userns; the daemon runs with host
-credentials.
+credentials, so guest `chown` and image ownership are **not** preserved — the
+`copy` driver writes the rootfs as the host user. To compensate, the agent
+repairs the workload's home directory ownership before spawning (gated by
+`MVM_HOST_OS=macos`), so a non-root workload can still write to its own home.
 
 ## Guest security
 
@@ -323,6 +318,10 @@ reachable only through loopback. It is **not a remote or multi-tenant security
 boundary** in its current form. Hardening and explicit security invariants for
 the control plane are tracked in [`TODO.SEC.md`](security/TODO.SEC.md).
 
+The **Agent API** (`/agent/v1`, a separate listener) is already VM-scoped:
+each VM authenticates with a per-boot bearer token (never persisted; only a
+hash of it is kept in the daemon's memory) and can only act on its own sandbox.
+
 
 ## HTTP API
 
@@ -352,6 +351,30 @@ POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar
 oci:`. Unlike a `docker save` archive it has no embedded name, so `--name`
 is required. `mvm build` is not implemented yet; pull + load cover getting
 images in for now.
+### Agent API (`/agent/v1`, VM-authenticated)
+
+> This whole surface is gated behind the `agent-api` cargo feature of the
+> `mvm` binary (on by default). Build with `--no-default-features` to compile
+> the daemon without it — no `/agent/v1` listener, no `--agent-addr` flag, and
+> the token-verification code is left out (token *minting* into the guest env
+> stays, as it is part of the boot plumbing).
+
+The Agent API is a separate listener (`--agent-addr`, default
+`127.0.0.1:24643`) that a running sandbox can call back into. Every request
+must carry its VM-scoped bearer token (`Authorization: Bearer <token>`); the
+token is minted fresh at boot and revoked when the sandbox stops or is
+removed. The token is never persisted on the host: the manager keeps only a
+SHA-256 hash of it — in memory, and out of every API response — to verify
+incoming requests, while the plaintext exists transiently in the shim's
+process environment and inside the guest (where the workload's tooling reads
+it). The caller's sandbox is derived from the token, so the routes carry no
+`{id}` — a VM can only act on itself:
+
+```
+GET    /agent/v1/sandbox                  (inspect self)
+POST   /agent/v1/sandbox/stop             (stop self)
+POST   /agent/v1/sandbox/delegate         (not yet implemented; authenticated+authorized)
+```
 
 Exec and log streams use length-prefixed JSON frames (`u32` BE length + JSON),
 defined in `crates/common/src/protocol.rs`.
@@ -366,12 +389,14 @@ terminal and answers them — i.e. `mvm attach` / `mvm run -it`.
 | Variable | Effect |
 |---|---|
 | `MVM_HOST` | daemon address for clients (default `http://127.0.0.1:24642`) |
+| `MVM_AGENT_ADDR` | Agent API listen address (default `127.0.0.1:24643`) |
 | `MVM_DATA_DIR` | state root (default `~/.local/share/mvm`, `/var/lib/mvm` as root) |
 | `MVM_AGENT_PATH` | guest agent binary |
 | `MVM_STORAGE_DRIVER` | force `overlay` or `copy` |
 | `MVM_USERNS=0` | disable rootless userns mode (Linux) |
 | `MVM_GVPROXY_BIN` | gvproxy binary for managed `--net gvproxy` |
 | `MVM_GVPROXY_CONTROL` | control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port maps |
+| `RUST_LOG` | daemon log verbosity (default `mvm=info,warn`; e.g. `RUST_LOG=mvm=debug mvm serve`; add `mvm::api=debug` for per-request HTTP logs) |
 
 State layout under the data dir:
 

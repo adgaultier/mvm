@@ -13,7 +13,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::Bytes;
-use mvm_common::{protocol, DataDir, Error, Result, Sandbox, SandboxId, SandboxSpec, SandboxState};
+#[cfg(feature = "agent-api")]
+use mvm_common::auth::constant_time_eq;
+use mvm_common::auth::{generate_token, hash_token};
+use mvm_common::{
+    protocol, DataDir, Error, Mount, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
+};
+#[cfg(feature = "agent-api")]
+use mvm_common::Principal;
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
@@ -81,6 +88,10 @@ impl Manager {
         let images = ImageStore::new(data_dir.clone())?;
         let storage = default_driver(data_dir.clone());
         tracing::info!("storage driver: {}", storage.name());
+        match mvm_common::agent_binary() {
+            Some(path) => tracing::debug!(agent = %path.display(), "guest agent binary"),
+            None => tracing::warn!("guest agent binary not found; exec will be unavailable"),
+        }
 
         let mut sandboxes = HashMap::new();
         let registry_path = data_dir.root().join(REGISTRY_FILE);
@@ -151,6 +162,7 @@ impl Manager {
             sandbox
         };
         self.persist()?;
+        tracing::info!(sandbox = %sandbox.id, image = %sandbox.spec.image, name = %sandbox.name(), "sandbox created");
         Ok(sandbox)
     }
 
@@ -201,6 +213,7 @@ impl Manager {
         for p in &spec.ports {
             mvm_network::parse_port_map(p)?;
         }
+        validate_mounts(&spec.mounts)?;
 
         if let Some(name) = &spec.name {
             let sandboxes = self.inner.sandboxes.read().unwrap();
@@ -227,6 +240,7 @@ impl Manager {
                 return Err(Error::InvalidState("sandbox is already running".into()));
             }
         }
+        let started_at = std::time::Instant::now();
 
         let (spec, log_tx) = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
@@ -240,9 +254,14 @@ impl Manager {
 
         // 1. Writable rootfs.
         let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
+        tracing::debug!(sandbox = %id, driver = %self.inner.storage.name(), "rootfs prepared");
 
         // 2. Inject the guest agent (enables exec). Not fatal if missing.
         let injected = self.inject_agent(&prepared.rootfs);
+        match &injected {
+            Ok(()) => tracing::debug!(sandbox = %id, "guest agent injected"),
+            Err(e) => tracing::warn!(sandbox = %id, "agent not injected — exec disabled: {e}"),
+        }
         let agent_socket = injected.ok().map(|_| {
             let sock = sb_dir.join("agent.sock");
             let _ = std::fs::remove_file(&sock);
@@ -262,6 +281,15 @@ impl Manager {
             mvm_common::NetworkMode::Gvproxy { socket: None } => Some(gvproxy::spawn(&sb_dir)?),
             _ => None,
         };
+        if let Some(gv) = &gvproxy {
+            tracing::debug!(
+                sandbox = %id,
+                pid = gv.pid(),
+                vfkit = %gv.vfkit.display(),
+                control = %gv.control.display(),
+                "gvproxy started"
+            );
+        }
         let network = match (&spec.network, &gvproxy) {
             (mvm_common::NetworkMode::Gvproxy { socket: None }, Some(gv)) => {
                 mvm_common::NetworkMode::Gvproxy {
@@ -284,6 +312,16 @@ impl Manager {
         let workdir = spec.workdir.clone().or(image.config.workdir.clone());
         // `-u` wins over the image's USER, which wins over root.
         let user = spec.user.clone().or(image.config.user.clone());
+        // VM-scoped bearer token for the Agent API: minted fresh on every
+        // boot, so a restart invalidates the previous token. Only a hash is
+        // kept host-side (in memory, never exposed or persisted); the
+        // plaintext goes straight into the guest over the `MVM_*` env channel
+        // (never into shim.json).
+        let agent_token = agent_socket.as_ref().map(|_| generate_token());
+        let agent_token_hash = agent_token.as_deref().map(hash_token);
+        if agent_token.is_some() {
+            tracing::debug!(sandbox = %id, "agent token minted");
+        }
         let config = ShimConfig {
             sandbox_id: id.clone(),
             rootfs: prepared.rootfs,
@@ -317,7 +355,7 @@ impl Manager {
         };
 
         // 7. Spawn the shim.
-        let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin) {
+        let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin, agent_token.as_deref()) {
             Ok(handle) => handle,
             Err(error) => {
                 self.remove_gvproxy_ports(gvproxy_ports, gvproxy_control.as_deref())
@@ -329,6 +367,8 @@ impl Manager {
             }
         };
         let pid = handle.child.id();
+        tracing::debug!(sandbox = %id, pid, "shim spawned");
+        let t_shim = std::time::Instant::now();
         let console_stdin = handle.console_stdin.map(|s| Arc::new(Mutex::new(s)));
         let mut child = handle.child;
 
@@ -378,6 +418,8 @@ impl Manager {
             entry.console_stdin = console_stdin;
             entry.gvproxy = gvproxy;
             entry.stop_requested = false;
+            entry.info.agent_token_hash = agent_token_hash;
+            entry.info.agent_token_created_at = agent_token.map(|_| chrono::Utc::now());
         }
         self.persist()?;
 
@@ -410,6 +452,7 @@ impl Manager {
         // agent has connected (or the sandbox died / never had an agent).
         // Callers that exec immediately after start would otherwise race the
         // agent's vsock connection.
+        let mut agent_ready = None;
         if agent_socket.is_some() {
             const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
             let deadline = std::time::Instant::now() + AGENT_WAIT;
@@ -417,20 +460,40 @@ impl Manager {
                 {
                     let sandboxes = self.inner.sandboxes.read().unwrap();
                     match sandboxes.get(&id) {
-                        Some(e) if e.agent.is_some() || !e.info.state.is_alive() => break,
+                        Some(e) if e.agent.is_some() => {
+                            agent_ready = Some(std::time::Instant::now());
+                            break;
+                        }
+                        Some(e) if !e.info.state.is_alive() => break,
                         None => break,
                         _ => {}
                     }
                 }
                 if std::time::Instant::now() >= deadline {
-                    tracing::warn!(sandbox = %id, "agent did not connect within {AGENT_WAIT:?}");
+                    tracing::warn!(sandbox = %id, waited_ms = AGENT_WAIT.as_millis() as u64, "agent did not connect within {AGENT_WAIT:?}");
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
 
-        self.get(&id)
+        let sb = self.get(&id)?;
+        let total = started_at.elapsed();
+        let boot = agent_ready.map(|t| t.saturating_duration_since(t_shim));
+        tracing::info!(
+            sandbox = %id,
+            pid,
+            vcpus = spec.vcpus,
+            ram_mib = spec.ram_mib,
+            network = %spec.network,
+            tty = spec.tty,
+            attach_stdin = spec.attach_stdin,
+            has_agent = agent_socket.is_some(),
+            total_ms = total.as_millis() as u64,
+            boot_ms = boot.map(|d| d.as_millis() as u64),
+            "sandbox started"
+        );
+        Ok(sb)
     }
 
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
@@ -445,9 +508,15 @@ impl Manager {
                 return Err(Error::InvalidState("sandbox is not running".into()));
             }
             entry.stop_requested = true;
+            // Revoke the token immediately rather than waiting for the shim to
+            // actually die: a stop request is enough to invalidate it, even
+            // while the state still reads `running` for a moment.
+            entry.info.agent_token_hash = None;
+            entry.info.agent_token_created_at = None;
             entry.info.pid
         };
 
+        tracing::debug!(sandbox = %id, pid, "stop requested");
         if let Some(pid) = pid {
             terminate(pid, true).await;
         }
@@ -536,6 +605,7 @@ impl Manager {
         }
         self.inner.sandboxes.write().unwrap().remove(&id);
         self.persist()?;
+        tracing::info!(sandbox = %id, "sandbox removed");
         Ok(())
     }
 
@@ -647,6 +717,7 @@ impl Manager {
                 user,
             })
             .map_err(|_| Error::Runtime("agent channel closed".into()))?;
+        tracing::debug!(sandbox = %id, session = session_id, "exec dispatched");
         Ok((session_id, rx))
     }
 
@@ -666,7 +737,9 @@ impl Manager {
                 }
             }
         }
-        self.inner.images.remove(name)
+        self.inner.images.remove(name)?;
+        tracing::info!(image = name, "image removed");
+        Ok(())
     }
 
     /// Write to the guest console's stdin (`attach_stdin` sandboxes only).
@@ -697,6 +770,7 @@ impl Manager {
         let Some(handle) = handle else {
             return Ok(()); // EOF on a non-attached console: nothing to do
         };
+        tracing::trace!(sandbox = %id, bytes = payload.len(), eof = is_eof, "console stdin");
         let mut stdin = handle.lock().unwrap();
         let result = stdin.write_all(&payload).and_then(|_| stdin.flush());
         if is_eof {
@@ -755,6 +829,7 @@ impl Manager {
 
     /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
     pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
+        tracing::trace!(sandbox = %id_or_name, session, bytes = data.as_ref().map_or(0, |d| d.len()), eof = data.is_none(), "exec stdin");
         let req = match data {
             Some(data) => protocol::AgentRequest::Stdin { id: session, data },
             None => protocol::AgentRequest::StdinEof { id: session },
@@ -806,6 +881,8 @@ impl Manager {
             entry.agent = None;
             entry.exec_sessions.clear();
             entry.console_stdin = None;
+            entry.info.agent_token_hash = None;
+            entry.info.agent_token_created_at = None;
             entry.info.state = if entry.stop_requested {
                 SandboxState::Stopped
             } else if status.is_none() {
@@ -818,7 +895,24 @@ impl Manager {
             // only other sender and drains the console pipe to EOF) exits.
             let (log_tx, _) = broadcast::channel(LOG_BROADCAST_CAP);
             entry.log_tx = log_tx;
-            tracing::info!(sandbox = %id, state = %entry.info.state, "shim exited");
+            if entry.info.agent_token_hash.is_some() {
+                tracing::debug!(sandbox = %id, "agent token revoked");
+            }
+            match entry.info.state {
+                SandboxState::Failed => tracing::warn!(
+                    sandbox = %id,
+                    exit_code = entry.info.exit_code,
+                    "shim failed"
+                ),
+                SandboxState::Exited if entry.info.exit_code != Some(0) => {
+                    tracing::warn!(
+                        sandbox = %id,
+                        exit_code = entry.info.exit_code,
+                        "workload exited with an error"
+                    )
+                }
+                state => tracing::info!(sandbox = %id, state = %state, exit_code = entry.info.exit_code, "shim exited"),
+            }
         }
         drop(sandboxes);
         // Outside the registry lock: shutdown waits for the process to go.
@@ -918,6 +1012,7 @@ impl Manager {
         if let Some(entry) = sandboxes.get_mut(id) {
             entry.agent = None;
         }
+        tracing::debug!(sandbox = %id, "guest agent disconnected");
     }
 
     fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
@@ -927,9 +1022,20 @@ impl Manager {
             return;
         };
         match event {
-            Stdout { id: sid, .. } | Stderr { id: sid, .. } => {
+            Stdout { id: sid, data } => {
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stdout");
                 if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session.tx.try_send(event);
+                    let _ = session
+                        .tx
+                        .try_send(protocol::AgentEvent::Stdout { id: sid, data });
+                }
+            }
+            Stderr { id: sid, data } => {
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stderr");
+                if let Some(session) = entry.exec_sessions.get(&sid) {
+                    let _ = session
+                        .tx
+                        .try_send(protocol::AgentEvent::Stderr { id: sid, data });
                 }
             }
             Exit { id: sid, .. } => {
@@ -966,7 +1072,42 @@ impl Manager {
         match matches.len() {
             1 => Ok(matches[0].clone()),
             0 => Err(Error::SandboxNotFound(id_or_name.to_string())),
-            _ => Err(Error::Other(format!("ambiguous sandbox '{id_or_name}'"))),
+            _ => {
+                tracing::warn!(query = %id_or_name, matches = matches.len(), "ambiguous sandbox reference");
+                Err(Error::Other(format!("ambiguous sandbox '{id_or_name}'")))
+            }
+        }
+    }
+
+    /// Resolve a presented bearer token to the sandbox it belongs to, if any
+    /// live sandbox currently holds a matching hash. `None` means the token
+    /// is unknown, stale, or the VM is no longer running — the caller should
+    /// reject the request. Constant-time over the small sandbox list.
+    #[cfg(feature = "agent-api")]
+    pub fn authenticate_vm(&self, token: &str) -> Option<SandboxId> {
+        let hash = hash_token(token);
+        let hash = hash.as_bytes();
+        let sandboxes = self.inner.sandboxes.read().unwrap();
+        for entry in sandboxes.values() {
+            let Some(stored) = entry.info.agent_token_hash.as_deref() else {
+                continue;
+            };
+            if constant_time_eq(hash, stored.as_bytes()) && entry.info.state.is_alive() {
+                return Some(entry.info.id.clone());
+            }
+        }
+        None
+    }
+
+    /// Authorize a principal to act on `target_id`. A VM may only operate on
+    /// its own sandbox; anything else is `Forbidden`.
+    #[cfg(feature = "agent-api")]
+    pub fn authorize(&self, principal: &Principal, target_id: &str) -> Result<()> {
+        match principal {
+            Principal::Vm(id) if id.as_str() == target_id => Ok(()),
+            Principal::Vm(id) => Err(Error::Forbidden(format!(
+                "sandbox '{id}' may not act on '{target_id}'"
+            ))),
         }
     }
 
@@ -988,6 +1129,22 @@ impl SandboxEntry {
     fn spec(&self) -> &SandboxSpec {
         &self.info.spec
     }
+}
+
+/// Host mount paths must be absolute: libkrun's virtiofs opens them relative
+/// to the daemon's working directory, so a relative path only fails later, at
+/// VM boot, as a virtio-fs "BadActivate" panic (the CLI canonicalizes before
+/// it gets here; this rejects the same mistake from any other client).
+fn validate_mounts(mounts: &[Mount]) -> Result<()> {
+    for m in mounts {
+        if m.host.is_relative() {
+            return Err(Error::Other(format!(
+                "mount host path '{}' must be absolute",
+                m.host.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -1057,7 +1214,8 @@ async fn terminate(pid: u32, escalate: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::tail_lines;
+    use super::*;
+    use mvm_common::auth::hash_token;
 
     #[test]
     fn tail_keeps_the_last_lines() {
@@ -1076,5 +1234,78 @@ mod tests {
         assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
         assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
         assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
+    }
+
+    #[test]
+    #[cfg(feature = "agent-api")]
+    fn authenticate_vm_resolves_and_authorize_is_scoped() {
+        let dir = std::env::temp_dir().join(format!("mvm-auth-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mgr = Manager::new(DataDir::at(dir.clone())).unwrap();
+
+        let token = "deadbeef".to_string();
+        let mut sb = Sandbox::new(SandboxSpec::default());
+        sb.state = SandboxState::Running;
+        sb.agent_token_hash = Some(hash_token(&token));
+        let id = sb.id.clone();
+        mgr.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .insert(id.to_string(), SandboxEntry::new(sb));
+
+        // The correct token resolves to the sandbox; wrong/unknown ones don't.
+        assert_eq!(mgr.authenticate_vm(&token).as_ref(), Some(&id));
+        assert!(mgr.authenticate_vm("wrong").is_none());
+        assert!(mgr.authenticate_vm("").is_none());
+
+        // A VM may act only on itself.
+        let principal = Principal::Vm(id.clone());
+        assert!(mgr.authorize(&principal, id.as_str()).is_ok());
+        assert!(matches!(
+            mgr.authorize(&principal, "other"),
+            Err(Error::Forbidden(_))
+        ));
+
+        // A stopped sandbox no longer authenticates (token effectively revoked).
+        mgr.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .get_mut(id.as_str())
+            .unwrap()
+            .info
+            .state = SandboxState::Stopped;
+        assert!(mgr.authenticate_vm(&token).is_none());
+
+        // Revocation is the hash being cleared, not merely the state: a
+        // sandbox that is still marked running but whose hash was cleared (as
+        // `stop`/`on_shim_exit` do) no longer authenticates either.
+        let mut sandboxes = mgr.inner.sandboxes.write().unwrap();
+        let entry = sandboxes.get_mut(id.as_str()).unwrap();
+        entry.info.state = SandboxState::Running;
+        entry.info.agent_token_hash = None;
+        entry.info.agent_token_created_at = None;
+        drop(sandboxes);
+        assert!(mgr.authenticate_vm(&token).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_relative_mount_host_paths() {
+        let mount = |host: &str| Mount {
+            host: PathBuf::from(host),
+            guest: PathBuf::from("/data"),
+            read_only: false,
+        };
+        // Absolute paths are fine.
+        assert!(validate_mounts(&[mount("/tmp/ok")]).is_ok());
+        assert!(validate_mounts(&[]).is_ok());
+        // Relative paths are refused before they reach libkrun.
+        assert!(matches!(
+            validate_mounts(&[mount("scripts/agents")]),
+            Err(Error::Other(_))
+        ));
     }
 }

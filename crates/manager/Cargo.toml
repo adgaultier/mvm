@@ -17,3 +17,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[features]
+# VM-authenticated Agent API support: token *verification* (`authenticate_vm`/
+# `authorize`). Token minting stays compiled regardless — it is part of the
+# guest env channel. Enabled by default via the `mvm` binary.
+agent-api = ["mvm-common/agent-api"]

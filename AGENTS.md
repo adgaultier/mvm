@@ -235,26 +235,67 @@ candidate that is dynamically linked or not a Linux ELF at all.
   is legitimate and stays allowed. The filter is inherited and additive, so a
   workload cannot weaken it, and it kills on an unexpected arch (a wrong
   syscall number would otherwise be interpreted against the wrong table).
-  This breaks `tcpdump`, `arping`, old `ping`, and AF_PACKET DHCP clients
-  (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
-  DHCP — it needs the gvproxy-style static-IP bootstrap instead. Always-on
-  by design: there is no opt-out. Filter shape is probed in-VM by
-  `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
-  exec session).
+   This breaks `tcpdump`, `arping`, old `ping`, and AF_PACKET DHCP clients
+   (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
+   DHCP — it needs the gvproxy-style static-IP bootstrap instead. Always-on
+   by design: there is no opt-out. Filter shape is probed in-VM by
+   `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
+   exec session).
+ - **VM token: never persisted, never exposed — not even its hash.** The Agent
+  API token is minted in `Manager::start` and held as `agent_token_hash`
+  (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so
+  it is neither serialized into API responses nor written to `sandboxes.json`:
+  it lives only in the manager's memory for the VM's lifetime and is cleared
+  the moment the sandbox stops or exits (not merely gated on state). The
+  plaintext token is passed to the shim as a *process env var*
+  (`MVM_AGENT_TOKEN`) — never through `ShimConfig`, so `shim.json` stays
+  token-free — and the shim forwards it into the guest via the `MVM_*` env
+  channel, where it is deliberately **not scrubbed**: it must reach the
+  workload's environment (and every exec session, via `baseline_env`) so the
+  tools it spawns (the `mvm-agent-mcp` bridge) can authenticate to
+  `/agent/v1`. The plaintext therefore exists only transiently — in the shim's
+  process environment, in the guest environment, and on `/proc/cmdline` (the
+  `MVM_*` channel rides the kernel cmdline) — and is never written to host
+  disk. The Agent API routes carry no `{id}` — the sandbox is derived from the
+  token, so a caller can only act on itself. Token lookup uses a constant-time
+  hash compare over the sandbox list (no `HashMap` keyed on the secret).
+- **macOS rootfs loses image ownership (host uid owns everything).** The copy
+  driver writes the rootfs as the host user and macOS has no userns, so
+  `/home/agent` ends up owned by the host uid and a non-root workload can't
+  write its own home (`PermissionDenied` on opencode's log). The shim sets
+  `MVM_HOST_OS=macos` (host-gated via `#[cfg(target_os = "macos")]`), and the
+  agent — before spawning a non-root workload whose home is owned by someone
+  else — recursively `lchown`s the home to the workload's uid/gid. macOS
+  virtiofs `LinuxComplete` semantics turns that chown into a
+  `user.containers.override_stat` xattr, so it sticks for the boot; it's a
+  no-op on Linux (userns already owns the files, and the uid check skips it).
+- **Mount host paths must be absolute.** libkrun's virtiofs passthrough opens
+  the host dir with `openat(AT_FDCWD, …, O_NOFOLLOW)` from the *daemon's* cwd,
+  so a relative `-v` source fails with `ENOENT` at device activation — which
+  surfaces as a guest `fc_vcpu` panic `Failed to activate device: BadActivate`
+  (and `krun.log` records `virtio_fs: failed to create worker: No such file
+  or directory`). The CLI canonicalizes `-v` host paths (`parse_volume`), and
+  `Manager::validate_mounts` rejects any relative path that still slips in via
+  the API/TUI.
+
+
 
 
 ## Runtime env vars
 
-`MVM_HOST` (client → daemon addr), `MVM_DATA_DIR` (state root),
+`MVM_HOST` (client → daemon addr), `MVM_AGENT_ADDR` (Agent API listen addr,
+default `127.0.0.1:24643`), `MVM_DATA_DIR` (state root),
 `MVM_AGENT_PATH` (guest agent binary), `MVM_STORAGE_DRIVER`
 (`overlay`/`copy`), `MVM_USERNS=0` (disable userns mode), `MVM_GVPROXY_BIN`
 (gvproxy binary for managed `--net gvproxy`), `MVM_GVPROXY_CONTROL`
 (control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port
 maps).
 
-Daemon → guest agent (set by the shim, scrubbed by the agent before it
-spawns the workload): `MVM_MOUNTS`, `MVM_NET_CONFIG`, `MVM_NET_TSI`,
-`MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`.
+Daemon → guest agent (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
+`MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
+`MVM_HOST_OS` — scrubbed by the agent before it spawns the workload — plus
+`MVM_AGENT_TOKEN`, which is deliberately *not* scrubbed so the workload's
+tooling (the `mvm-agent-mcp` bridge) can authenticate to `/agent/v1`.
 
 ## Conventions
 

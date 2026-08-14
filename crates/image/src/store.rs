@@ -72,6 +72,7 @@ impl ImageStore {
         let reference = ImageReference::parse(reference)?;
         let key = reference.store_key();
         let _guard = self.lock_pull(&key);
+        let started = std::time::Instant::now();
 
         let dir = self.data_dir.image_dir(&key);
         let existing_digest = std::fs::read_to_string(dir.join("meta.json"))
@@ -90,8 +91,9 @@ impl ImageStore {
             .pull(&reference, &rootfs, existing_digest.as_deref(), on_event);
         let pulled = match outcome {
             Ok(PullOutcome::Pulled(pulled)) => pulled,
-            Ok(PullOutcome::UpToDate { .. }) => {
+            Ok(PullOutcome::UpToDate { digest }) => {
                 let _ = std::fs::remove_dir_all(&staging);
+                tracing::debug!(image = %reference, digest = %digest, "image up to date");
                 return self.load_stored(&dir).map(|img| img.info);
             }
             Err(e) => {
@@ -117,6 +119,13 @@ impl ImageStore {
         }
         std::fs::rename(&staging, &dir)?;
 
+        tracing::info!(
+            image = %meta.reference,
+            digest = %meta.digest,
+            size = meta.size,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "image pulled"
+        );
         Ok(ImageInfo {
             reference: meta.reference,
             digest: meta.digest,
@@ -174,6 +183,12 @@ impl ImageStore {
         }
         std::fs::rename(&staging, &dir)?;
 
+        tracing::info!(
+            image = %meta.reference,
+            digest = %meta.digest,
+            size = meta.size,
+            "image loaded"
+        );
         Ok(ImageInfo {
             reference: meta.reference,
             digest: meta.digest,

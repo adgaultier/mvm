@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::{lchown, MetadataExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -68,6 +69,12 @@ struct Agent {
     /// the console (`AgentRequest::ConsoleResize`) without coupling to the
     /// bridge threads' lifetimes. Closed exactly once when the agent drops.
     console_pty: Option<OwnedFd>,
+    /// VM-scoped bearer token for the host's Agent API (`/agent/v1`). Not
+    /// yet used here (no in-guest HTTP client), but captured and held so the
+    /// MCP bridge can present it when that lands. Scrubbbed from the workload
+    /// environment before it spawns.
+    #[allow(dead_code)]
+    agent_token: Option<String>,
 }
 
 pub fn main() {
@@ -111,6 +118,15 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     let user_spec = std::env::var("MVM_USER").ok();
 
+    // Which OS the *host* runs; only "macos" is ever set (Linux needs no
+    // signal). The agent itself always runs in a Linux guest.
+    let host_os = std::env::var("MVM_HOST_OS").unwrap_or_default();
+
+    // VM-scoped bearer token for the host's Agent API. Deliberately NOT
+    // scrubbed: it must reach the workload's environment so the tools it
+    // spawns (the mvm-agent-mcp bridge) can authenticate to `/agent/v1`.
+    let agent_token = std::env::var("MVM_AGENT_TOKEN").ok();
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_MOUNTS",
@@ -119,6 +135,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_CONSOLE_TTY",
         "MVM_CONSOLE_SIZE",
         "MVM_USER",
+        "MVM_HOST_OS",
     ] {
         std::env::remove_var(var);
     }
@@ -151,6 +168,23 @@ fn real_main(workload_argv: &[String]) -> i32 {
             }
         },
     };
+
+    // On macOS the rootfs is copied by the host user, so files the image
+    // declared as owned by `user` are actually owned by the host uid, and the
+    // workload can't write its own home. Repair it before spawning. This flag
+    // only reaches the guest on macOS hosts; Linux userns mode already
+    // preserves ownership, and the uid check below makes it a no-op there.
+    if host_os == "macos"
+        && !user.is_root()
+        && !user.home.is_empty()
+        && user.home != "/"
+    {
+        if let Ok(meta) = std::fs::symlink_metadata(&user.home) {
+            if meta.uid() != user.uid || meta.gid() != user.gid {
+                chown_tree(std::path::Path::new(&user.home), user.uid, user.gid);
+            }
+        }
+    }
 
     // 3. Spawn the workload. The guest console is a byte stream, so an
     // interactive workload needs a real guest PTY of its own.
@@ -222,6 +256,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         workload_user: user,
         console_output,
         console_pty,
+        agent_token,
     };
     agent.send(&AgentEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
@@ -1065,6 +1100,25 @@ impl Agent {
             unsafe { libc::kill(self.workload_pid, libc::SIGKILL) };
         }
         self.kill_all_sessions();
+    }
+}
+
+/// Recursively make `root` (and everything under it) owned by uid:gid.
+/// Best-effort and symlink-safe: entries are `lchown`ed (the symlink itself
+/// is owned, never its target) and only real directories are descended into.
+fn chown_tree(root: &std::path::Path, uid: u32, gid: u32) {
+    let _ = lchown(root, Some(uid), Some(gid));
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let _ = lchown(&path, Some(uid), Some(gid));
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.is_dir() {
+                chown_tree(&path, uid, gid);
+            }
+        }
     }
 }
 
