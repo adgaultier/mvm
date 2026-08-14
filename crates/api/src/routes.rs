@@ -203,6 +203,7 @@ async fn exec(
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
             if self.armed {
+                tracing::debug!(sandbox = %self.id, session = self.session, "exec session killed on disconnect");
                 let _ = self.manager.exec_kill(&self.id, self.session);
             }
         }

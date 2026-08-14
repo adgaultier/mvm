@@ -43,13 +43,21 @@ pub trait StorageDriver: Send + Sync {
 pub fn default_driver(data_dir: DataDir) -> Box<dyn StorageDriver> {
     let choice = std::env::var("MVM_STORAGE_DRIVER").unwrap_or_default();
     match choice.as_str() {
-        "copy" => return Box::new(CopyDriver::new(data_dir)),
-        "overlay" => return Box::new(OverlayDriver::new(data_dir)),
+        "copy" => {
+            tracing::debug!("storage: copy driver (MVM_STORAGE_DRIVER=copy)");
+            return Box::new(CopyDriver::new(data_dir));
+        }
+        "overlay" => {
+            tracing::debug!("storage: overlay driver (MVM_STORAGE_DRIVER=overlay)");
+            return Box::new(OverlayDriver::new(data_dir));
+        }
         _ => {}
     }
     if is_root() && data_dir.ensure().is_ok() && OverlayDriver::probe(&data_dir) {
+        tracing::debug!("storage: overlay driver (root, probe ok)");
         Box::new(OverlayDriver::new(data_dir))
     } else {
+        tracing::debug!("storage: copy driver (not root or overlay probe failed)");
         Box::new(CopyDriver::new(data_dir))
     }
 }

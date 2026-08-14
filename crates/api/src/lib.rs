@@ -14,7 +14,7 @@ mod routes_agent;
 use axum::Router;
 use mvm_manager::Manager;
 use std::net::SocketAddr;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 
 pub use error::ApiError;
 
@@ -23,13 +23,21 @@ pub struct AppState {
     pub manager: Manager,
 }
 
+/// Per-request tracing. `DefaultMakeSpan` would otherwise include request
+/// headers — leaking `Authorization: Bearer <token>` at DEBUG — so headers are
+/// explicitly disabled; only method/uri/status/latency are recorded.
+fn trace_layer() -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>> {
+    TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().include_headers(false))
+}
+
 /// Control-plane router (currently unauthenticated; hardening is deferred).
 pub fn router(manager: Manager) -> Router {
     let state = AppState { manager };
     Router::new()
         .nest("/api/v1", routes::api_routes())
         .route("/health", axum::routing::get(|| async { "ok" }))
-        .layer(TraceLayer::new_for_http())
+        .layer(trace_layer())
         .with_state(state)
 }
 
@@ -38,7 +46,7 @@ pub fn agent_router(manager: Manager) -> Router {
     let state = AppState { manager };
     Router::new()
         .nest("/agent/v1", routes_agent::agent_routes())
-        .layer(TraceLayer::new_for_http())
+        .layer(trace_layer())
         .with_state(state)
 }
 

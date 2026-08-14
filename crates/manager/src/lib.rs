@@ -85,6 +85,10 @@ impl Manager {
         let images = ImageStore::new(data_dir.clone())?;
         let storage = default_driver(data_dir.clone());
         tracing::info!("storage driver: {}", storage.name());
+        match mvm_common::agent_binary() {
+            Some(path) => tracing::debug!(agent = %path.display(), "guest agent binary"),
+            None => tracing::warn!("guest agent binary not found; exec will be unavailable"),
+        }
 
         let mut sandboxes = HashMap::new();
         let registry_path = data_dir.root().join(REGISTRY_FILE);
@@ -155,6 +159,7 @@ impl Manager {
             sandbox
         };
         self.persist()?;
+        tracing::info!(sandbox = %sandbox.id, image = %sandbox.spec.image, name = %sandbox.name(), "sandbox created");
         Ok(sandbox)
     }
 
@@ -232,6 +237,7 @@ impl Manager {
                 return Err(Error::InvalidState("sandbox is already running".into()));
             }
         }
+        let started_at = std::time::Instant::now();
 
         let (spec, log_tx) = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
@@ -245,9 +251,14 @@ impl Manager {
 
         // 1. Writable rootfs.
         let prepared = self.inner.storage.create(&sandbox_id, &image.rootfs)?;
+        tracing::debug!(sandbox = %id, driver = %self.inner.storage.name(), "rootfs prepared");
 
         // 2. Inject the guest agent (enables exec). Not fatal if missing.
         let injected = self.inject_agent(&prepared.rootfs);
+        match &injected {
+            Ok(()) => tracing::debug!(sandbox = %id, "guest agent injected"),
+            Err(e) => tracing::warn!(sandbox = %id, "agent not injected — exec disabled: {e}"),
+        }
         let agent_socket = injected.ok().map(|_| {
             let sock = sb_dir.join("agent.sock");
             let _ = std::fs::remove_file(&sock);
@@ -267,6 +278,15 @@ impl Manager {
             mvm_common::NetworkMode::Gvproxy { socket: None } => Some(gvproxy::spawn(&sb_dir)?),
             _ => None,
         };
+        if let Some(gv) = &gvproxy {
+            tracing::debug!(
+                sandbox = %id,
+                pid = gv.pid(),
+                vfkit = %gv.vfkit.display(),
+                control = %gv.control.display(),
+                "gvproxy started"
+            );
+        }
         let network = match (&spec.network, &gvproxy) {
             (mvm_common::NetworkMode::Gvproxy { socket: None }, Some(gv)) => {
                 mvm_common::NetworkMode::Gvproxy {
@@ -296,6 +316,9 @@ impl Manager {
         // (never into shim.json).
         let agent_token = agent_socket.as_ref().map(|_| generate_token());
         let agent_token_hash = agent_token.as_deref().map(hash_token);
+        if agent_token.is_some() {
+            tracing::debug!(sandbox = %id, "agent token minted");
+        }
         let config = ShimConfig {
             sandbox_id: id.clone(),
             rootfs: prepared.rootfs,
@@ -341,6 +364,8 @@ impl Manager {
             }
         };
         let pid = handle.child.id();
+        tracing::debug!(sandbox = %id, pid, "shim spawned");
+        let t_shim = std::time::Instant::now();
         let console_stdin = handle.console_stdin.map(|s| Arc::new(Mutex::new(s)));
         let mut child = handle.child;
 
@@ -424,6 +449,7 @@ impl Manager {
         // agent has connected (or the sandbox died / never had an agent).
         // Callers that exec immediately after start would otherwise race the
         // agent's vsock connection.
+        let mut agent_ready = None;
         if agent_socket.is_some() {
             const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
             let deadline = std::time::Instant::now() + AGENT_WAIT;
@@ -431,20 +457,40 @@ impl Manager {
                 {
                     let sandboxes = self.inner.sandboxes.read().unwrap();
                     match sandboxes.get(&id) {
-                        Some(e) if e.agent.is_some() || !e.info.state.is_alive() => break,
+                        Some(e) if e.agent.is_some() => {
+                            agent_ready = Some(std::time::Instant::now());
+                            break;
+                        }
+                        Some(e) if !e.info.state.is_alive() => break,
                         None => break,
                         _ => {}
                     }
                 }
                 if std::time::Instant::now() >= deadline {
-                    tracing::warn!(sandbox = %id, "agent did not connect within {AGENT_WAIT:?}");
+                    tracing::warn!(sandbox = %id, waited_ms = AGENT_WAIT.as_millis() as u64, "agent did not connect within {AGENT_WAIT:?}");
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
 
-        self.get(&id)
+        let sb = self.get(&id)?;
+        let total = started_at.elapsed();
+        let boot = agent_ready.map(|t| t.saturating_duration_since(t_shim));
+        tracing::info!(
+            sandbox = %id,
+            pid,
+            vcpus = spec.vcpus,
+            ram_mib = spec.ram_mib,
+            network = %spec.network,
+            tty = spec.tty,
+            attach_stdin = spec.attach_stdin,
+            has_agent = agent_socket.is_some(),
+            total_ms = total.as_millis() as u64,
+            boot_ms = boot.map(|d| d.as_millis() as u64),
+            "sandbox started"
+        );
+        Ok(sb)
     }
 
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
@@ -467,6 +513,7 @@ impl Manager {
             entry.info.pid
         };
 
+        tracing::debug!(sandbox = %id, pid, "stop requested");
         if let Some(pid) = pid {
             terminate(pid, true).await;
         }
@@ -555,6 +602,7 @@ impl Manager {
         }
         self.inner.sandboxes.write().unwrap().remove(&id);
         self.persist()?;
+        tracing::info!(sandbox = %id, "sandbox removed");
         Ok(())
     }
 
@@ -666,6 +714,7 @@ impl Manager {
                 user,
             })
             .map_err(|_| Error::Runtime("agent channel closed".into()))?;
+        tracing::debug!(sandbox = %id, session = session_id, "exec dispatched");
         Ok((session_id, rx))
     }
 
@@ -685,7 +734,9 @@ impl Manager {
                 }
             }
         }
-        self.inner.images.remove(name)
+        self.inner.images.remove(name)?;
+        tracing::info!(image = name, "image removed");
+        Ok(())
     }
 
     /// Write to the guest console's stdin (`attach_stdin` sandboxes only).
@@ -716,6 +767,7 @@ impl Manager {
         let Some(handle) = handle else {
             return Ok(()); // EOF on a non-attached console: nothing to do
         };
+        tracing::trace!(sandbox = %id, bytes = payload.len(), eof = is_eof, "console stdin");
         let mut stdin = handle.lock().unwrap();
         let result = stdin.write_all(&payload).and_then(|_| stdin.flush());
         if is_eof {
@@ -774,6 +826,7 @@ impl Manager {
 
     /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
     pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
+        tracing::trace!(sandbox = %id_or_name, session, bytes = data.as_ref().map_or(0, |d| d.len()), eof = data.is_none(), "exec stdin");
         let req = match data {
             Some(data) => protocol::AgentRequest::Stdin { id: session, data },
             None => protocol::AgentRequest::StdinEof { id: session },
@@ -839,7 +892,24 @@ impl Manager {
             // only other sender and drains the console pipe to EOF) exits.
             let (log_tx, _) = broadcast::channel(LOG_BROADCAST_CAP);
             entry.log_tx = log_tx;
-            tracing::info!(sandbox = %id, state = %entry.info.state, "shim exited");
+            if entry.info.agent_token_hash.is_some() {
+                tracing::debug!(sandbox = %id, "agent token revoked");
+            }
+            match entry.info.state {
+                SandboxState::Failed => tracing::warn!(
+                    sandbox = %id,
+                    exit_code = entry.info.exit_code,
+                    "shim failed"
+                ),
+                SandboxState::Exited if entry.info.exit_code != Some(0) => {
+                    tracing::warn!(
+                        sandbox = %id,
+                        exit_code = entry.info.exit_code,
+                        "workload exited with an error"
+                    )
+                }
+                state => tracing::info!(sandbox = %id, state = %state, exit_code = entry.info.exit_code, "shim exited"),
+            }
         }
         drop(sandboxes);
         // Outside the registry lock: shutdown waits for the process to go.
@@ -939,6 +1009,7 @@ impl Manager {
         if let Some(entry) = sandboxes.get_mut(id) {
             entry.agent = None;
         }
+        tracing::debug!(sandbox = %id, "guest agent disconnected");
     }
 
     fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
@@ -948,9 +1019,20 @@ impl Manager {
             return;
         };
         match event {
-            Stdout { id: sid, .. } | Stderr { id: sid, .. } => {
+            Stdout { id: sid, data } => {
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stdout");
                 if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session.tx.try_send(event);
+                    let _ = session
+                        .tx
+                        .try_send(protocol::AgentEvent::Stdout { id: sid, data });
+                }
+            }
+            Stderr { id: sid, data } => {
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stderr");
+                if let Some(session) = entry.exec_sessions.get(&sid) {
+                    let _ = session
+                        .tx
+                        .try_send(protocol::AgentEvent::Stderr { id: sid, data });
                 }
             }
             Exit { id: sid, .. } => {
@@ -987,7 +1069,10 @@ impl Manager {
         match matches.len() {
             1 => Ok(matches[0].clone()),
             0 => Err(Error::SandboxNotFound(id_or_name.to_string())),
-            _ => Err(Error::Other(format!("ambiguous sandbox '{id_or_name}'"))),
+            _ => {
+                tracing::warn!(query = %id_or_name, matches = matches.len(), "ambiguous sandbox reference");
+                Err(Error::Other(format!("ambiguous sandbox '{id_or_name}'")))
+            }
         }
     }
 

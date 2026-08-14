@@ -27,13 +27,19 @@ impl FromRequestParts<AppState> for VmPrincipal {
         let token = match parts.headers.get(AUTHORIZATION) {
             Some(header) => match header.to_str().ok().and_then(|v| v.strip_prefix("Bearer ")) {
                 Some(token) if !token.is_empty() => token,
-                _ => return Err(unauthorized("expected 'Authorization: Bearer <token>'")),
+                _ => {
+                    tracing::warn!("agent API unauthorized: malformed Authorization header");
+                    return Err(unauthorized("expected 'Authorization: Bearer <token>'"));
+                }
             },
             None => return Err(unauthorized("missing Authorization header")),
         };
         match state.manager.authenticate_vm(token) {
             Some(id) => Ok(Self(Principal::Vm(id))),
-            None => Err(unauthorized("invalid or expired token")),
+            None => {
+                tracing::warn!("agent API unauthorized: invalid or expired token");
+                Err(unauthorized("invalid or expired token"))
+            }
         }
     }
 }

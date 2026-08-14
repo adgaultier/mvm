@@ -60,6 +60,7 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Resu
     if !mvm_common::is_init_ns_root() {
         opts.push_str(",userxattr,redirect_dir=nofollow,index=off,metacopy=off");
     }
+    tracing::debug!(opts = %opts, "mounting overlay");
     let out = Command::new("mount")
         .args(["-t", "overlay", "overlay", "-o", &opts])
         .arg(merged)
@@ -125,6 +126,7 @@ impl StorageDriver for OverlayDriver {
                 Ok(s) if s.success() => {}
                 _ => {
                     // Lazy unmount fallback.
+                    tracing::warn!(sandbox = %id, "overlay unmount failed, falling back to lazy unmount");
                     let _ = Command::new("umount").arg("-l").arg(&merged).status();
                 }
             }

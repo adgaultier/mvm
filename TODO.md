@@ -58,6 +58,9 @@ Plan (mirror the gvproxy flow):
 - [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md)
 - [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md)
 
+## 4. Daemon logging & tracing
+Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for agent-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line, and wire the `boot_ms`/`total_ms` already logged at `start` into the TODO#6 `StartupTimings` struct.
+
 ## 6. Add startup latency instrumentation
 introduce a `StartupTimings` struct with `total`, `vm_boot`, `guest_agent`, and `exec` `Duration`s, measured with monotonic `Instant`s at the actual VM boot, guest-agent-ready, and exec-complete lifecycle events. Add `--timings` output (VM boot / guest ready / exec / total), then benchmark `mvm run --rm alpine true` over 100 runs and report min/median/p95/max.
 

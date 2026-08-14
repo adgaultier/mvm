@@ -398,6 +398,7 @@ terminal and answers them — i.e. `mvm attach` / `mvm run -it`.
 | `MVM_USERNS=0` | disable rootless userns mode (Linux) |
 | `MVM_GVPROXY_BIN` | gvproxy binary for managed `--net gvproxy` |
 | `MVM_GVPROXY_CONTROL` | control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port maps |
+| `RUST_LOG` | daemon log verbosity (default `mvm=info,warn`; e.g. `RUST_LOG=mvm=debug mvm serve`) |
 
 State layout under the data dir:
 
