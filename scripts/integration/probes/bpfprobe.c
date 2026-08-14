@@ -6,7 +6,8 @@
  *
  *   cc -static -O2 -o bpfprobe bpfprobe.c
  *
- * scripts/integration.sh runs this inside a VM via `mvm run ... -v`.
+ * `scripts/integration/sections/bpfprobe.sh` (via `just bpfprobe`) runs this
+ * inside a VM through `mvm run ... -v`.
  * The workload runs as guest root (the whole point of the threat model),
  * so bpf() and the mounts below are permitted.
  *

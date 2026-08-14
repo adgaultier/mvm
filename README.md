@@ -96,7 +96,7 @@ and gvproxy from the `libkrun/krun` Homebrew tap).
 ```console
 $ scripts/build.sh        # release binaries + static agent → dist/
 $ cargo test --workspace  # unit tests, no KVM needed
-$ scripts/integration.sh  # end-to-end: boots real VMs (needs KVM/libkrun + network)
+$ just -f scripts/integration/Justfile all  # boots real VMs (needs KVM/libkrun + network)
 ```
 
 On macOS run `scripts/install-darwin.sh` once first; `build.sh` then

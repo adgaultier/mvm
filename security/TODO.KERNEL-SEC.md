@@ -23,7 +23,7 @@ The relevant distinction is that these controls are enforced by the guest kernel
 | AppArmor                |      ❌ |       ❌ | Not enabled                                                                                            |
 | BPF LSM                |     ⚠️ |       ❌ | Requires `CONFIG_BPF_LSM`; should be verified explicitly rather than inferred from generic BPF support |
 | BPF JIT                |      ❌ |       ❌ | `CONFIG_BPF_JIT` is disabled in the configs                                                            |
-| `CONFIG_DEBUG_INFO_BTF`|      ❌ |       ❌ | Not enabled — **the blocker for Aya/CO-RE and for BPF LSM.** Not verified on either arch; `scripts/probes/bpfprobe.c` reports it |
+| `CONFIG_DEBUG_INFO_BTF`|      ❌ |       ❌ | Not enabled — **the blocker for Aya/CO-RE and for BPF LSM.** Not verified on either arch; `scripts/integration/probes/bpfprobe.c` reports it |
 
 ### Important distinctions
 
@@ -32,12 +32,12 @@ The relevant distinction is that these controls are enforced by the guest kernel
 * **x86_64 has substantially more guest-side security infrastructure** because the LSM framework and SELinux are enabled.
 * **AArch64 currently has no LSM framework enabled**, so SELinux/AppArmor/BPF-LSM-based enforcement is not available from the stock configuration.
 * `CONFIG_BPF_SYSCALL=y` means a guest process can potentially use the `bpf()` interface; therefore, a security design that loads trusted BPF policies must also prevent the hostile container from acquiring sufficient privilege to create/modify its own BPF programs or maps.
-* **BTF (BPF Type Format) is the unstated prerequisite.** Aya's loader and *every* BPF LSM program depend on kernel BTF (`/sys/kernel/btf/vmlinux`) and BTF-enabled programs. Without it, CO-RE relocations and the fentry trampoline do not work. The capability table above is therefore *not* the whole story: the practical question is whether libkrunfw ships `CONFIG_DEBUG_INFO_BTF`. This is checked at runtime by `scripts/probes/bpfprobe.c` (see "Verification" below).
+* **BTF (BPF Type Format) is the unstated prerequisite.** Aya's loader and *every* BPF LSM program depend on kernel BTF (`/sys/kernel/btf/vmlinux`) and BTF-enabled programs. Without it, CO-RE relocations and the fentry trampoline do not work. The capability table above is therefore *not* the whole story: the practical question is whether libkrunfw ships `CONFIG_DEBUG_INFO_BTF`. This is checked at runtime by `scripts/integration/probes/bpfprobe.c` (see "Verification" below).
 
 ## Verification (runtime probe)
 
-`scripts/probes/bpfprobe.c` is a static binary run inside a real guest (via
-`scripts/integration.sh`) that measures what the *actual* libkrunfw kernel
+`scripts/integration/probes/bpfprobe.c` is a static binary run inside a real guest (via
+`just bpfprobe`) that measures what the *actual* libkrunfw kernel
 offers, rather than trusting a hand-maintained table:
 
 ```text

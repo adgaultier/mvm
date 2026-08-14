@@ -18,8 +18,9 @@ cargo build -p mvm-agent --target x86_64-unknown-linux-musl --release
                                  # target/debug/mvm-agent will NOT run in guests
                                  # (and the daemon refuses to inject it).
 scripts/build.sh                 # all of the above, release, into dist/
-scripts/integration.sh           # boots real VMs; needs /dev/kvm (Linux) or
-                                 # libkrun (macOS), plus network
+just -f scripts/integration/Justfile all   # boots real VMs; needs /dev/kvm
+                                 # (Linux) or libkrun (macOS), plus network
+                                 # (or `just <section>` for one, `just` to list)
 ```
 
 Hosts: Linux x86_64 (KVM) and macOS Apple Silicon (Hypervisor.framework,
@@ -239,8 +240,8 @@ candidate that is dynamically linked or not a Linux ELF at all.
    (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
    DHCP — it needs the gvproxy-style static-IP bootstrap instead.    Always-on
    by design: there is no opt-out. Filter shape is probed in-VM by
-   `scripts/probes/rawprobe.c` through `integration.sh` (as workload *and*
-   exec session).
+   `scripts/integration/probes/rawprobe.c` through `just raw-seccomp` (as
+   workload *and* exec session).
 - **`--security=strict` is a workload-scoped *second* seccomp filter.** The
   raw-socket ban above is installed on the agent (PID 1) at boot and inherited
   by everything. The strict filter is different: it is installed in the
@@ -253,8 +254,8 @@ candidate that is dynamically linked or not a Linux ELF at all.
   load eBPF programs itself (Phase 2) even in strict mode — the workload just
   can't. Plumbed: `--security` on `create`/`run`/`clone` → `SandboxSpec` →
   `ShimConfig` → shim env → agent. Probe the guest kernel's BPF capability
-  with `scripts/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict) before
-  assuming any in-guest eBPF enforcement is possible.
+  with `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load
+  verdict) before assuming any in-guest eBPF enforcement is possible.
  - **VM token: never persisted, never exposed — not even its hash.** The Agent
   API token is minted in `Manager::start` and held as `agent_token_hash`
   (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so
@@ -316,9 +317,9 @@ tooling (the `mvm-agent-mcp` bridge) can authenticate to `/agent/v1`.
 - Errors: `mvm_common::Error` (`thiserror`) inside crates; CLI-facing code
   maps to `String`.
 - Keep the daemon's HTTP surface documented in README when routes change.
-- Integration test must stay green and self-contained:
-  `scripts/integration.sh` runs against an isolated `MVM_DATA_DIR` + port,
-  skips gracefully (KVM, gvproxy), and cleans up after itself.
+- Integration test must stay green and self-contained: `just -f
+  scripts/integration/Justfile all` runs against an isolated `MVM_DATA_DIR` +
+  port, skips gracefully (KVM, gvproxy), and cleans up after itself.
 - Record non-obvious findings in this file's Sharp edges; track work in
   `TODO.md` (move finished items to its Done section with a one-liner on
   the mechanism).

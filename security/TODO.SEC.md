@@ -191,7 +191,7 @@ Evaluate additional restrictions for:
 > gated per-sandbox via `SandboxSpec.security` → `ShimConfig.security` →
 > `MVM_SECURITY_STRICT`. Still open: ptrace, mount, unshare, setns, module
 > loading, kexec, and the compatibility/security matrix below. The in-guest
-> eBPF probe (`scripts/probes/bpfprobe.c`, run by `integration.sh`) reports
+> eBPF probe (`scripts/integration/probes/bpfprobe.c`, run by `just bpfprobe`) reports
 > whether the libkrunfw kernel could host a Phase 2 cgroup_skb/egress policy —
 > that path stays gated on `progl=0` + `attach=0`.
 

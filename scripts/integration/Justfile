@@ -1,0 +1,99 @@
+# mvm integration suite — run against real microVMs.
+#
+# One recipe per section; each runs a plain bash script (sections/exec.sh, ...),
+# boots a fresh daemon via `_serve`, and tears it down via `cleanup` (both from
+# utils.just). Every section is self-contained: `just exec` and `just all`
+# behave identically per section.
+#
+#   just              # list sections (default recipe -> @just --list)
+#   just exec         # run one section (boots a fresh daemon, cleans up after)
+#   just all          # run every section (each self-contained)
+
+import 'utils.just'
+
+set positional-arguments
+
+# Default: running `just` shows the available recipes, which are the sections.
+default:
+    @just --list
+
+# Run every section, each self-contained (serve -> script -> cleanup).
+all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    for sh in {{justfile_directory()}}/sections/*.sh; do
+        name=$(basename "$sh" .sh)
+        echo ""
+        if ! just --justfile {{justfile_directory()}}/Justfile "$name"; then
+            echo "❌ section $name failed"
+            rc=1
+        fi
+    done
+    [ "$rc" -eq 0 ]
+
+# --- sections (each boots the daemon via `_serve`, tears it down after) ------
+
+pull: _serve
+    @{{justfile_directory()}}/sections/pull.sh
+    @just _cleanup
+
+load: _serve
+    @{{justfile_directory()}}/sections/load.sh
+    @just _cleanup
+
+run: _serve
+    @{{justfile_directory()}}/sections/run.sh
+    @just _cleanup
+
+console-resize: _serve
+    @{{justfile_directory()}}/sections/console-resize.sh
+    @just _cleanup
+
+exec: _serve
+    @{{justfile_directory()}}/sections/exec.sh
+    @just _cleanup
+
+networking: _serve
+    @{{justfile_directory()}}/sections/networking.sh
+    @just _cleanup
+
+raw-seccomp: _serve
+    @{{justfile_directory()}}/sections/raw-seccomp.sh
+    @just _cleanup
+
+bpfprobe: _serve
+    @{{justfile_directory()}}/sections/bpfprobe.sh
+    @just _cleanup
+
+volumes: _serve
+    @{{justfile_directory()}}/sections/volumes.sh
+    @just _cleanup
+
+ownership: _serve
+    @{{justfile_directory()}}/sections/ownership.sh
+    @just _cleanup
+
+lifecycle: _serve
+    @{{justfile_directory()}}/sections/lifecycle.sh
+    @just _cleanup
+
+logs: _serve
+    @{{justfile_directory()}}/sections/logs.sh
+    @just _cleanup
+
+attach: _serve
+    @{{justfile_directory()}}/sections/attach.sh
+    @just _cleanup
+
+resize: _serve
+    @{{justfile_directory()}}/sections/resize.sh
+    @just _cleanup
+
+clone: _serve
+    @{{justfile_directory()}}/sections/clone.sh
+    @just _cleanup
+
+agent-api: _serve
+    @{{justfile_directory()}}/sections/agent-api.sh
+    @just _cleanup
