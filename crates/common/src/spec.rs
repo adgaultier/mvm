@@ -185,11 +185,11 @@ impl std::fmt::Display for SandboxState {
     }
 }
 
-/// One measured lifecycle operation (create / start / stop / clone) with its
-/// phase timings. Recorded by the manager for the TUI's latency flamegraph.
+/// One measured lifecycle operation (create / start / stop) with its phase
+/// timings. Recorded by the manager for the TUI's latency flamegraph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleOp {
-    /// Operation name: "create" | "start" | "stop" | "clone".
+    /// Operation name: "create" | "start" | "stop".
     pub op: String,
     /// When the operation ran.
     pub at: chrono::DateTime<chrono::Utc>,

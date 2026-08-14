@@ -64,7 +64,7 @@ Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/re
 ## 6. Add startup latency instrumentation
 Measure startup latency end-to-end and surface it. **Timing capture is done**
 (2026-08-14): the manager records `total`, `vm_boot` (shim spawn -> agent
-ready) and per-phase wall times for create/clone/start/stop with monotonic
+ready) and per-phase wall times for create/start/stop with monotonic
 `Instant`s, as `Sandbox.lifecycle` — see the Done entry; the TUI inspect modal
 renders them as flamegraph bars. Remaining: a `--timings` CLI/API output
 (Vm boot / guest ready / exec / total) exposing the same numbers to scripts,
@@ -94,18 +94,17 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
 ## Done
 
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
-  records each `create`/`clone`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
+  records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
   `total_ms`, ordered `phases`) using monotonic `Instant`s, stored bounded
   (16) on `Sandbox.lifecycle` and serialized into the API. Phase lists:
-  `create` validate/register/persist, `clone` validate/disk/register/persist,
+  `create` validate/register/persist,
   `start` rootfs/agent/gvproxy/ports/shim/persist/boot (shim->agent-ready),
   `stop` terminate/persist. The TUI inspect modal renders one segmented
   colored bar per op (`tui::flame_bar_line`/`flame_legend`, `█` runs
-  proportional to ms + a `░` tail for the untimed slack); when a sandbox is
-  running it truncates to ops `at >= started_at` (the current boot session),
-  otherwise the full history (`tui::visible_lifecycle`). The `start` INFO log
-  now sources `total_ms`/`boot_ms` from the same timings. This is the data
-  half of TODO#6 (see item 6 for what's left).
+  proportional to ms + a `░` tail for the untimed slack), showing the full
+  recorded history (`tui::visible_lifecycle`) with a timestamp per bar. The
+  `start` INFO log sources `total_ms`/`boot_ms` from the same timings. This
+  is the data half of TODO#6 (see item 6 for what's left).
 
 - **`mvm load` — OCI image layout archives** (2026-08-13) — `mvm load --name
   IMAGE FILE` (docker `load` parity, OCI-layout only for now) imports a

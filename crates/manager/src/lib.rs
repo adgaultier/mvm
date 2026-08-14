@@ -186,10 +186,8 @@ impl Manager {
         spec: SandboxSpec,
         fork: bool,
     ) -> Result<Sandbox> {
-        let mut timings = OpTimings::begin("clone");
         let source_id = self.resolve(id_or_name)?;
         self.validate(&spec)?;
-        timings.mark("validate");
         // The disk copy can be slow (whole-rootfs on the `copy` driver), so it
         // runs before the registry is locked and off the async runtime; the
         // name generation + insert below stay atomic under the write lock.
@@ -205,7 +203,6 @@ impl Manager {
             .await
             .map_err(|e| Error::Runtime(format!("disk fork task panicked: {e}")))??;
         }
-        timings.mark("disk");
         {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if sandbox.spec.name.is_none() {
@@ -218,12 +215,7 @@ impl Manager {
             }
             sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
         }
-        timings.mark("register");
         self.persist()?;
-        timings.mark("persist");
-        let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(sandbox.id.as_str(), op.clone());
-        sandbox.lifecycle.push(op);
         tracing::info!(sandbox = %sandbox.id, source = %source_id, fork, "sandbox cloned");
         Ok(sandbox)
     }

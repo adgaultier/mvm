@@ -306,7 +306,12 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
                 }))
                 .title(" lifecycle timings ");
             let ops = visible_lifecycle(sb);
-            let lines = flame_lines(&ops, flame_area.width.saturating_sub(2) as usize);
+            let running = sb.state == mvm_common::SandboxState::Running;
+            let lines = flame_lines(
+                &ops,
+                running,
+                flame_area.width.saturating_sub(2) as usize,
+            );
             let viewport = flame_area.height.saturating_sub(2) as usize;
             ins.flame_scroll =
                 (ins.flame_scroll as usize).min(lines.len().saturating_sub(viewport)) as u16;
@@ -353,26 +358,45 @@ fn visible_lifecycle(sb: &mvm_common::Sandbox) -> Vec<&mvm_common::LifecycleOp> 
     sb.lifecycle.iter().collect()
 }
 
-/// One `Line` per flamegraph row: for each op, its segmented bar followed by
-/// its legend. The caller renders these in a scrollable `Paragraph`.
-fn flame_lines(ops: &[&mvm_common::LifecycleOp], bar_w: usize) -> Vec<Line<'static>> {
+/// One `Line` per flamegraph row: a `start` immediately followed by a `stop`
+/// is collapsed onto one line (boot -> teardown side by side); everything
+/// else — `create`, or a `start` with no following `stop` (a cycle that ended
+/// by exit, or the still-running boot) — gets its own line. Each op/cycle
+/// keeps a legend line beneath it.
+fn flame_lines(
+    ops: &[&mvm_common::LifecycleOp],
+    running: bool,
+    bar_w: usize,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     if ops.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no lifecycle timing recorded yet",
             Style::default().fg(Color::DarkGray),
         )));
-    } else {
-        for op in ops {
-            lines.push(flame_bar_line(op, bar_w));
+        return lines;
+    }
+    let mut i = 0;
+    while i < ops.len() {
+        let op = ops[i];
+        if op.op == "start" && ops.get(i + 1).map(|n| n.op.as_str()) == Some("stop") {
+            let stop = ops[i + 1];
+            lines.push(flame_pair_line(op, stop, bar_w));
+            lines.push(flame_pair_legend(op, stop));
+            i += 2;
+        } else {
+            let live = running && i + 1 == ops.len() && op.op == "start";
+            lines.push(flame_bar_line(op, bar_w, live));
             lines.push(flame_legend(op));
+            i += 1;
         }
     }
     lines
 }
 
-/// `HH:MM:SS  start  ████…████  1234ms` — timestamp left, total right.
-fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize) -> Line<'static> {
+/// `HH:MM:SS  start  ████…████  1234ms` — timestamp left, total right; `live`
+/// appends a running marker for the current boot that has no `stop` yet.
+fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize, live: bool) -> Line<'static> {
     let ts = op.at.format("%H:%M:%S").to_string();
     let label = format!("{:<6}", op.op);
     let total = format!("{:>6}ms", op.total_ms);
@@ -383,11 +407,68 @@ fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize) -> Line<'static> {
         Span::raw(" "),
         Span::styled(label, Style::default().fg(Color::Gray)),
     ];
+    spans.extend(bar_spans(op, bar_w));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(total, Style::default().fg(Color::Gray)));
+    if live {
+        spans.push(Span::styled(" ▶ running", Style::default().fg(Color::Green)));
+    }
+    Line::from(spans)
+}
+
+/// `HH:MM:SS  start ████…█ 1234ms   stop ████ 300ms` — the boot and teardown
+/// of one lifecycle cycle side by side, each bar scaled to its own total.
+fn flame_pair_line(
+    start: &mvm_common::LifecycleOp,
+    stop: &mvm_common::LifecycleOp,
+    width: usize,
+) -> Line<'static> {
+    let ts = start.at.format("%H:%M:%S").to_string();
+    let start_label = format!("{:<6}", "start");
+    let stop_label = format!("{:<6}", "stop");
+    let start_total = format!("{:>6}ms", start.total_ms);
+    let stop_total = format!("{:>6}ms", stop.total_ms);
+    let fixed = ts.len()
+        + 1
+        + start_label.len()
+        + 1
+        + start_total.len()
+        + 3
+        + stop_label.len()
+        + 1
+        + stop_total.len();
+    let rest = width.saturating_sub(fixed);
+    let start_cols = rest / 2;
+    let stop_cols = rest - start_cols;
+
+    let mut spans = vec![
+        Span::styled(ts, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(start_label, Style::default().fg(Color::Gray)),
+    ];
+    spans.extend(bar_spans(start, start_cols));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(start_total, Style::default().fg(Color::Gray)));
+    spans.push(Span::raw("   "));
+    spans.push(Span::styled(stop_label, Style::default().fg(Color::Gray)));
+    spans.extend(bar_spans(stop, stop_cols));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(stop_total, Style::default().fg(Color::Gray)));
+    Line::from(spans)
+}
+
+/// The colored phase segments of one bar (scaled to `cols`), plus a faint
+/// `░` tail for whatever the phases don't account for.
+fn bar_spans(op: &mvm_common::LifecycleOp, cols: usize) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if cols == 0 {
+        return spans;
+    }
     let total_ms = op.total_ms.max(1);
-    let mut remaining = bar_w;
+    let mut remaining = cols;
     if op.phases.is_empty() {
         spans.push(Span::styled(
-            "█".repeat(bar_w),
+            "█".repeat(cols),
             Style::default().fg(Color::DarkGray),
         ));
         remaining = 0;
@@ -395,39 +476,62 @@ fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize) -> Line<'static> {
         for (i, (name, ms)) in op.phases.iter().enumerate() {
             // The last phase absorbs whatever the rounded earlier ones left,
             // so the bar always sums to the full width.
-            let cols = if i + 1 == op.phases.len() {
+            let c = if i + 1 == op.phases.len() {
                 remaining
             } else {
-                ((*ms as f64 / total_ms as f64) * bar_w as f64).round() as usize
+                ((*ms as f64 / total_ms as f64) * cols as f64).round() as usize
             };
-            let cols = cols.min(remaining);
-            if cols > 0 {
+            let c = c.min(remaining);
+            if c > 0 {
                 spans.push(Span::styled(
-                    "█".repeat(cols),
+                    "█".repeat(c),
                     Style::default().fg(phase_color(name)),
                 ));
-                remaining -= cols;
+                remaining -= c;
             }
         }
     }
-    // Phases that don't add up to the total leave a faint tail.
     if remaining > 0 {
         spans.push(Span::styled(
             "░".repeat(remaining),
             Style::default().fg(Color::DarkGray),
         ));
     }
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(total, Style::default().fg(Color::Gray)));
+    spans
+}
+
+fn flame_pair_legend(
+    start: &mvm_common::LifecycleOp,
+    stop: &mvm_common::LifecycleOp,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw("   ")];
+    let start_shown: Vec<_> = start.phases.iter().filter(|(_, ms)| *ms > 0).collect();
+    let stop_shown: Vec<_> = stop.phases.iter().filter(|(_, ms)| *ms > 0).collect();
+    if start_shown.is_empty() && stop_shown.is_empty() {
+        spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
+        return Line::from(spans);
+    }
+    for (name, ms) in start_shown.iter() {
+        spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
+        spans.push(Span::raw(format!(" {name}={ms}ms  ")));
+    }
+    if !start_shown.is_empty() && !stop_shown.is_empty() {
+        spans.push(Span::raw("│  "));
+    }
+    for (name, ms) in stop_shown.iter() {
+        spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
+        spans.push(Span::raw(format!(" {name}={ms}ms  ")));
+    }
     Line::from(spans)
 }
 
 fn flame_legend(op: &mvm_common::LifecycleOp) -> Line<'static> {
     let mut spans = vec![Span::raw("   ")];
-    if op.phases.is_empty() {
+    let shown: Vec<_> = op.phases.iter().filter(|(_, ms)| *ms > 0).collect();
+    if shown.is_empty() {
         spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
     } else {
-        for (name, ms) in op.phases.iter() {
+        for (name, ms) in shown {
             spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
             spans.push(Span::raw(format!(" {name}={ms}ms  ")));
         }
@@ -734,5 +838,62 @@ mod tests {
     #[test]
     fn empty_history_renders_nothing() {
         assert!(visible_lifecycle(&sandbox()).is_empty());
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn start_stop_cycle_pairs_on_one_line() {
+        let mut sb = sandbox();
+        sb.lifecycle = vec![
+            op("create", 100),
+            op("start", 200),
+            op("stop", 300),
+            op("start", 400),
+        ];
+        let ops = visible_lifecycle(&sb);
+        let lines = flame_lines(&ops, true, 60);
+        // create (bar+legend), start+stop pair (bar+legend), live start (bar+legend)
+        assert_eq!(lines.len(), 6);
+
+        // The paired row carries both labels and both totals.
+        let pair = line_text(&lines[2]);
+        assert!(pair.contains("start"), "pair row: {pair}");
+        assert!(pair.contains("stop"), "pair row: {pair}");
+        assert!(pair.contains("1000ms"), "pair row: {pair}");
+
+        // The live (still running) start gets the running marker.
+        let live = line_text(&lines[4]);
+        assert!(live.contains("▶"), "live row: {live}");
+    }
+
+    #[test]
+    fn legend_skips_zero_ms_phases() {
+        let op = LifecycleOp {
+            op: "start".into(),
+            at: chrono::DateTime::from_timestamp(100, 0).unwrap(),
+            total_ms: 1000,
+            phases: vec![
+                ("rootfs".to_string(), 800),
+                ("gvproxy".to_string(), 0), // not on gvproxy net: 0ms, hide it
+                ("boot".to_string(), 200),
+            ],
+        };
+        let legend = line_text(&flame_legend(&op));
+        assert!(legend.contains("rootfs=800ms"), "legend: {legend}");
+        assert!(legend.contains("boot=200ms"), "legend: {legend}");
+        assert!(!legend.contains("gvproxy"), "0ms phase leaked: {legend}");
+
+        let stop = LifecycleOp {
+            op: "stop".into(),
+            at: chrono::DateTime::from_timestamp(200, 0).unwrap(),
+            total_ms: 1,
+            phases: vec![("terminate".to_string(), 1), ("persist".to_string(), 0)],
+        };
+        let pair = line_text(&flame_pair_legend(&op, &stop));
+        assert!(pair.contains("terminate=1ms"), "pair: {pair}");
+        assert!(!pair.contains("persist"), "0ms phase leaked in pair: {pair}");
     }
 }
