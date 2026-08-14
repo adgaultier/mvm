@@ -67,6 +67,43 @@ pub struct Mount {
     pub read_only: bool,
 }
 
+/// Security profile for a sandbox.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityProfile {
+    /// Docker-style compatibility: root workloads keep the usual syscall
+    /// surface (the always-on raw-socket ban still applies).
+    #[default]
+    Default,
+    /// Hostile-workload hardening: the guest agent installs an additional
+    /// seccomp filter in the workload's spawn path denying the high-risk
+    /// syscalls (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`,
+    /// `io_uring`). Fail-closed by design — this is for untrusted code.
+    Strict,
+}
+
+impl std::str::FromStr for SecurityProfile {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "default" => Ok(SecurityProfile::Default),
+            "strict" => Ok(SecurityProfile::Strict),
+            _ => Err(format!(
+                "unknown security profile '{s}' (default|strict)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for SecurityProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SecurityProfile::Default => "default",
+            SecurityProfile::Strict => "strict",
+        })
+    }
+}
+
 /// User-provided specification for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSpec {
@@ -116,6 +153,11 @@ pub struct SandboxSpec {
     /// Bind mounts.
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    /// Security profile (default|strict). Strict installs an additional
+    /// guest-side seccomp filter denying high-risk syscalls in the workload's
+    /// spawn path; intended for hostile workloads.
+    #[serde(default)]
+    pub security: SecurityProfile,
     /// Labels for bookkeeping.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
@@ -145,6 +187,7 @@ impl Default for SandboxSpec {
             network: NetworkMode::None,
             ports: vec![],
             mounts: vec![],
+            security: SecurityProfile::Default,
             labels: BTreeMap::new(),
         }
     }

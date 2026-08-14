@@ -27,3 +27,6 @@ __pycache__/
 /.zprofile
 /.zshrc
 scripts/script.result
+
+# Integration-test runtime (daemon pid, isolated data dir)
+scripts/integration/.runtime/

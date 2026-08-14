@@ -93,6 +93,21 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
 
 ## Done
 
+- **`--security=strict` guest syscall hardening** (2026-08-14) — `mvm
+  create/run/clone --security=strict` plumbs `SandboxSpec.security` →
+  `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the agent installs a
+  workload-scoped second seccomp filter (`build_strict` in
+  `crates/agent/src/seccomp.rs`, applied via `apply_strict_seccomp` in the
+  workload's `pre_exec` *before* the privilege drop, and in exec sessions)
+  denying `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, and the
+  `io_uring_*` trio with `EPERM`. The agent keeps the full syscall surface
+  (needed for exec/pty — and, later, for the agent itself loading eBPF in
+  Phase 2). `scripts/integration/probes/bpfprobe.c` (wired into the
+  `bpfprobe` integration section) probes the libkrunfw guest kernel's
+  BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
+  gate for the planned in-guest cgroup_skb/egress
+  policy. This is the P2 syscall-hardening baseline from `security/TODO.SEC.md`.
+
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
   records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
   `total_ms`, ordered `phases`) using monotonic `Instant`s, stored bounded
@@ -138,8 +153,9 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   the agent mounts devpts *before* `openpty()`, so ptys land in the topmost
   (visible) instance. Two devpts instances exist (libkrun init + agent), but
   `tty`, `ls /dev/pts`, `ttyname`, and non-root access all work. Added 4
-  integration tests to `scripts/integration.sh` (devpts count, ls, ttyname,
-  non-root); all pass. The item is downgraded to a low-priority cleanup:
+  integration tests to the `console-resize`/`exec` integration sections
+  (devpts count, ls, ttyname, non-root); all pass. The item is downgraded to
+  a low-priority cleanup:
   deduplicate the devpts mount.
 
 - **Raw socket creation banned in the guest (seccomp-bpf)** (2026-08-09) —
@@ -152,8 +168,8 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   `crates/agent/src/seccomp.rs` builds the BPF with `libc::sock_filter` /
   `sock_fprog` + `prctl` (no new deps, musl-safe); the filter is inherited by
   every descendant (workload, exec sessions) and cannot be weakened.
-  `scripts/probes/rawprobe.c` probes the full matrix in-VM as both a workload
-  and an exec session via `integration.sh` (80/80 green).
+  `scripts/integration/probes/rawprobe.c` probes the full matrix in-VM as
+  both a workload and an exec session via `just raw-seccomp` (80/80 green).
 
 - **Live console window resize for `mvm run -it` / `mvm attach`** (2026-08-09) —
   the console now tracks the terminal like `exec` does. The agent `dup`s the

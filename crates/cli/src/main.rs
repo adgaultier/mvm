@@ -195,6 +195,12 @@ pub(crate) struct BoxArgs {
     /// attached). Combine with -i for a shell.
     #[arg(short, long)]
     tty: bool,
+    /// Security profile: default | strict. Strict installs an additional
+    /// guest-side seccomp filter denying high-risk syscalls (bpf, keyctl,
+    /// perf_event_open, userfaultfd, io_uring) in the workload's spawn path —
+    /// for hostile/untrusted workloads.
+    #[arg(long, default_value = "default")]
+    security: String,
 }
 
 /// `mvm clone` flag overrides. Absent = inherit from the source. The source's
@@ -238,6 +244,9 @@ struct CloneArgs {
     /// Give the workload its own guest pty.
     #[arg(short, long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     tty: Option<bool>,
+    /// Security profile: default | strict.
+    #[arg(long)]
+    security: Option<String>,
     /// Override the guest command (docker-style trailing args).
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
@@ -468,6 +477,7 @@ fn validate_guest_command(command: &[String]) -> Result<(), String> {
         "--host",
         "--interactive",
         "--tty",
+        "--security",
     ];
     if let Some(first) = command.first() {
         if first.starts_with('-') {
@@ -519,6 +529,10 @@ impl BoxArgs {
             network,
             ports: self.publish.clone(),
             mounts,
+            security: self
+                .security
+                .parse()
+                .map_err(|e: String| format!("--security: {e}"))?,
             labels: Default::default(),
         })
     }
@@ -582,6 +596,11 @@ fn clone_spec(source: &Sandbox, overrides: CloneArgs) -> Result<SandboxSpec, Str
         } else {
             None
         };
+    }
+    if let Some(security) = overrides.security {
+        spec.security = security
+            .parse()
+            .map_err(|e: String| format!("--security: {e}"))?;
     }
     Ok(spec)
 }

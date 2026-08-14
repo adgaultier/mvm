@@ -75,6 +75,9 @@ struct Agent {
     /// environment before it spawns.
     #[allow(dead_code)]
     agent_token: Option<String>,
+    /// Strict security profile: exec sessions install the high-risk-syscall
+    /// seccomp filter in their pre_exec, like the workload itself.
+    strict: bool,
 }
 
 pub fn main() {
@@ -127,6 +130,11 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // spawns (the mvm-agent-mcp bridge) can authenticate to `/agent/v1`.
     let agent_token = std::env::var("MVM_AGENT_TOKEN").ok();
 
+    // Strict security profile: the workload (and everything it spawns) gets
+    // an extra seccomp filter denying high-risk syscalls. Read before the
+    // scrub below, and the flag itself is scrubbed like the other plumbing.
+    let strict = std::env::var_os("MVM_SECURITY_STRICT").is_some();
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_MOUNTS",
@@ -136,6 +144,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_CONSOLE_SIZE",
         "MVM_USER",
         "MVM_HOST_OS",
+        "MVM_SECURITY_STRICT",
     ] {
         std::env::remove_var(var);
     }
@@ -193,7 +202,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
-        match spawn_tty_workload(workload_argv, console_size, &user) {
+        match spawn_tty_workload(workload_argv, console_size, &user, strict) {
             Some((child, handle, pty)) => {
                 console_output = Some(handle);
                 console_pty = pty;
@@ -207,6 +216,9 @@ fn real_main(workload_argv: &[String]) -> i32 {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        if strict {
+            apply_strict_seccomp(&mut cmd);
+        }
         apply_user(&mut cmd, &user);
         match cmd.spawn() {
             Ok(child) => Some(child),
@@ -257,6 +269,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         console_output,
         console_pty,
         agent_token,
+        strict,
     };
     agent.send(&AgentEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
@@ -269,6 +282,7 @@ fn spawn_tty_workload(
     workload_argv: &[String],
     size: Option<(u16, u16)>,
     user: &GuestUser,
+    strict: bool,
 ) -> Option<(
     std::process::Child,
     std::thread::JoinHandle<()>,
@@ -327,6 +341,12 @@ fn spawn_tty_workload(
             }
             Ok(())
         });
+    }
+    // Strict mode: install the high-risk-syscall filter before any privilege
+    // drop, so it is active for the whole of the workload's pre_exec chain.
+    // The filter itself needs no privileges, so this order is safe.
+    if strict {
+        apply_strict_seccomp(&mut cmd);
     }
     // Registered last: pre_exec closures run in order, and claiming the
     // controlling terminal has to happen while still root.
@@ -485,6 +505,25 @@ fn resolve_user_from(spec: &str, passwd: &str, group_file: &str) -> Result<Guest
         name,
         home,
     })
+}
+
+/// Install the strict-mode seccomp filter in a child before exec. Registered
+/// *before* `apply_user` (whose pre_exec drops privileges): a seccomp filter
+/// needs no privileges to install, and having it active for the whole pre_exec
+/// chain is the point. Failure to install aborts the spawn — a strict-mode
+/// workload that cannot be sandboxed will not run. Note: no logging inside the
+/// closure — it runs post-fork in the child, where std locks may deadlock.
+fn apply_strict_seccomp(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            crate::seccomp::install_strict_filter().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "strict seccomp install failed",
+                )
+            })
+        });
+    }
 }
 
 /// Run a child as `user`: identity env for the workload, and the actual
@@ -1037,6 +1076,12 @@ impl Agent {
         }
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
+        }
+        // Strict mode: seccomp before the tty/pre_exec privilege work, so the
+        // filter is active for the whole chain and for every process the
+        // session spawns.
+        if self.strict {
+            apply_strict_seccomp(&mut cmd);
         }
         // Last, so the tty work above still happens as root. Also overrides
         // HOME/USER/LOGNAME from baseline_env for the target identity.

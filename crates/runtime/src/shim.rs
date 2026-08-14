@@ -3,7 +3,7 @@
 //! `krun_start_enter` takes over the calling process (it exits when the VM
 //! shuts down).
 
-use mvm_common::{protocol, Mount, NetworkMode, Result};
+use mvm_common::{protocol, Mount, NetworkMode, Result, SecurityProfile};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -43,6 +43,10 @@ pub struct ShimConfig {
     /// as if the workload had printed it.
     #[serde(default)]
     pub krun_log: Option<PathBuf>,
+    /// Security profile; strict makes the agent install an additional
+    /// workload-scoped seccomp filter denying high-risk syscalls.
+    #[serde(default)]
+    pub security: SecurityProfile,
 }
 
 impl ShimConfig {
@@ -192,6 +196,12 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         // `USER` against its own user database.
         if let Some(user) = &config.user {
             env.push(format!("MVM_USER={user}"));
+        }
+        // Security profile. Strict installs an additional seccomp filter in
+        // the agent's workload spawn path (denies bpf/keyctl/perf_event_open/
+        // userfaultfd/io_uring); the agent scrubs the var before execing.
+        if config.security == SecurityProfile::Strict {
+            env.push("MVM_SECURITY_STRICT=1".to_string());
         }
         // VM-scoped bearer token for the host's Agent API. It arrives here as
         // a shim *process* env var (never from shim.json, and the plaintext is

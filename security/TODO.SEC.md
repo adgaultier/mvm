@@ -184,6 +184,17 @@ Evaluate additional restrictions for:
 - kexec
 - other high-risk capabilities
 
+> **PARTIALLY DONE (2026-08-14):** `--security=strict` (`mvm run --security=strict`,
+> also on `create`/`clone`) installs a workload-scoped second seccomp filter
+> (`build_strict` in `crates/agent/src/seccomp.rs`) denying `bpf`, `keyctl`,
+> `perf_event_open`, `userfaultfd`, and the `io_uring_*` trio with `EPERM`,
+> gated per-sandbox via `SandboxSpec.security` → `ShimConfig.security` →
+> `MVM_SECURITY_STRICT`. Still open: ptrace, mount, unshare, setns, module
+> loading, kexec, and the compatibility/security matrix below. The in-guest
+> eBPF probe (`scripts/integration/probes/bpfprobe.c`, run by `just bpfprobe`) reports
+> whether the libkrunfw kernel could host a Phase 2 cgroup_skb/egress policy —
+> that path stays gated on `progl=0` + `attach=0`.
+
 Do not rely on seccomp as the primary isolation boundary; KVM remains the principal security boundary.
 Add a compatibility/security matrix documenting which restrictions can safely be enabled.
 

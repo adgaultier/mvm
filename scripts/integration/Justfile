@@ -1,0 +1,151 @@
+# mvm integration suite — run against real microVMs.
+#
+# One recipe per section; each runs a plain bash script (sections/exec.sh, ...)
+# inside a bash block that boots a fresh daemon via the `_serve` dependency
+# (utils.just) and tears it down via `trap cleanup EXIT` — so a failing section
+# still cleans up. Every section is self-contained.
+#
+#   just              # list sections (default recipe -> @just --list)
+#   just exec         # run one section (boots a fresh daemon, cleans up after)
+#   just all          # run every section (each self-contained)
+
+import 'utils.just'
+
+set positional-arguments
+
+# Default: running `just` shows the available recipes, which are the sections.
+default:
+    @just --list
+
+# Run every section against ONE shared daemon: `_serve` boots it once, the
+# loop sources each section script in this shell, and `trap cleanup EXIT`
+# tears it down at the end. Individual section recipes below boot their own
+# daemon for standalone `just <name>` runs.
+all: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    rc=0
+    for sh in {{justfile_directory()}}/sections/*.sh; do
+        echo ""
+        if ! source "$sh"; then
+            echo "❌ section $(basename "$sh" .sh) failed"
+            rc=1
+        fi
+    done
+    [ "$rc" -eq 0 ]
+
+# --- sections (each boots the daemon via `_serve`, tears it down after) ------
+
+pull: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/pull.sh
+
+load: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/load.sh
+
+run: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/run.sh
+
+console-resize: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/console-resize.sh
+
+exec: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/exec.sh
+
+networking: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/networking.sh
+
+raw-seccomp: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/raw-seccomp.sh
+
+bpfprobe: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/bpfprobe.sh
+
+volumes: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/volumes.sh
+
+ownership: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/ownership.sh
+
+lifecycle: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/lifecycle.sh
+
+logs: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/logs.sh
+
+attach: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/attach.sh
+
+resize: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/resize.sh
+
+clone: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/clone.sh
+
+agent-api: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/agent-api.sh
