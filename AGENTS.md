@@ -273,7 +273,11 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `MVM_*` channel rides the kernel cmdline) — and is never written to host
   disk. The Agent API routes carry no `{id}` — the sandbox is derived from the
   token, so a caller can only act on itself. Token lookup uses a constant-time
-  hash compare over the sandbox list (no `HashMap` keyed on the secret).
+  hash compare over the sandbox list (no `HashMap` keyed on the secret). The
+  whole surface is gated behind the `agent-api` cargo feature of the `mvm`
+  binary (on by default): `--no-default-features` drops the `/agent/v1`
+  listener, the `--agent-addr` flag and the token-verification code, while
+  token *minting* into the guest env stays (it is part of the boot plumbing).
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
   driver writes the rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't

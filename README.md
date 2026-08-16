@@ -1,15 +1,39 @@
-# mvm — microVM sandboxes on libkrun
-`mvm` aims to run OCI container images as hardware-isolated microVMs, giving each sandbox its own Linux kernel while retaining a Docker-style workflow. Each VM is booted through [libkrun](https://github.com/containers/libkrun), with the image rootfs shared over virtiofs, and managed through a CLI, HTTP API, or ratatui dashboard
+# mvm -  microVM sandbox runtime
+## Contents 
+[Presentation](#presentation) · [Quick start](#quick-start) · [Architecture](#architecture) ·
+ [Installation](#installation) · [CLI](#cli) · [Networking](#networking) · [Storage](#storage) · [Security model](#security-model-and-hardening) · [HTTP API](#http-api) · [Agents API](#agent-api) · [Environment](#environment) · [Status](#status)
 
-> **Status:** work in progress, partially written with coding agents.
-> Contributions welcome. See [`TODO.md`](TODO.md) for the backlog and
-> [`AGENTS.md`](AGENTS.md) for architecture notes.
+## Presentation
+### What is mvm?
+`mvm` runs OCI container images as isolated microVMs, each with its
+own Linux kernel, booted through [libkrun](https://github.com/containers/libkrun).
+It provides a familiar container workflow -  pull, run, exec, logs, stop, rm -  while using a VM as the isolation boundary.
 
-**Contents** — [Quick start](#quick-start) · [Architecture](#architecture) ·
-[Requirements](#requirements) · [Build](#build) · [CLI](#cli) ·
-[Networking](#networking) · [Storage](#storage) · [Guest security](#guest-security) ·
-[Security model and hardening](#security-model-and-hardening) ·
-[HTTP API](#http-api) · [Environment](#environment)
+Each sandbox is a separate VM, treated as a hostile guest. The host exposes only explicitly controlled interfaces: virtiofs storage, requested mounts, vsock, and the selected network backend.
+
+A small static musl guest agent acts as init and provides process control over vsock, so basic sandbox control does not depend on guest networking
+
+mvm is designed for workloads that may be untrusted or generated dynamically:
+from AI agents and the code they run to developer tools, automation, builds,
+and experiments.
+
+
+
+
+### What you get
+- **OCI images** -  pull and run images directly from registries.
+- **VM isolation** -  each sandbox has its own Linux kernel and VM boundary.
+- **Container-style lifecycle** -  create, run, start, attach, exec, logs, stop, rm, clone.
+- **Explicit networking** -  networking is disabled by default; TSI, gvproxy,
+  or TAP can be enabled when needed.
+- **Controlled interfaces** -   host/guest access is explicit: storage, mounts,
+  process control, and networking are configured per sandbox.
+- **Persistent or disposable storage** -  OverlayFS or copy-based rootfs,depending on platform and configuration.
+- **Rootless Linux** -  run the daemon without host root privileges.
+- **Interactive workloads** -  PTYs, stdin, attach, and exec are supported.
+- **HTTP API + TUI** -  manage sandboxes through a local daemon, with the CLI
+and TUI acting as thin clients.
+
 
 ## Quick start
 
@@ -37,12 +61,14 @@ $ mvm start -a box                        # ctrl-p ctrl-q detaches
 $ mvm attach box                          # …and comes back to it
 ```
 
+
 ## Architecture
 
 ```
-      mvm CLI / mvm-tui (thin HTTP clients)
+           mvm CLI / mvm-tui
+          (thin HTTP clients)
                     │
-        HTTP API (mvm serve — axum)
+              HTTP API
                     │
              Sandbox Manager
                     │
@@ -51,30 +77,38 @@ $ mvm attach box                          # …and comes back to it
   Manager       Manager         Manager
     └───────────────┼───────────────┘
                     │
-      libkrun shim (one process per VM)
+             VM Shim / libkrun
+                    │
+              ┌─────▼─────┐
+              │  microVM  │
+              │           │
+              │  kernel   │
+              │  agent    │
+              │ workload  │
+              └───────────┘
                     │
                  KVM / HVF
 ```
+- **Daemon + clients**. `mvm serve` owns all sandbox and image state behind a
+  local HTTP API (default `127.0.0.1:24642`). The CLI and TUI are thin,
+  stateless clients
 
-- **Daemon + clients.** `mvm serve` owns all state behind a local HTTP API
-  (default `127.0.0.1:24642`, override with `MVM_HOST`). CLI and TUI are
-  stateless clients.
-- **One shim process per VM.** libkrun's `krun_start_enter()` takes over the
-  calling process, so the daemon spawns a detached `mvm __vm-shim` per sandbox.
-  Its stdout/stderr *is* the guest console, pumped to `console.log` and to live
-  log followers. libkrun's own diagnostics go to a separate `krun.log`, so
-  hypervisor noise never shows up as guest output.
-- **Guest agent as the guest's init.** A static musl binary is injected at
-  `/.mvm/agent` (libkrun's `/init.krun` is PID 1 and execs it). It spawns the
-  workload — on its own pty with `-t` — reaps zombies, and serves `exec` (stdin,
-  stdout/stderr streaming, exit codes) over **vsock**, so no guest networking is
-  required.
-- **Pure-Rust image pulls.** Registry auth, manifest resolution, blob
-  verification, layer unpack and OCI whiteouts are implemented in-tree — no
-  skopeo/podman needed.
+- **Sandbox lifecycle**. The Sandbox Manager coordinates VM lifecycle,
+networking, storage, and image-backed root filesystems. Each sandbox gets
+its own VM shim and microVM
 
-## Requirements
+- **Guest agent**.  A small static musl binary acts as the guest's init,
+spawning the workload and providing process execution, stdin/stdout,
+PTY, and lifecycle control over vsock. Guest networking is not required
+for sandbox control.
 
+- **OCI images**. Image pulls are implemented in Rust, including registry
+  authentication, manifest resolution, blob verification, layer unpacking,
+  and OCI whiteouts; no skopeo or podman is required.
+
+
+## Installation
+### Requirements
 | | |
 |---|---|
 | Host | **Linux x86_64** with KVM (`/dev/kvm` read-write for your user), or **macOS on Apple Silicon** (macOS 14+, Hypervisor.framework) |
@@ -82,7 +116,7 @@ $ mvm attach box                          # …and comes back to it
 | Toolchain | Rust, plus the musl target matching your host arch (`x86_64-` or `aarch64-unknown-linux-musl`) for the guest agent |
 | Optional | [gvproxy](https://github.com/containers/gvisor-tap-vsock) ≥ v0.8.9 for userspace NAT / port forwarding |
 
-Guests are the **same architecture as the host** — on Apple Silicon pull arm64
+Guests are the **same architecture as the host** -  on Apple Silicon pull arm64
 images (`mvm pull` resolves the matching platform manifest automatically).
 
 Rootless operation is fully supported: state lives in `~/.local/share/mvm`
@@ -91,7 +125,7 @@ Rootless operation is fully supported: state lives in `~/.local/share/mvm`
 On macOS, `scripts/install-darwin.sh` installs everything (rustup, zig, libkrun
 and gvproxy from the `libkrun/krun` Homebrew tap).
 
-## Build
+### Build
 
 ```console
 $ scripts/build.sh        # release binaries + static agent → dist/
@@ -101,7 +135,7 @@ $ just -f scripts/integration/Justfile all  # boots real VMs (needs KVM/libkrun 
 
 On macOS run `scripts/install-darwin.sh` once first; `build.sh` then
 cross-compiles the agent with `cargo zigbuild` and codesigns `dist/mvm` with the
-Hypervisor.framework entitlement — without it macOS refuses to start VMs.
+Hypervisor.framework entitlement -  without it macOS refuses to start VMs.
 
 `mvm` looks for `mvm-agent` next to its own binary, or at `MVM_AGENT_PATH`. The
 agent **must** be the static musl build; it runs inside guests whose libc you
@@ -130,9 +164,15 @@ don't control, and the daemon refuses a dynamically linked one.
 | `mvm clone SANDBOX [--fork] [FLAG…]` | new sandbox from the source's spec |
 | `mvm-tui` | live dashboard |
 
+
 Any command taking a `SANDBOX` accepts its **id, a unique id prefix, or its
-name**. Names are unique — creating a second sandbox with a taken name is
+name**. Names are unique -  creating a second sandbox with a taken name is
 refused; without `--name` the daemon generates one.
+
+### `pull` / `load`
+`mvm load` ingests an **OCI image layout** archive -  the `.tar` produced by
+`podman save --format oci-archive`, `buildah push oci:`, or `skopeo copy
+oci:`.
 
 ### `run` / `create` options
 
@@ -147,11 +187,11 @@ refused; without `--name` the daemon generates one.
 | `-w DIR` | working directory in the guest |
 | `-u USER` | run the workload as this user (`name/uid[:group/gid]`), overriding the image's `USER`; resolved against the *guest's* `/etc/passwd` |
 | `-i` / `-t` | keep the console's stdin open / give the workload its own guest pty |
-| `--security PROFILE` | `default` \| `strict` — strict installs an extra guest-side seccomp filter in the workload's spawn path denying high-risk syscalls (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring`); for hostile/untrusted workloads |
+| `--security PROFILE` | `default` \| `strict` -  strict installs an extra guest-side seccomp filter in the workload's spawn path for hostile workloads; see [SEC.TODO.md](doc/security/SEC.TODO.md) |
 | `--rm` | (`run` only) remove the sandbox when the workload exits |
 
 `-i` and `-t` are **properties of the sandbox, fixed at create time** (as in
-docker). `start` has no `-i`/`-t` of its own — it reuses what the sandbox was
+docker). `start` has no `-i`/`-t` of its own -  it reuses what the sandbox was
 created with, so a client can never contradict the running VM:
 
 ```console
@@ -171,36 +211,38 @@ allocation applies on the **next start**. `--restart` reboots the sandbox
 immediately.
 
 ### `clone`
-
 `mvm clone SRC` creates a new sandbox with a copy of the source's spec; any
 `run`/`create` flag overrides it (`-e`, `-v`, `-p` *replace* the source's lists
 rather than appending). The source's name is never inherited.
-
 `--fork` also copies the source's current disk (reflink'd), so the clone boots
-with its files intact. For forking a *running* source, stop it first — the
+with its files intact. For forking a *running* source, stop it first -  the
 snapshot is point-in-time, not crash-consistent.
+
 
 ### `mvm-tui`
 
-Tui to interact with sandbox and images
-Currently limited to sandboxes start/stop/resize/inspect
+Live dashboard with sandbox and image tabs. Sandboxes can be started, stopped,
+resized (`r`), deleted (`d` with confirmation), and inspected (`i`, including
+lifecycle timing flamegraphs); images are listed only.
 
 ## Networking
 
 Select a profile with `--net`, placed before the image.
 
+Networking is opt-in. Sandboxes have no external network access by default.
+
 ### `none` (default)
 
-Fully isolated — loopback only. mvm attaches a dead NIC to switch off libkrun's
+No external network access; the guest has loopback only. mvm attaches a dead NIC to switch off libkrun's
 default TSI backend, which would otherwise give every guest transparent host
 networking.
 
 ### `tsi`
 
 libkrun's Transparent Socket Impersonation: guest sockets are serviced by the
-host directly. Outbound internet and DNS with **zero setup** — no proxy, no NIC,
-no root — plus `-p` port maps. The guest shares the host's network identity; use
-`gvproxy` when you want NAT separation.
+host directly. Outbound internet and DNS with **zero setup** -  no proxy, no NIC,
+no root -  plus `-p` port maps. The guest shares the host's network identity; use
+`gvproxy` when you want NAT separation. Use it at your own risk.
 
 ### `gvproxy`
 
@@ -213,16 +255,11 @@ $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
 ```
 
 The daemon starts a **private gvproxy per sandbox** and stops it with the
-sandbox. That is not a luxury: a gvproxy vfkit datagram endpoint learns its peer
-from the first packet and never re-learns, so a shared socket serves the first VM
-and silently leaves every later one with no route at all (and all guests boot on
-the same static address anyway).
+sandbox. The guest is configured automatically (192.168.127.2/24, gateway and
+DNS at .1). Throughput is modest (userspace TCP/IP) -  fine for package installs
+and API calls.
 
-The guest is configured automatically (192.168.127.2/24, gateway and DNS at .1).
-Throughput is modest (userspace TCP/IP) — fine for package installs and API
-calls.
-
-`gvproxy:<socket>` attaches to a gvproxy you run yourself instead — one sandbox
+`gvproxy:<socket>` attaches to a gvproxy you run yourself instead -  one sandbox
 per instance, listening in **vfkit** mode (libkrun speaks the vfkit datagram
 protocol, *not* `-listen-qemu`), with `MVM_GVPROXY_CONTROL` pointing at its
 `-listen` socket if you want port forwards registered through gvproxy's HTTP
@@ -241,7 +278,7 @@ with `unsupported 'unixgram' scheme`; use a newer build.
 ### `tap:<dev>`
 
 Attach to an existing TAP device for near-native performance (Linux-only). You
-own the plumbing, and the guest needs its own IP configuration — mvm does no
+own the plumbing, and the guest needs its own IP configuration -  mvm does no
 addressing here:
 
 ```console
@@ -259,6 +296,21 @@ The guest root is always served over **virtiofs**. Drivers are auto-selected;
 | `overlay` | default under root and userns mode: kernel OverlayFS with the image rootfs as lower layer and a per-sandbox upper. Changes **persist** across `stop`/`start`. Auto-probed, falls back to `copy` if unsupported. |
 | `copy` | per-sandbox rootfs copy; universal fallback and the macOS default (APFS copies are `clonefile(2)`, so they are cheap). The rootfs is **rebuilt (wiped) on every start**. |
 
+State layout under the `MVM_DATA_DIR` data dir:
+
+```
+<data>/
+├── sandboxes.json          # registry
+├── images/<store-key>/     # meta.json, rootfs/
+└── sandboxes/<id>/
+    ├── shim.json           # VM config written by the daemon
+    ├── console.log         # guest console
+    ├── krun.log            # libkrun's own diagnostics
+    ├── rootfs|upper|work/  # per-driver filesystem state
+    └── agent.sock          # agent control channel
+```
+
+
 ### Rootless userns mode (Linux)
 
 `mvm serve` re-execs itself inside a user namespace mapping uid 0 to your user
@@ -270,58 +322,77 @@ ownership work with full fidelity: image files appear root-owned, and
 This requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`,
 and degrades gracefully (with a warning) when they are missing. Opt out with
 `MVM_USERNS=0`. On macOS there is no userns; the daemon runs with host
-credentials, so guest `chown` and image ownership are **not** preserved — the
+credentials, so guest `chown` and image ownership are **not** preserved -  the
 `copy` driver writes the rootfs as the host user. To compensate, the agent
 repairs the workload's home directory ownership before spawning (gated by
 `MVM_HOST_OS=macos`), so a non-root workload can still write to its own home.
 
-## Guest security
 
-* **Hardware isolation.** Every sandbox runs in a separate VM with its own
-  kernel. The host shares only the virtiofs rootfs, explicitly requested
-  mounts, and the vsock control channel. See [`TODO.SEC.md`](security/TODO.SEC.md)
-  for the security model and hardening backlog.
-
-* **Raw sockets are banned guest-wide, always.** The agent installs a
-  seccomp-bpf filter before starting any workload; a failed installation is
-  fatal. The filter denies `socket(2)` for `AF_PACKET` (any type) and
-  `AF_INET`/`AF_INET6` with `SOCK_RAW`. It is inherited by the workload and
-  every exec session and cannot be weakened; there is no opt-out.
-  `AF_NETLINK` with a raw type remains allowed because it is required by
-  network bootstrap. This restriction breaks `tcpdump`, `arping`, old
-  `ping`, and AF_PACKET-based DHCP clients such as `udhcpc`.
-
-* **Guest-local user resolution.** `-u` and the image's `USER` are resolved
-  against the guest rootfs's `/etc/passwd`, never the host's user database.
 
 ## Security model and hardening
 
-`mvm` treats the guest as potentially hostile: guest root, arbitrary native
-code execution, and even guest-kernel compromise are within the threat model.
-The security boundary is the VM and its host-side interfaces, not the guest
-process sandbox alone.
+### Security model
 
-The security work therefore focuses on preventing a compromised guest from
-crossing that boundary, accessing other sandboxes, abusing host capabilities,
-exfiltrating credentials, or exhausting host resources. See:
+`mvm` treats every sandbox guest as potentially hostile. The VM is the
+security boundary: a compromised guest should not be able to access the host
+kernel, other sandboxes, or host resources beyond the interfaces explicitly
+assigned to that sandbox.
 
-* [`TODO.SEC.md`](security/TODO.SEC.md) — security invariants, hardening,
-  resource governance, and security status.
-* [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md) — credential isolation
-  and the planned credential proxy.
-* [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md) — adversarial testing,
-  escape detection, cross-VM isolation, and host-side canaries.
+The host exposes only controlled interfaces to each VM:
 
-### Current control-plane limitation
+- **virtiofs** for the guest root filesystem and explicitly requested mounts;
+- **vsock** for sandbox control and process execution;
+- the selected **network backend**;
+- the VM's allocated CPU and memory resources.
 
-The control plane is currently unauthenticated and is intended to remain
-reachable only through loopback. It is **not a remote or multi-tenant security
-boundary** in its current form. Hardening and explicit security invariants for
-the control plane are tracked in [`TODO.SEC.md`](security/TODO.SEC.md).
+The guest does not share the host kernel. Each sandbox has its own Linux
+kernel and VM address space.
 
-The **Agent API** (`/agent/v1`, a separate listener) is already VM-scoped:
-each VM authenticates with a per-boot bearer token (never persisted; only a
-hash of it is kept in the daemon's memory) and can only act on its own sandbox.
+### Current hardening
+
+- **VM isolation.** Every sandbox runs in a separate microVM with its own
+  kernel. Host/guest interaction is limited to the explicitly configured
+  interfaces above.
+
+- **Raw sockets are blocked guest-wide.** The guest agent installs a
+  seccomp-bpf filter before starting the workload. It denies `socket(2)` for
+  `AF_PACKET` and raw `AF_INET`/`AF_INET6` sockets. The filter is inherited by
+  the workload and every `exec` session and cannot be disabled.
+
+  `AF_NETLINK` with a raw type remains allowed because it is required by
+  network bootstrap. As a consequence, tools such as `tcpdump`, `arping`,
+  old-style `ping`, and AF_PACKET-based DHCP clients such as `udhcpc` do not
+  work.
+
+- **Guest-local user resolution.** `-u` and the image's `USER` are resolved
+  against the guest rootfs's `/etc/passwd`, never the host's user database.
+
+- **Rootless operation.** On Linux, mvm can run the daemon inside a user
+  namespace, avoiding host-root privileges while preserving guest file
+  ownership through the virtiofs server.
+
+### Security limitations
+
+mvm is currently intended for local, single-user use. It is **not a
+multi-tenant or remotely exposed sandbox service**.
+
+The host control API is for now unauthenticated and is intended to remain reachable
+only on loopback. Do not expose it to an untrusted network.
+
+Host bind mounts and network access are explicit sandbox configuration, but
+they also expand the sandbox's capabilities. In particular, a workload with
+access to a host mount should be considered trusted with respect to the data
+made available through that mount.
+
+The current hardening should therefore not be interpreted as a complete
+security boundary against every possible VM, virtiofs, hypervisor, or host
+resource attack.
+
+### Hardening roadmap
+
+The detailed threat model, security assumptions, and planned hardening work
+are tracked in [`doc/security/SEC.TODO.md`](doc/security/SEC.TODO.md).
+
 
 
 ## HTTP API
@@ -347,69 +418,47 @@ POST   /api/v1/images/pull                             (JSON-lines progress)
 POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar; JSON-lines progress)
 ```
 
-`mvm load` ingests an **OCI image layout** archive — the `.tar` produced by
-`podman save --format oci-archive`, `buildah push oci:`, or `skopeo copy
-oci:`. Unlike a `docker save` archive it has no embedded name, so `--name`
-is required. `mvm build` is not implemented yet; pull + load cover getting
-images in for now.
-### Agent API (`/agent/v1`, VM-authenticated)
 
-> This whole surface is gated behind the `agent-api` cargo feature of the
-> `mvm` binary (on by default). Build with `--no-default-features` to compile
-> the daemon without it — no `/agent/v1` listener, no `--agent-addr` flag, and
-> the token-verification code is left out (token *minting* into the guest env
-> stays, as it is part of the boot plumbing).
+### Agent API (`/agent/v1`)
+WIP, Gated behind `agent-api` cargo feature
 
-The Agent API is a separate listener (`--agent-addr`, default
-`127.0.0.1:24643`) that a running sandbox can call back into. Every request
-must carry its VM-scoped bearer token (`Authorization: Bearer <token>`); the
-token is minted fresh at boot and revoked when the sandbox stops or is
-removed. The token is never persisted on the host: the manager keeps only a
-SHA-256 hash of it — in memory, and out of every API response — to verify
-incoming requests, while the plaintext exists transiently in the shim's
-process environment and inside the guest (where the workload's tooling reads
-it). The caller's sandbox is derived from the token, so the routes carry no
-`{id}` — a VM can only act on itself:
+The Agent API provides a VM-scoped control interface for workloads running
+inside a sandbox. A per-sandbox bearer token authenticates requests; the
+token is minted at boot and revoked when the sandbox stops or is removed.
 
-```
-GET    /agent/v1/sandbox                  (inspect self)
-POST   /agent/v1/sandbox/stop             (stop self)
-POST   /agent/v1/sandbox/delegate         (not yet implemented; authenticated+authorized)
+The caller is identified from the token, so the API does not expose sandbox
+IDs in its routes. A sandbox can only operate on itself.
+
+```text
+GET    /agent/v1/sandbox
+POST   /agent/v1/sandbox/stop
+POST   /agent/v1/sandbox/delegate    (not yet implemented)
 ```
 
-Exec and log streams use length-prefixed JSON frames (`u32` BE length + JSON),
-defined in `crates/common/src/protocol.rs`.
-
-The console stream drops terminal *query* sequences (DSR `ESC[6n`, Device
-Attributes `ESC[c`): replaying a question makes the reader's terminal answer into
-its own input buffer. `raw=true` keeps them and is only for a client that owns a
-terminal and answers them — i.e. `mvm attach` / `mvm run -it`.
 
 ## Environment
 
 | Variable | Effect |
 |---|---|
-| `MVM_HOST` | daemon address for clients (default `http://127.0.0.1:24642`) |
+| `MVM_HOST` | Daemon address for clients (default `http://127.0.0.1:24642`) |
 | `MVM_AGENT_ADDR` | Agent API listen address (default `127.0.0.1:24643`) |
-| `MVM_DATA_DIR` | state root (default `~/.local/share/mvm`, `/var/lib/mvm` as root) |
-| `MVM_AGENT_PATH` | guest agent binary |
-| `MVM_STORAGE_DRIVER` | force `overlay` or `copy` |
-| `MVM_USERNS=0` | disable rootless userns mode (Linux) |
-| `MVM_GVPROXY_BIN` | gvproxy binary for managed `--net gvproxy` |
-| `MVM_GVPROXY_CONTROL` | control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port maps |
-| `RUST_LOG` | daemon log verbosity (default `mvm=info,warn`; e.g. `RUST_LOG=mvm=debug mvm serve`; add `mvm::api=debug` for per-request HTTP logs) |
+| `MVM_DATA_DIR` | State root |
+| `MVM_AGENT_PATH` | Path to the guest agent binary |
+| `MVM_STORAGE_DRIVER` | Force `overlay` or `copy` |
+| `MVM_USERNS=0` | Disable rootless user namespaces on Linux |
+| `MVM_GVPROXY_BIN` | Path to `gvproxy` |
+| `MVM_GVPROXY_CONTROL` | Control socket for an externally managed `gvproxy` |
+| `RUST_LOG` | Configure daemon log verbosity |
 
-State layout under the data dir:
 
-```
-<data>/
-├── sandboxes.json          # registry
-├── images/<store-key>/     # meta.json, rootfs/
-└── sandboxes/<id>/
-    ├── shim.json           # VM config written by the daemon
-    ├── console.log         # guest console
-    ├── krun.log            # libkrun's own diagnostics
-    ├── rootfs|upper|work/  # per-driver filesystem state
-    └── agent.sock          # agent control channel
-```
 
+
+## Status
+
+mvm is work in progress and actively evolving.
+
+The architecture, CLI, and APIs are not yet considered stable. The current
+backlog and security work are tracked in [`TODO.md`](TODO.md) and
+[`doc/security/SEC.TODO.md`](doc/security/SEC.TODO.md).
+
+See [`AGENTS.md`](AGENTS.md)  for development and architectural context.

@@ -14,7 +14,7 @@ import 'utils.just'
 set positional-arguments
 
 # Default: running `just` shows the available recipes, which are the sections.
-default:
+_default:
     @just --list
 
 # Run every section against ONE shared daemon: `_serve` boots it once, the

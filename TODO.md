@@ -3,16 +3,26 @@
 Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
-## 1. Credentials injection
+## 1. Credentials injection (HIGH PRIORITY)
 Modeled on Docker Sandboxes' credential handling
-(https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
+(https://docs.docker.com/ai/sandboxes/doc/security/credentials/), adapted to
 mvm's daemon + vsock architecture. Guiding principle: **real secrets never
 enter the guest** — not its env, not its filesystem; the guest sees
 sentinels and the host injects at the network boundary.
 
--> SEE TODO.CREDENTIALS.md
+-> SEE [TODO](doc/security/NETWORK.SEC.TODO.md)
 
-## 2. `--net passt` as a first-class network mode (HIGH PRIORITY)
+## 2. SEC HARDENING
+-> See  
+- [`SEC entrypoint`](doc/security/SEC.TODO.md)
+- [`NETWORK`](doc/security/NETWORK.SEC.TODO.md)
+- [`KERNEL`](doc/security/KERNEL.SEC.TODO.md)
+- [`ADVERSARIAL`](doc/security/AVERSARIAL.SEC.TODO.md)
+
+## 3. MVM Snapshot → CoW VM Fork
+see [TODO](doc/lifecycle/SNAPSHOT-COW.LIFECYCLE.TODO.md)
+
+## 4. `--net passt` as new network mode 
 
 First-class `passt` support, on par with `tsi` and `gvproxy` — the second
 of libkrun's two documented virtio-net backends ("virtio-net + passt/gvproxy"
@@ -22,10 +32,6 @@ interface with outbound connectivity and host port forwards with zero host
 setup — the missing "easy outbound networking" option for corp networks where
 TSI's socket impersonation is undesirable.
 
-**It is buildable today**: the installed libkrun (1.x) header already ships
-`krun_add_net_unixstream(ctx_id, c_path, fd, c_mac, features, flags)` (header
-line 448, same shape as the unixgram call krun-sys already binds for gvproxy);
-mvm just doesn't bind or use it.
 
 Plan (mirror the gvproxy flow):
 1. `krun-sys`: add the `krun_add_net_unixstream` FFI binding (mirror the
@@ -52,13 +58,8 @@ Plan (mirror the gvproxy flow):
    route surface if any. Integration: outbound + dns + port-forward checks
    mirroring the gvproxy section, gated on `command -v passt`.
 
-## 3. SEC HARDENING
--> See  
-- [`TODO.SEC.md`](security/TODO.SEC.md)
-- [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md)
-- [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md)
 
-## 4. Daemon logging & tracing
+## 5. Daemon logging & tracing
 Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for agent-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line. (The `start` `boot_ms`/`total_ms` now come from `Sandbox.lifecycle` — see item 6.)
 
 ## 6. Add startup latency instrumentation
@@ -77,19 +78,10 @@ unpack from `Vec<u8>`); a 300 MB layer means a 300 MB spike. Stream to a
 temp file with incremental hashing instead — matters for images like
 `docker/sandbox-templates:opencode` (~750 MB compressed).
 
-## ~~ 8. clone --checkpoint: carry a stopped VM's memory ~~ 
--> (check availibility on libkrun v2.x.x )
+## 8. No `mvm build`
+A dockerfile/build command is not planned; `mvm load` covers importing
+prebuilt images.
 
-Snapshot the source VM's *memory* so `mvm clone --fork --checkpoint SRC` creates a clone that resumes where it left off — effectively suspend-to-disk for the VM. This extends `--fork`: the source is frozen, its VM state is captured, then it is stopped and its overlayfs duplicated; the clone restores the captured state on boot.
-
-**Firecracker comparison spike.** Firecracker's model is two files: a full guest-memory dump plus a versioned microVM state file. Device state is serialized through a `Persist` trait, with explicit restore invariants around compatible KVM/kernel semantics, CPU model/architecture, and externally-backed resources. libkrun today has only a small part of this: `krun_vm_pause`/`krun_vm_resume` exist on **main (2.0-dev)**, but only for macOS/Hypervisor.framework; they return `-ENOTSUP` on Linux/KVM and are absent from released 1.x branches. There is currently no snapshot/save/load API: nothing serializes guest RAM or vCPU/device state, and no restore-before-boot path.
-
-**Conclusion:** libkrun could implement the Firecracker model because it owns the relevant VM state, but this would be new libkrun functionality rather than something mvm can build against today. Conceptually, the flow would be a new save API in shim A producing VM state + RAM files in the sandbox, followed by a corresponding load API in shim B before `krun_start_enter`. This avoids the in-guest CRIU dependency entirely, but requires libkrun work for Linux/KVM pause, RAM/state serialization, a versioned state format, and restore invariants.
-
-The mvm-side plumbing remains valid and cheap to land independently: `common::protocol::Checkpoint`, a `checkpoint` spec flag alongside `fork`, and `Manager::clone_sandbox` doing **checkpoint → stop → duplicate**. `--fork` already stops before copying overlayfs, so `--checkpoint` simply adds VM execution state to the existing disk snapshot. Expose `clone --checkpoint` and, if useful, `mvm checkpoint SRC`.
-
-## ~~9. Agent gateway — knative-style activation in front of mvm~~
-...
 
 ## Done
 
@@ -106,7 +98,7 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   `bpfprobe` integration section) probes the libkrunfw guest kernel's
   BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
   gate for the planned in-guest cgroup_skb/egress
-  policy. This is the P2 syscall-hardening baseline from `security/TODO.SEC.md`.
+  policy. This is the P2 syscall-hardening baseline from `doc/security/SEC.TODO.md`.
 
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
   records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,

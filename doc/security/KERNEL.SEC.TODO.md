@@ -6,6 +6,7 @@ This focuses exclusively on the **guest kernel** controlled through `libkrunfw`,
 
 The relevant distinction is that these controls are enforced by the guest kernel and are therefore independent of the host-side shim/VMM security configuration.
 
+
 ## Kernel capabilities
 
 | Capability              | x86_64 | AArch64 | Relevance                                                                                              |
@@ -51,7 +52,7 @@ attach=<errno>     BPF_PROG_ATTACH of that program to the cgroup
 ```
 
 The `progl=0` + `attach=0` verdict is the gate for the in-guest
-cgroup_skb/egress policy (see TODO.SEC.md P2 "Guest syscall hardening"). The
+cgroup_skb/egress policy (see SEC.TODO.md P2 "Guest syscall hardening"). The
 table above must be re-checked against this probe whenever libkrunfw is
 bumped — the two drift.
 
