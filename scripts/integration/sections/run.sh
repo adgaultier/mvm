@@ -27,8 +27,12 @@ fi
 # run -it end to end: wrap the client in a real pty via script(1) so the
 # raw-mode path (termios guard enable/restore) actually engages.
 if command -v script >/dev/null 2>&1; then
+    # Capture to a variable, then grep: piping straight into `grep -q` makes
+    # grep exit on the first match, which SIGPIPEs `script` as it writes the
+    # trailing "kept" notice — and with `pipefail` that 141 fails the pipeline.
+    RAW_OUT=$(printf 'exit\n' | run_pty timeout 60 "$MVM" run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK' 2>/dev/null)
     check "run -it raw mode" "found" \
-        "$(printf 'exit\n' | run_pty timeout 60 "$MVM" run -it alpine sh -c '[ -t 0 ] && echo RAW-TTY-OK' | grep -q RAW-TTY-OK && echo found)"
+        "$(printf '%s' "$RAW_OUT" | grep -q RAW-TTY-OK && echo found)"
 
     # The workload gets its own guest pty, so its output is CRLF-terminated
     # like any terminal session (the client runs raw and adds nothing).
@@ -40,10 +44,10 @@ if command -v script >/dev/null 2>&1; then
     # output flushes only on '\n' (and at exit), so this has to be sampled
     # while the session is still open: that blank window *is* the freeze.
     PROMPT_OUT=$(mktemp /tmp/mvm-itest-prompt.XXXXXX)
-    run_pty timeout 40 "$MVM" run -it alpine sh \
-        < <(sleep 20; printf 'exit\n') > "$PROMPT_OUT" 2>&1 &
+    run_pty timeout 20 "$MVM" run -it alpine sh \
+        < <(sleep 10; printf 'exit\n') > "$PROMPT_OUT" 2>&1 &
     PROMPT_PID=$!
-    sleep 12
+    sleep 6
     check "run -it prompt arrives unbuffered" "found" \
         "$(grep -q '#' "$PROMPT_OUT" && echo found)"
     wait "$PROMPT_PID" 2>/dev/null || true
