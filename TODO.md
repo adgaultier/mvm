@@ -3,16 +3,16 @@
 Prioritized backlog. See `README.md` for user-facing behavior and
 `AGENTS.md` for architecture notes and sharp edges.
 
-## 1. Credentials injection
+## 1. Credentials injection (HIGH PRIORITY)
 Modeled on Docker Sandboxes' credential handling
-(https://docs.docker.com/ai/sandboxes/security/credentials/), adapted to
+(https://docs.docker.com/ai/sandboxes/doc/security/credentials/), adapted to
 mvm's daemon + vsock architecture. Guiding principle: **real secrets never
 enter the guest** — not its env, not its filesystem; the guest sees
 sentinels and the host injects at the network boundary.
 
--> SEE TODO.CREDENTIALS.md
+-> SEE [TODO.CREDENTIALS.md](doc/security/CREDENTIALS/TODO.CREDENTIALS.md)
 
-## 2. `--net passt` as a first-class network mode (HIGH PRIORITY)
+## 2. `--net passt` as new network mode 
 
 First-class `passt` support, on par with `tsi` and `gvproxy` — the second
 of libkrun's two documented virtio-net backends ("virtio-net + passt/gvproxy"
@@ -54,9 +54,9 @@ Plan (mirror the gvproxy flow):
 
 ## 3. SEC HARDENING
 -> See  
-- [`TODO.SEC.md`](security/TODO.SEC.md)
-- [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md)
-- [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md)
+- [`TODO.SEC.md`](doc/security/TODO.SEC.md)
+- [`TODO.CREDENTIALS.md`](doc/security/TODO.CREDENTIALS.md)
+- [`TODO.ADVERSARIAL.md`](doc/security/TODO.ADVERSARIAL.md)
 
 ## 4. Daemon logging & tracing
 Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for agent-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line. (The `start` `boot_ms`/`total_ms` now come from `Sandbox.lifecycle` — see item 6.)
@@ -106,7 +106,7 @@ The mvm-side plumbing remains valid and cheap to land independently: `common::pr
   `bpfprobe` integration section) probes the libkrunfw guest kernel's
   BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
   gate for the planned in-guest cgroup_skb/egress
-  policy. This is the P2 syscall-hardening baseline from `security/TODO.SEC.md`.
+  policy. This is the P2 syscall-hardening baseline from `doc/security/TODO.SEC.md`.
 
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
   records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
