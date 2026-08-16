@@ -186,16 +186,20 @@ Evaluate additional restrictions for:
 - kexec
 - other high-risk capabilities
 
-> **PARTIALLY DONE (2026-08-14):** `--security=strict` (`mvm run --security=strict`,
+> **PARTIALLY DONE (2026-08-16):** `--security=strict` (`mvm run --security=strict`,
 > also on `create`/`clone`) installs a workload-scoped second seccomp filter
 > (`build_strict` in `crates/agent/src/seccomp.rs`) denying `bpf`, `keyctl`,
-> `perf_event_open`, `userfaultfd`, and the `io_uring_*` trio with `EPERM`,
+> `perf_event_open`, `userfaultfd`, the `io_uring_*` trio, `ptrace`, namespace
+> changes, mount/pivot-root, module loading, and kexec with `EPERM`,
 > gated per-sandbox via `SandboxSpec.security` → `ShimConfig.security` →
-> `MVM_SECURITY_STRICT`. Still open: ptrace, mount, unshare, setns, module
-> loading, kexec, and the compatibility/security matrix below. The in-guest
+> `MVM_SECURITY_STRICT`. Strict workloads now also set `PR_SET_NO_NEW_PRIVS`
+> before exec. Still open: namespace-creation flags on `clone`/`clone3`,
+> capability dropping, and the
+> compatibility/security matrix below. The in-guest
 > eBPF probe (`scripts/integration/probes/bpfprobe.c`, run by `just bpfprobe`) reports
-> whether the libkrunfw kernel could host a Phase 2 cgroup_skb/egress policy —
-> that path stays gated on `progl=0` + `attach=0`.
+> whether the libkrunfw kernel can host a Phase 2 cgroup_skb/egress policy.
+> The current libkrunfw guest passes that capability probe (`progl=0`,
+> `attach=0`); policy installation and lifecycle hardening remain open work.
 
 Do not rely on seccomp as the primary isolation boundary; KVM remains the principal security boundary.
 Add a compatibility/security matrix documenting which restrictions can safely be enabled.

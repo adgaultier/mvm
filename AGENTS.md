@@ -247,15 +247,21 @@ candidate that is dynamically linked or not a Linux ELF at all.
   by everything. The strict filter is different: it is installed in the
   workload's `pre_exec` (`apply_strict_seccomp` in `linux.rs`, *before*
   `apply_user`'s privilege drop), so only the workload — and exec sessions —
-  lose `bpf`/`keyctl`/`perf_event_open`/`userfaultfd`/`io_uring_*`, while the
+  lose `bpf`/`keyctl`/`perf_event_open`/`userfaultfd`/`io_uring_*`, `ptrace`,
+  namespace changes, mount/pivot-root, module loading, and kexec, while the
   agent keeps the full syscall surface it needs for exec/pty plumbing. The
-  var rides the `MVM_*` channel as `MVM_SECURITY_STRICT` and is scrubbed like
-  the other plumbing vars. This matters for the Aya plan: the agent can still
-  load eBPF programs itself (Phase 2) even in strict mode — the workload just
-  can't. Plumbed: `--security` on `create`/`run`/`clone` → `SandboxSpec` →
-  `ShimConfig` → shim env → agent. Probe the guest kernel's BPF capability
-  with `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load
-  verdict) before assuming any in-guest eBPF enforcement is possible.
+  strict set is exercised by `scripts/integration/probes/strictprobe.c` via
+  `just raw-seccomp`. The var rides the `MVM_*` channel as
+  `MVM_SECURITY_STRICT` and is scrubbed like the other plumbing vars. This
+  matters for the cgroup-BPF plan: the agent can still load trusted eBPF
+  programs itself even in strict mode — the workload cannot. TSI is excluded
+  from guest network policy because its sockets are host-serviced. Plumbed:
+  `--security` on `create`/`run`/`clone` → `SandboxSpec` → `ShimConfig` → shim
+  env → agent. Probe the guest kernel's BPF capability with
+  `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict)
+  before assuming CO-RE/BPF-LSM support; cgroup-BPF does not require BTF.
+  Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec; capability
+  dropping remains a separate compatibility task.
  - **VM token: never persisted, never exposed — not even its hash.** The Agent
   API token is minted in `Manager::start` and held as `agent_token_hash`
   (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so

@@ -50,8 +50,12 @@
 #define BPF_PROG_ATTACH 8
 
 /* program / attach types */
-#define BPF_PROG_TYPE_CGROUP_SKB 28
-#define BPF_CGROUP_INET_EGRESS 2
+/* Values from the Linux 6.12 UAPI used by libkrunfw.  These are ABI
+ * constants, not host-libc values: 28 is BPF_PROG_TYPE_EXT and 2 is
+ * BPF_CGROUP_INET_SOCK_CREATE, so using them here made the old probe report
+ * a misleading EINVAL before the verifier ever saw the program. */
+#define BPF_PROG_TYPE_CGROUP_SKB 8
+#define BPF_CGROUP_INET_EGRESS 1
 
 /* bpf_insn field encodings */
 #define BPF_ALU64 0x07

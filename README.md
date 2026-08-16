@@ -348,28 +348,39 @@ The host exposes only controlled interfaces to each VM:
 The guest does not share the host kernel. Each sandbox has its own Linux
 kernel and VM address space.
 
+
 ### Current hardening
 
-- **VM isolation.** Every sandbox runs in a separate microVM with its own
-  kernel. Host/guest interaction is limited to the explicitly configured
-  interfaces above.
+Each sandbox runs in an isolated microVM with its own kernel. Host/guest
+interaction is limited to explicitly configured interfaces such as virtiofs,
+vsock, and the selected network backend.
 
-- **Raw sockets are blocked guest-wide.** The guest agent installs a
-  seccomp-bpf filter before starting the workload. It denies `socket(2)` for
-  `AF_PACKET` and raw `AF_INET`/`AF_INET6` sockets. The filter is inherited by
-  the workload and every `exec` session and cannot be disabled.
+The guest agent installs an always-on seccomp-BPF filter before starting the
+workload. It blocks `AF_PACKET` and raw `AF_INET`/`AF_INET6` sockets across
+the workload and all exec sessions. `AF_NETLINK` raw-type sockets remain
+allowed for network bootstrap, so tools such as `tcpdump`, `arping`,
+old-style `ping`, and `udhcpc` are unavailable.
 
-  `AF_NETLINK` with a raw type remains allowed because it is required by
-  network bootstrap. As a consequence, tools such as `tcpdump`, `arping`,
-  old-style `ping`, and AF_PACKET-based DHCP clients such as `udhcpc` do not
-  work.
+With `--security=strict`, workloads additionally receive a
+workload-scoped seccomp profile and `PR_SET_NO_NEW_PRIVS`. This denies BPF,
+`ptrace`, namespace and mount changes, kernel module loading, kexec, keyctl,
+perf events, userfaultfd, and io_uring syscalls. The trusted guest agent
+retains the broader syscall surface required for VM and exec management.
 
-- **Guest-local user resolution.** `-u` and the image's `USER` are resolved
-  against the guest rootfs's `/etc/passwd`, never the host's user database.
+Strict mode does not yet drop all Linux capabilities. The libkrunfw guest
+kernel supports loading and attaching `cgroup_skb` programs but does not ship
+BTF, and mvm does not yet install production egress policies. Planned
+cgroup-BPF network enforcement applies only to NIC-backed networking; it does
+not apply to `tsi`, whose socket operations are serviced by the host.
 
-- **Rootless operation.** On Linux, mvm can run the daemon inside a user
-  namespace, avoiding host-root privileges while preserving guest file
-  ownership through the virtiofs server.
+Workload users are resolved against the guest rootfs's `/etc/passwd`, never
+the host's user database. On Linux, rootless operation can run the daemon
+inside a user namespace while preserving guest file ownership through
+virtiofs.
+
+
+
+
 
 ### Security limitations
 

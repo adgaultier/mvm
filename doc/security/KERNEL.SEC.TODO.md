@@ -33,7 +33,7 @@ The relevant distinction is that these controls are enforced by the guest kernel
 * **x86_64 has substantially more guest-side security infrastructure** because the LSM framework and SELinux are enabled.
 * **AArch64 currently has no LSM framework enabled**, so SELinux/AppArmor/BPF-LSM-based enforcement is not available from the stock configuration.
 * `CONFIG_BPF_SYSCALL=y` means a guest process can potentially use the `bpf()` interface; therefore, a security design that loads trusted BPF policies must also prevent the hostile container from acquiring sufficient privilege to create/modify its own BPF programs or maps.
-* **BTF (BPF Type Format) is the unstated prerequisite.** Aya's loader and *every* BPF LSM program depend on kernel BTF (`/sys/kernel/btf/vmlinux`) and BTF-enabled programs. Without it, CO-RE relocations and the fentry trampoline do not work. The capability table above is therefore *not* the whole story: the practical question is whether libkrunfw ships `CONFIG_DEBUG_INFO_BTF`. This is checked at runtime by `scripts/integration/probes/bpfprobe.c` (see "Verification" below).
+* **BTF (BPF Type Format) is the unstated prerequisite for CO-RE/Aya and BPF LSM.** The cgroup_skb path probed below does not require BTF because the probe uses a non-relocatable program with no kernel type access. The practical question is therefore split: cgroup-BPF capability is measured by `progl`/`attach`, while CO-RE and BPF LSM still require `/sys/kernel/btf/vmlinux`.
 
 ## Verification (runtime probe)
 
@@ -56,22 +56,27 @@ cgroup_skb/egress policy (see SEC.TODO.md P2 "Guest syscall hardening"). The
 table above must be re-checked against this probe whenever libkrunfw is
 bumped — the two drift.
 
-> **First measurements (2026-08-14, libkrunfw via Homebrew tap):**
-> `btf=0 configgz=0 jit=na cgroup2=0 bpffs=0 progl=22 attach=na`. cgroup2 and
-> bpffs are mountable, but the guest kernel has no BTF and **rejects
-> `BPF_PROG_LOAD` of a trivial cgroup_skb program with `EINVAL`** — so the
-> in-guest eBPF path is not available on this kernel. Phase 2 stays gated;
-> seccomp strict-mode is the guest-side enforcement that actually works here.
+> **Verified measurements (2026-08-16, libkrunfw 5.5.0 / Linux 6.12 guest):**
+> `btf=0 configgz=0 jit=na cgroup2=0 bpffs=0 progl=0 attach=0`. The guest
+> kernel has no BTF, but cgroup2 and bpffs are mountable and a trivial
+> `cgroup_skb` program loads and attaches successfully. The previous
+> `progl=22` result was a probe defect: the probe used `28` (EXT, not
+> CGROUP_SKB) and `2` (SOCK_CREATE, not INET_EGRESS) instead of the Linux 6.12
+> UAPI values `8` and `1`. The cgroup-BPF Phase 2 capability gate is therefore
+> open; CO-RE/Aya and BPF-LSM remain unavailable without guest BTF.
 
 ## Strict-mode seccomp (implemented)
 
 `mvm run --security=strict` makes the guest agent install a second, workload-
 scoped seccomp filter in the spawn path (`apply_strict_seccomp` in
-`crates/agent/src/linux.rs`, `build_strict` in `crates/agent/src/seccomp.rs`)
-that denies `bpf`, `keyctl`, `perf_event_open`, `userfaultfd` and the
-`io_uring_*` trio with `EPERM`, while the agent itself keeps the full syscall
-surface. This is the "seccomp as the syscall baseline" half of the
-recommended design, delivered with zero new dependencies.
+`crates/agent/src/linux.rs`, `build_strict` in `crates/agent/src/seccomp.rs`).
+It denies `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, the `io_uring_*`
+trio, `ptrace`, namespace changes, mount/pivot-root, module loading, and kexec
+with `EPERM`, while the agent itself keeps the full syscall surface. This is
+the "seccomp as the syscall baseline" half of the recommended design,
+delivered with zero new dependencies. Namespace-creation flags passed to
+`clone`/`clone3` and capability dropping remain separate compatibility
+decisions; strict workloads now set `PR_SET_NO_NEW_PRIVS` before exec.
 
 ## Recommended guest security architecture
 
@@ -163,6 +168,31 @@ If equivalent mandatory-access-control functionality is required on AArch64, the
 
 ## Recommended direction
 
-For a hardened libkrun guest, treat **seccomp as the syscall baseline**, use **BPF/cgroup-BPF for programmable enforcement and networking**, and use **LSM/SELinux on x86_64 where available**.
+For a hardened libkrun guest, treat **seccomp as the syscall baseline**, use
+**cgroup-BPF for programmable transport enforcement** where the policy is
+defined, and use **LSM/SELinux on x86_64 where available**. The current probe
+opens the cgroup-BPF capability gate; it does not itself install a security
+policy.
 
 The most important design property is that these policies are installed by a **trusted guest initialization phase** and that the subsequent container does not retain the privileges required to modify or bypass them.
+
+## Next implementation gate
+
+The kernel capability gate is now open, but policy enforcement is not yet
+implemented. The next change must define an explicit egress policy in the
+sandbox specification before adding a loader. That implementation needs to:
+
+1. pass the policy to the trusted guest agent without exposing mutable policy
+   state to the workload;
+2. mount or reuse cgroup2 and load/attach the cgroup_skb program before the
+   workload starts;
+3. place the workload in the protected cgroup;
+4. verify the attachment and fail closed if setup fails; and
+5. keep the workload from loading, replacing, detaching, or modifying the
+   enforcement program and its maps.
+
+An allowlist format (CIDRs, ports, protocols, and behavior for NIC-backed
+modes) must be selected first. TSI is explicitly excluded: its socket calls
+are serviced by the host and do not traverse a guest NIC, so guest cgroup-BPF
+network policy cannot enforce TSI traffic. A hard-coded allow-all or deny-all
+program would not implement the documented security contract.

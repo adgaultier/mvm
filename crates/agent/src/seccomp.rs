@@ -6,11 +6,10 @@
 //! a raw packet or raw IP socket. Raw sockets are the classic privilege-
 //! escalation surface when images or workloads are not fully trusted.
 //!
-//! The filter is deliberately narrow: it inspects only `socket(2)` and denies
-//! only `AF_PACKET` (any type) plus `AF_INET`/`AF_INET6` with a raw type.
-//! Everything else passes untouched, including the netlink sockets the
-//! agent's own network bootstrap uses (`AF_NETLINK` with a raw *type* is
-//! legitimate and stays allowed — the check keys on the domain first).
+//! The always-on filter is deliberately narrow: it inspects only `socket(2)`
+//! and denies raw packet/IP sockets. Strict mode adds workload-scoped denies
+//! for kernel-control and namespace-management syscalls while leaving the
+//! agent unrestricted.
 //!
 //! It is installed with `SECCOMP_MODE_FILTER`. The agent is guest PID 1 and
 //! never execs a setuid binary, so it needs no `no_new_privs`; not setting it
@@ -66,6 +65,54 @@ const SYS_USERFAULTFD: u32 = 282;
 const SYS_IO_URING_SETUP: u32 = 425;
 const SYS_IO_URING_ENTER: u32 = 426;
 const SYS_IO_URING_REGISTER: u32 = 427;
+
+// Namespace, filesystem, module, and kernel-loading syscalls denied in
+// strict mode. Values are from the supported Linux architectures' syscall
+// tables; these are syscall ABI numbers, not host libc definitions.
+#[cfg(target_arch = "x86_64")]
+const SYS_PTRACE: u32 = 101;
+#[cfg(target_arch = "aarch64")]
+const SYS_PTRACE: u32 = 117;
+#[cfg(target_arch = "x86_64")]
+const SYS_MOUNT: u32 = 165;
+#[cfg(target_arch = "aarch64")]
+const SYS_MOUNT: u32 = 40;
+#[cfg(target_arch = "x86_64")]
+const SYS_UMOUNT2: u32 = 166;
+#[cfg(target_arch = "aarch64")]
+const SYS_UMOUNT2: u32 = 39;
+#[cfg(target_arch = "x86_64")]
+const SYS_PIVOT_ROOT: u32 = 155;
+#[cfg(target_arch = "aarch64")]
+const SYS_PIVOT_ROOT: u32 = 41;
+#[cfg(target_arch = "x86_64")]
+const SYS_UNSHARE: u32 = 272;
+#[cfg(target_arch = "aarch64")]
+const SYS_UNSHARE: u32 = 97;
+#[cfg(target_arch = "x86_64")]
+const SYS_SETNS: u32 = 308;
+#[cfg(target_arch = "aarch64")]
+const SYS_SETNS: u32 = 268;
+#[cfg(target_arch = "x86_64")]
+const SYS_INIT_MODULE: u32 = 175;
+#[cfg(target_arch = "aarch64")]
+const SYS_INIT_MODULE: u32 = 105;
+#[cfg(target_arch = "x86_64")]
+const SYS_DELETE_MODULE: u32 = 176;
+#[cfg(target_arch = "aarch64")]
+const SYS_DELETE_MODULE: u32 = 106;
+#[cfg(target_arch = "x86_64")]
+const SYS_FINIT_MODULE: u32 = 313;
+#[cfg(target_arch = "aarch64")]
+const SYS_FINIT_MODULE: u32 = 273;
+#[cfg(target_arch = "x86_64")]
+const SYS_KEXEC_LOAD: u32 = 246;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEXEC_LOAD: u32 = 104;
+#[cfg(target_arch = "x86_64")]
+const SYS_KEXEC_FILE_LOAD: u32 = 320;
+#[cfg(target_arch = "aarch64")]
+const SYS_KEXEC_FILE_LOAD: u32 = 294;
 
 // Offsets into struct seccomp_data.
 const OFF_SYSCALL: u32 = 0;
@@ -228,7 +275,8 @@ pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
 }
 
 /// Build the strict-mode filter: deny a fixed set of high-risk syscalls
-/// (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring_*`) while
+/// (`bpf`, namespace/mount controls, module loading, kexec, `ptrace`,
+/// `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring_*`) while
 /// letting everything else pass. Returns `EPERM` for the denied set (the
 /// same action as the raw-socket ban: a denied call is an error, not a
 /// silent pass), and kills on an unexpected arch like the raw-socket filter.
@@ -259,6 +307,17 @@ fn build_strict() -> Vec<libc::sock_filter> {
         SYS_IO_URING_SETUP,
         SYS_IO_URING_ENTER,
         SYS_IO_URING_REGISTER,
+        SYS_PTRACE,
+        SYS_MOUNT,
+        SYS_UMOUNT2,
+        SYS_PIVOT_ROOT,
+        SYS_UNSHARE,
+        SYS_SETNS,
+        SYS_INIT_MODULE,
+        SYS_DELETE_MODULE,
+        SYS_FINIT_MODULE,
+        SYS_KEXEC_LOAD,
+        SYS_KEXEC_FILE_LOAD,
     ] {
         f.jeq(sys, Some(Label::Deny), None);
     }
@@ -354,6 +413,17 @@ mod tests {
             SYS_IO_URING_SETUP,
             SYS_IO_URING_ENTER,
             SYS_IO_URING_REGISTER,
+            SYS_PTRACE,
+            SYS_MOUNT,
+            SYS_UMOUNT2,
+            SYS_PIVOT_ROOT,
+            SYS_UNSHARE,
+            SYS_SETNS,
+            SYS_INIT_MODULE,
+            SYS_DELETE_MODULE,
+            SYS_FINIT_MODULE,
+            SYS_KEXEC_LOAD,
+            SYS_KEXEC_FILE_LOAD,
         ] {
             assert_action(&prog, sys, deny);
         }

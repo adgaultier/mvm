@@ -45,6 +45,19 @@ if build_probe "$PROBES_DIR/rawprobe.c" "$PROBE_DIR" rawprobe; then
 else
     skip "raw socket ban (no static cc or zig)"
 fi
+
+if build_probe "$PROBES_DIR/strictprobe.c" "$PROBE_DIR" strictprobe; then
+    STRICT_OUT=$(timeout 30 "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
+        /probe/strictprobe 2>/dev/null || true)
+    for key in no_new_privs ptrace mount umount2 pivot_root unshare setns init_module \
+               delete_module finit_module kexec_load kexec_file_load; do
+        check "strict seccomp $key" "1" \
+            "$(printf '%s' "$STRICT_OUT" | grep -o "$key=[0-9]*" | cut -d= -f2 | head -1)"
+    done
+else
+    skip "strict seccomp probe (no static cc or zig)"
+fi
+
 rm -rf "$PROBE_DIR"
 echo
 echo "$PASS passed, $SKIP skipped, $FAIL failed"

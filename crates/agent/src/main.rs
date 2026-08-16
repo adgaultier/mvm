@@ -9,6 +9,15 @@
 mod linux;
 
 #[cfg(target_os = "linux")]
+mod identity;
+
+#[cfg(target_os = "linux")]
+mod pty;
+
+#[cfg(target_os = "linux")]
+mod network;
+
+#[cfg(target_os = "linux")]
 mod seccomp;
 
 #[cfg(target_os = "linux")]

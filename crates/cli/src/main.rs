@@ -196,7 +196,8 @@ pub(crate) struct BoxArgs {
     #[arg(short, long)]
     tty: bool,
     /// Security profile: default | strict. Strict installs an additional
-    /// guest-side seccomp filter denying high-risk syscalls (bpf, keyctl,
+    /// guest-side seccomp filter denying high-risk syscalls (bpf, ptrace,
+    /// namespace/mount changes, module loading, kexec, keyctl,
     /// perf_event_open, userfaultfd, io_uring) in the workload's spawn path —
     /// for hostile/untrusted workloads.
     #[arg(long, default_value = "default")]

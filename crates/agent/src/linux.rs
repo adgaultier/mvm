@@ -7,11 +7,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{lchown, MetadataExt};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use mvm_common::protocol::{self, encode_frame, AgentEvent, AgentRequest, FrameDecoder};
+
+use crate::identity::{apply_user, resolve_user, GuestUser};
+use crate::network;
+use crate::pty;
 
 const HOST_CID: u32 = 2; // VMADDR_CID_HOST
 const CHUNK: usize = 8192;
@@ -101,7 +105,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     mount_bind_shares();
 
     // Static IPv4 bootstrap for NIC-backed modes (gvproxy defaults).
-    configure_network();
+    network::configure_network();
 
     // TSI mode: sockets are host-serviced (no NIC), but DNS still reads
     // /etc/resolv.conf, which most images ship empty.
@@ -151,7 +155,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // Pty support for exec -t needs /dev/pts (libkrun's init mounts /dev
     // but not devpts). Best effort; EBUSY when already mounted is fine.
-    ensure_devpts();
+    pty::ensure_devpts();
 
     // Keep console output byte-oriented. The host owns the terminal display
     // policy; ONLCR here would turn every workload newline into CRLF in logs.
@@ -159,9 +163,9 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // line discipline would otherwise hold input until a newline and echo it
     // on top of the pty's echo.
     if console_tty {
-        raw_console_termios();
+        pty::raw_console_termios();
     } else {
-        normalize_console_termios();
+        pty::normalize_console_termios();
     }
 
     // 2. Resolve the identity the workload runs as (image USER or `-u`), now
@@ -202,7 +206,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
-        match spawn_tty_workload(workload_argv, console_size, &user, strict) {
+        match pty::spawn_tty_workload(workload_argv, console_size, &user, strict) {
             Some((child, handle, pty)) => {
                 console_output = Some(handle);
                 console_pty = pty;
@@ -278,322 +282,38 @@ fn real_main(workload_argv: &[String]) -> i32 {
     agent.run(selfpipe_r)
 }
 
-fn spawn_tty_workload(
-    workload_argv: &[String],
-    size: Option<(u16, u16)>,
-    user: &GuestUser,
-    strict: bool,
-) -> Option<(
-    std::process::Child,
-    std::thread::JoinHandle<()>,
-    Option<OwnedFd>,
-)> {
-    let winsize = size.map(|(cols, rows)| libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    });
-    let mut fds = [-1; 2];
-    let rc = unsafe {
-        libc::openpty(
-            &mut fds[0],
-            &mut fds[1],
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            winsize
-                .as_ref()
-                .map(|w| w as *const libc::winsize)
-                .unwrap_or(std::ptr::null()),
-        )
-    };
-    if rc != 0 {
-        eprintln!(
-            "mvm-agent: openpty failed: {}",
-            std::io::Error::last_os_error()
-        );
-        return None;
-    }
-    // Don't trust the guest kernel's pty defaults: this VM's fresh slaves come
-    // up with ONLCR clear, which would send bare LFs to a client in raw mode
-    // (every line starting where the last one ended). The workload's pty is
-    // the only line discipline left in the chain, so spell out the terminal
-    // behaviour it must provide.
-    interactive_pty_termios(fds[1]);
-    // The workload owns this terminal, so it must be able to reopen /dev/tty
-    // and change its settings after dropping privileges.
-    if !user.is_root() {
-        unsafe { libc::fchown(fds[1], user.uid, user.gid) };
-    }
-    let master = unsafe { std::fs::File::from_raw_fd(fds[0]) };
-    let slave = unsafe { std::fs::File::from_raw_fd(fds[1]) };
-    let slave_out = slave.try_clone().ok()?;
-    let slave_err = slave.try_clone().ok()?;
-    let mut cmd = Command::new(&workload_argv[0]);
-    cmd.args(&workload_argv[1..])
-        .stdin(Stdio::from(slave))
-        .stdout(Stdio::from(slave_out))
-        .stderr(Stdio::from(slave_err));
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    // Strict mode: install the high-risk-syscall filter before any privilege
-    // drop, so it is active for the whole of the workload's pre_exec chain.
-    // The filter itself needs no privileges, so this order is safe.
-    if strict {
-        apply_strict_seccomp(&mut cmd);
-    }
-    // Registered last: pre_exec closures run in order, and claiming the
-    // controlling terminal has to happen while still root.
-    apply_user(&mut cmd, user);
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
-            return None;
-        }
-    };
-
-    let input_fd = unsafe { libc::dup(0) };
-    let output_fd = unsafe { libc::dup(1) };
-    if input_fd < 0 || output_fd < 0 {
-        // No bridging possible either way; hand back an already-finished
-        // handle so the caller can still unconditionally join it.
-        return Some((child, std::thread::spawn(|| {}), None));
-    }
-    let mut input = unsafe { std::fs::File::from_raw_fd(input_fd) };
-    let Ok(mut input_master) = master.try_clone() else {
-        return Some((child, std::thread::spawn(|| {}), None));
-    };
-    std::thread::spawn(move || {
-        let _ = std::io::copy(&mut input, &mut input_master);
-    });
-    let mut output = unsafe { std::fs::File::from_raw_fd(output_fd) };
-    let mut output_master = master;
-    // The agent's own handle to the workload pty. Dup'd off the master before
-    // it moves into the output bridge thread: the bridge (and the input
-    // bridge's clone) keep their existing ownership, this fd is independent
-    // of both and closes when the agent drops.
-    let console_pty = output_master.try_clone().ok().map(OwnedFd::from);
-    let output_handle = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut output_master, &mut output);
-    });
-    Some((child, output_handle, console_pty))
-}
-
-/// A resolved guest identity: what the image's `USER` (or `-u`) means once
-/// looked up in *this* rootfs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GuestUser {
-    uid: u32,
-    gid: u32,
-    /// Primary gid first, then supplementary groups from /etc/group.
-    groups: Vec<u32>,
-    /// Name for USER/LOGNAME; the numeric uid when passwd has no entry.
-    name: String,
-    home: String,
-}
-
-impl GuestUser {
-    fn root() -> Self {
-        Self {
-            uid: 0,
-            gid: 0,
-            groups: vec![0],
-            name: "root".into(),
-            home: "/root".into(),
-        }
-    }
-
-    fn is_root(&self) -> bool {
-        self.uid == 0 && self.gid == 0
-    }
-}
-
-/// Resolve a docker-style user spec — `name`, `uid`, `name:group`, `uid:gid` —
-/// against the rootfs. Errors the way docker does when a name is unknown:
-/// running as the wrong identity is worse than not running.
-fn resolve_user(spec: &str) -> Result<GuestUser, String> {
-    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
-    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
-    resolve_user_from(spec, &passwd, &group)
-}
-
-/// The lookup itself, over the file contents — pure, so it can be tested
-/// against real image fixtures instead of whatever the host happens to have.
-fn resolve_user_from(spec: &str, passwd: &str, group_file: &str) -> Result<GuestUser, String> {
-    let (user_part, group_part) = match spec.split_once(':') {
-        Some((u, g)) => (u, Some(g)),
-        None => (spec, None),
-    };
-
-    // passwd: name:passwd:uid:gid:gecos:home:shell
-    let entry = passwd.lines().find(|line| {
-        let mut f = line.split(':');
-        match (f.next(), f.nth(1)) {
-            (Some(name), Some(uid)) => name == user_part || uid == user_part,
-            _ => false,
-        }
-    });
-    let (name, uid, mut gid, home) = match entry {
-        Some(line) => {
-            let f: Vec<&str> = line.split(':').collect();
-            if f.len() < 6 {
-                return Err(format!("malformed /etc/passwd entry for '{user_part}'"));
-            }
-            let uid: u32 = f[2]
-                .parse()
-                .map_err(|_| format!("bad uid in /etc/passwd for '{user_part}'"))?;
-            let gid: u32 = f[3]
-                .parse()
-                .map_err(|_| format!("bad gid in /etc/passwd for '{user_part}'"))?;
-            (f[0].to_string(), uid, gid, f[5].to_string())
-        }
-        // No entry: a numeric id is still usable (docker allows it), a name is not.
-        None => match user_part.parse::<u32>() {
-            Ok(uid) => (user_part.to_string(), uid, 0, "/".to_string()),
-            Err(_) => {
-                return Err(format!(
-                    "unable to find user '{user_part}': no matching entry in /etc/passwd"
-                ))
-            }
-        },
-    };
-
-    // group: name:passwd:gid:members
-    let gid_of = |want: &str| -> Option<u32> {
-        group_file.lines().find_map(|line| {
-            let f: Vec<&str> = line.split(':').collect();
-            if f.len() >= 3 && (f[0] == want || f[2] == want) {
-                f[2].parse().ok()
-            } else {
-                None
-            }
-        })
-    };
-    if let Some(group_part) = group_part {
-        gid = match gid_of(group_part) {
-            Some(gid) => gid,
-            None => group_part.parse::<u32>().map_err(|_| {
-                format!("unable to find group '{group_part}': no matching entry in /etc/group")
-            })?,
-        };
-    }
-
-    // Supplementary groups: every group listing this user as a member.
-    let mut groups = vec![gid];
-    for line in group_file.lines() {
-        let f: Vec<&str> = line.split(':').collect();
-        if f.len() < 4 {
-            continue;
-        }
-        let Ok(g) = f[2].parse::<u32>() else { continue };
-        if g != gid && f[3].split(',').any(|m| !m.is_empty() && m == name) {
-            groups.push(g);
-        }
-    }
-
-    Ok(GuestUser {
-        uid,
-        gid,
-        groups,
-        name,
-        home,
-    })
-}
-
-/// Install the strict-mode seccomp filter in a child before exec. Registered
-/// *before* `apply_user` (whose pre_exec drops privileges): a seccomp filter
-/// needs no privileges to install, and having it active for the whole pre_exec
-/// chain is the point. Failure to install aborts the spawn — a strict-mode
-/// workload that cannot be sandboxed will not run. Note: no logging inside the
-/// closure — it runs post-fork in the child, where std locks may deadlock.
-fn apply_strict_seccomp(cmd: &mut Command) {
+/// Apply no-new-privileges in a child before exec. Registered *before*
+/// `apply_user` (whose pre_exec drops privileges). Failure aborts the spawn.
+/// No logging inside the closure: it runs post-fork in the child, where std
+/// locks may deadlock.
+pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
     unsafe {
         cmd.pre_exec(|| {
-            crate::seccomp::install_strict_filter().map_err(|_| {
+            set_no_new_privs().map_err(|error| {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "strict seccomp install failed",
+                    format!("strict no-new-privileges failed: {error}"),
+                )
+            })?;
+            crate::seccomp::install_strict_filter().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("strict seccomp install failed: {error}"),
                 )
             })
         });
     }
 }
 
-/// Run a child as `user`: identity env for the workload, and the actual
-/// privilege drop between fork and exec.
-fn apply_user(cmd: &mut Command, user: &GuestUser) {
-    cmd.env("HOME", &user.home)
-        .env("USER", &user.name)
-        .env("LOGNAME", &user.name);
-    if user.is_root() {
-        return;
-    }
-    // Everything the closure needs is allocated here, before the fork.
-    let (uid, gid, groups) = (user.uid, user.gid, user.groups.clone());
-    unsafe {
-        cmd.pre_exec(move || {
-            // Groups then gid then uid: dropping the uid first would forfeit
-            // the privilege needed for the other two.
-            if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
-                || libc::setgid(gid) != 0
-                || libc::setuid(uid) != 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
+const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 
-/// Sane interactive defaults on a pty slave: CR/LF translation both ways,
-/// echo, line editing, and ^C/^Z signalling.
-fn interactive_pty_termios(slave: RawFd) {
+fn set_no_new_privs() -> std::io::Result<()> {
     unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(slave, &mut term) != 0 {
-            return;
-        }
-        term.c_iflag |= libc::ICRNL | libc::IXON | libc::BRKINT;
-        term.c_oflag |= libc::OPOST | libc::ONLCR;
-        term.c_lflag |= libc::ISIG
-            | libc::ICANON
-            | libc::ECHO
-            | libc::ECHOE
-            | libc::ECHOK
-            | libc::ECHOCTL
-            | libc::ECHOKE
-            | libc::IEXTEN;
-        let _ = libc::tcsetattr(slave, libc::TCSANOW, &term);
-    }
-}
-
-/// Fully transparent console: no echo, no canonical buffering, no signal
-/// generation — every byte belongs to the workload's own pty.
-fn raw_console_termios() {
-    unsafe {
-        let mut term = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut term) == 0 {
-            libc::cfmakeraw(&mut term);
-            let _ = libc::tcsetattr(0, libc::TCSANOW, &term);
+        if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
         }
     }
-}
-
-fn normalize_console_termios() {
-    unsafe {
-        let mut term = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut term) == 0 {
-            term.c_oflag &= !libc::ONLCR;
-            let _ = libc::tcsetattr(0, libc::TCSANOW, &term);
-        }
-    }
+    Ok(())
 }
 
 impl Agent {
@@ -1246,148 +966,6 @@ fn connect_vsock_retry(cid: u32, port: u32, attempts: u32) -> Option<RawFd> {
     None
 }
 
-/// Configure eth0 statically from MVM_NET_CONFIG="<ip>/<prefix>,<gateway>"
-/// (gvproxy vfkit defaults: 192.168.127.2/24 via 192.168.127.1). The
-/// gateway doubles as the DNS server. Skipped when eth0 already has an
-/// address. Pure ioctls — works in any image, no `ip` binary required.
-fn configure_network() {
-    let Ok(spec) = std::env::var("MVM_NET_CONFIG") else {
-        return;
-    };
-    let parsed = (|| {
-        let (addr, gw) = spec.split_once(',')?;
-        let (ip, prefix) = addr.split_once('/')?;
-        let ip: std::net::Ipv4Addr = ip.parse().ok()?;
-        let prefix: u32 = prefix.parse().ok()?;
-        let gw: std::net::Ipv4Addr = gw.parse().ok()?;
-        Some((ip, prefix.min(32), gw))
-    })();
-    let Some((ip, prefix, gw)) = parsed else {
-        eprintln!("mvm-agent: bad MVM_NET_CONFIG '{spec}'");
-        return;
-    };
-
-    unsafe {
-        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-        if sock < 0 {
-            return;
-        }
-
-        // Loopback up (usually already done by the kernel/init).
-        set_iface_flags(sock, "lo");
-
-        // Skip if eth0 already has an IPv4 address.
-        let mut req = ifreq("eth0");
-        if libc::ioctl(sock, libc::SIOCGIFADDR as _, &mut req) == 0 {
-            let sin = &req.ifr_ifru.ifru_addr as *const libc::sockaddr as *const libc::sockaddr_in;
-            if (*sin).sin_addr.s_addr != 0 {
-                libc::close(sock);
-                write_resolv_conf(gw);
-                return;
-            }
-        }
-
-        // Address + netmask.
-        let mut req = ifreq("eth0");
-        put_sockaddr_in(&mut req.ifr_ifru.ifru_addr, ip);
-        if libc::ioctl(sock, libc::SIOCSIFADDR as _, &req) != 0 {
-            eprintln!(
-                "mvm-agent: SIOCSIFADDR: {}",
-                std::io::Error::last_os_error()
-            );
-            libc::close(sock);
-            return;
-        }
-        let mask = std::net::Ipv4Addr::from(u32::MAX.checked_shl(32 - prefix).unwrap_or(0));
-        let mut req = ifreq("eth0");
-        put_sockaddr_in(&mut req.ifr_ifru.ifru_netmask, mask);
-        libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &req);
-
-        set_iface_flags(sock, "eth0");
-
-        // Default route via the gateway.
-        let mut route: libc::rtentry = std::mem::zeroed();
-        put_sockaddr_in_raw(&mut route.rt_dst, std::net::Ipv4Addr::UNSPECIFIED);
-        put_sockaddr_in_raw(&mut route.rt_genmask, std::net::Ipv4Addr::UNSPECIFIED);
-        put_sockaddr_in_raw(&mut route.rt_gateway, gw);
-        route.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
-        if libc::ioctl(sock, libc::SIOCADDRT as _, &route) != 0 {
-            eprintln!("mvm-agent: SIOCADDRT: {}", std::io::Error::last_os_error());
-        }
-        libc::close(sock);
-    }
-
-    write_resolv_conf(gw);
-}
-
-fn write_resolv_conf(dns: std::net::Ipv4Addr) {
-    let _ = std::fs::create_dir_all("/etc");
-    let _ = std::fs::write("/etc/resolv.conf", format!("nameserver {dns}\n"));
-}
-
-unsafe fn set_iface_flags(sock: i32, name: &str) {
-    let mut req = ifreq(name);
-    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut req) } == 0 {
-        unsafe {
-            req.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-            libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &req);
-        }
-    }
-}
-
-fn ifreq(name: &str) -> libc::ifreq {
-    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
-    for (i, b) in name.as_bytes().iter().take(libc::IFNAMSIZ - 1).enumerate() {
-        req.ifr_name[i] = *b as libc::c_char;
-    }
-    req
-}
-
-fn put_sockaddr_in(slot: &mut libc::sockaddr, ip: std::net::Ipv4Addr) {
-    put_sockaddr_in_raw(slot, ip);
-}
-
-fn put_sockaddr_in_raw(slot: &mut libc::sockaddr, ip: std::net::Ipv4Addr) {
-    let sin = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: 0,
-        sin_addr: libc::in_addr {
-            s_addr: u32::from(ip).to_be(),
-        },
-        sin_zero: [0; 8],
-    };
-    unsafe {
-        std::ptr::write(slot as *mut libc::sockaddr as *mut libc::sockaddr_in, sin);
-    }
-}
-
-/// Mount devpts at /dev/pts so openpty works (pty slaves live there).
-fn ensure_devpts() {
-    let _ = std::fs::create_dir_all("/dev/pts");
-    let c_src = std::ffi::CString::new("devpts").unwrap();
-    let c_target = std::ffi::CString::new("/dev/pts").unwrap();
-    let c_data = std::ffi::CString::new("mode=0620,ptmxmode=0666").unwrap();
-    unsafe {
-        libc::mount(
-            c_src.as_ptr(),
-            c_target.as_ptr(),
-            c_src.as_ptr(), // fstype == "devpts" too
-            0,
-            c_data.as_ptr() as *const libc::c_void,
-        );
-    }
-
-    // devpts creates guest PTYs only when /dev/ptmx points at this instance.
-    // Some minimal roots provide a stale devtmpfs /dev/ptmx character node.
-    let needs_ptmx_link = std::fs::symlink_metadata("/dev/ptmx")
-        .map(|m| !m.file_type().is_symlink())
-        .unwrap_or(true);
-    if needs_ptmx_link {
-        let _ = std::fs::remove_file("/dev/ptmx");
-        let _ = std::os::unix::fs::symlink("/dev/pts/ptmx", "/dev/ptmx");
-    }
-}
-
 /// Mount extra virtiofs shares listed in MVM_MOUNTS: "tag:guest[:ro];..."
 fn mount_bind_shares() {
     let Ok(spec) = std::env::var("MVM_MOUNTS") else {
@@ -1419,83 +997,5 @@ fn mount_bind_shares() {
                 std::ptr::null(),
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{resolve_user_from, GuestUser};
-
-    // Trimmed from a real alpine image, plus a docker-style app user.
-    const PASSWD: &str = "root:x:0:0:root:/root:/bin/ash\n\
-                          bin:x:1:1:bin:/bin:/sbin/nologin\n\
-                          agent:x:1000:1000:agent:/home/agent:/bin/sh\n\
-                          nobody:x:65534:65534:nobody:/:/sbin/nologin\n";
-    const GROUP: &str = "root:x:0:root\n\
-                         bin:x:1:root,bin,daemon\n\
-                         agent:x:1000:\n\
-                         docker:x:998:agent\n\
-                         wheel:x:10:agent,bin\n\
-                         nobody:x:65534:\n";
-
-    fn resolve(spec: &str) -> GuestUser {
-        resolve_user_from(spec, PASSWD, GROUP).expect("resolves")
-    }
-
-    #[test]
-    fn resolves_by_name_with_home_and_groups() {
-        let u = resolve("agent");
-        assert_eq!((u.uid, u.gid), (1000, 1000));
-        assert_eq!(u.name, "agent");
-        assert_eq!(u.home, "/home/agent");
-        // Primary gid first, then every group listing the user as a member.
-        assert_eq!(u.groups, vec![1000, 998, 10]);
-        assert!(!u.is_root());
-    }
-
-    #[test]
-    fn resolves_by_uid_and_by_explicit_group() {
-        assert_eq!(resolve("1000").name, "agent");
-        assert_eq!(resolve("65534").home, "/");
-
-        let u = resolve("agent:bin");
-        assert_eq!((u.uid, u.gid), (1000, 1));
-        // wheel/docker list "agent", bin is now primary, so it is not repeated.
-        assert_eq!(u.groups, vec![1, 998, 10]);
-
-        let u = resolve("agent:4242");
-        assert_eq!(u.gid, 4242);
-        assert_eq!(u.groups[0], 4242);
-    }
-
-    #[test]
-    fn root_is_recognised_as_root() {
-        let u = resolve("root");
-        assert!(u.is_root());
-        assert_eq!(u.home, "/root");
-        assert!(GuestUser::root().is_root());
-    }
-
-    #[test]
-    fn unknown_numeric_id_is_allowed_unknown_name_is_not() {
-        // docker: a bare uid needs no passwd entry (gid 0, home /).
-        let u = resolve("4242");
-        assert_eq!((u.uid, u.gid), (4242, 0));
-        assert_eq!(u.name, "4242");
-        assert_eq!(u.home, "/");
-        assert_eq!(u.groups, vec![0]);
-
-        let err = resolve_user_from("nosuchuser", PASSWD, GROUP).unwrap_err();
-        assert!(err.contains("unable to find user 'nosuchuser'"), "{err}");
-        let err = resolve_user_from("agent:nosuchgroup", PASSWD, GROUP).unwrap_err();
-        assert!(err.contains("unable to find group 'nosuchgroup'"), "{err}");
-    }
-
-    #[test]
-    fn survives_an_image_without_passwd() {
-        // Scratch-style rootfs: numeric ids still work, names cannot.
-        let u = resolve_user_from("0", "", "").unwrap();
-        assert!(u.is_root());
-        assert!(resolve_user_from("agent", "", "").is_err());
     }
 }

@@ -85,20 +85,25 @@ prebuilt images.
 
 ## Done
 
-- **`--security=strict` guest syscall hardening** (2026-08-14) — `mvm
+- **`--security=strict` guest syscall hardening** (2026-08-16) — `mvm
   create/run/clone --security=strict` plumbs `SandboxSpec.security` →
   `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the agent installs a
   workload-scoped second seccomp filter (`build_strict` in
   `crates/agent/src/seccomp.rs`, applied via `apply_strict_seccomp` in the
   workload's `pre_exec` *before* the privilege drop, and in exec sessions)
-  denying `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, and the
-  `io_uring_*` trio with `EPERM`. The agent keeps the full syscall surface
+  denying `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, the
+  `io_uring_*` trio, ptrace, namespace/mount changes, module loading, and
+  kexec with `EPERM`. The agent keeps the full syscall surface
   (needed for exec/pty — and, later, for the agent itself loading eBPF in
   Phase 2). `scripts/integration/probes/bpfprobe.c` (wired into the
   `bpfprobe` integration section) probes the libkrunfw guest kernel's
   BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
   gate for the planned in-guest cgroup_skb/egress
-  policy. This is the P2 syscall-hardening baseline from `doc/security/SEC.TODO.md`.
+  policy. `scripts/integration/probes/strictprobe.c` now verifies the added
+  syscall denials through `just raw-seccomp`. This is the P2
+  syscall-hardening baseline from `doc/security/SEC.TODO.md`; strict
+  workloads also set `PR_SET_NO_NEW_PRIVS` before exec. Capability dropping
+  remains a separate compatibility task.
 
 - **Lifecycle latency flamegraph in the TUI** (2026-08-14) — the manager
   records each `create`/`start`/`stop` as a `LifecycleOp` (`op`, `at`,
