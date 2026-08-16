@@ -8,6 +8,7 @@ Assume API clients may be malicious or compromised.
 
 >  The guest must not be able to escape the VM, access host files or credentials, affect other sandboxes, bypass network policy, or exhaust host resources.
 
+
 ---
 
 ## P0 — Secure the control plane
@@ -66,7 +67,7 @@ Fail closed when requested resources exceed policy.
 Replace unbounded host-side queues with bounded queues/backpressure.
 Add console log rotation or hard limits to prevent host-disk exhaustion.
 ### P0 — Credential isolation
-Implement the credential-proxy architecture described in `security/TODO.CREDENTIALS.md`
+Implement the credential-proxy architecture described in `CREDENTIALS/TODO.CREDENTIALS.md`
 Never expose long-lived host/API credentials directly to the guest.
 Associate credentials with sandbox identity and explicit destination policy.
 Enforce destination authorization after DNS/connection resolution rather than trusting guest-supplied hostnames alone.

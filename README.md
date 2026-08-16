@@ -307,7 +307,7 @@ exfiltrating credentials, or exhausting host resources. See:
 
 * [`TODO.SEC.md`](security/TODO.SEC.md) — security invariants, hardening,
   resource governance, and security status.
-* [`TODO.CREDENTIALS.md`](security/TODO.CREDENTIALS.md) — credential isolation
+* [`TODO.CREDENTIALS.md`](security/CREDENTIALS/TODO.CREDENTIALS.md) — credential isolation
   and the planned credential proxy.
 * [`TODO.ADVERSARIAL.md`](security/TODO.ADVERSARIAL.md) — adversarial testing,
   escape detection, cross-VM isolation, and host-side canaries.

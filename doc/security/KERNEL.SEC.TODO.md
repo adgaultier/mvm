@@ -6,6 +6,7 @@ This focuses exclusively on the **guest kernel** controlled through `libkrunfw`,
 
 The relevant distinction is that these controls are enforced by the guest kernel and are therefore independent of the host-side shim/VMM security configuration.
 
+
 ## Kernel capabilities
 
 | Capability              | x86_64 | AArch64 | Relevance                                                                                              |
