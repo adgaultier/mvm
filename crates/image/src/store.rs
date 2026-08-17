@@ -114,10 +114,7 @@ impl ImageStore {
             serde_json::to_string_pretty(&meta)?,
         )?;
 
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        std::fs::rename(&staging, &dir)?;
+        Self::replace_staged(&dir, &staging, &key)?;
 
         tracing::info!(
             image = %meta.reference,
@@ -178,10 +175,7 @@ impl ImageStore {
             serde_json::to_string_pretty(&meta)?,
         )?;
 
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        std::fs::rename(&staging, &dir)?;
+        Self::replace_staged(&dir, &staging, &key)?;
 
         tracing::info!(
             image = %meta.reference,
@@ -195,6 +189,29 @@ impl ImageStore {
             size: meta.size,
             created_at: meta.created_at,
         })
+    }
+
+    /// Install a staged image without deleting the last valid copy before the
+    /// replacement is known to be in place. All paths live in the same image
+    /// directory, so rename remains atomic on the supported filesystems.
+    fn replace_staged(dir: &Path, staging: &Path, key: &str) -> Result<()> {
+        let backup = dir
+            .parent()
+            .ok_or_else(|| Error::Image("image directory has no parent".into()))?
+            .join(format!(".replacing-{key}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&backup);
+
+        if dir.exists() {
+            std::fs::rename(dir, &backup)?;
+        }
+        if let Err(error) = std::fs::rename(staging, dir) {
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, dir);
+            }
+            return Err(error.into());
+        }
+        std::fs::remove_dir_all(backup)?;
+        Ok(())
     }
 
     /// Resolve a user-supplied reference to a locally stored image.

@@ -85,6 +85,13 @@ prebuilt images.
 
 ## Done
 
+- **Manager lifecycle and image-swap safety** (2026-08-17) — sandbox starts
+  are serialized per sandbox, exec output uses awaited bounded-channel sends
+  instead of dropping frames under backpressure, image pull/load replacement
+  uses a backup-and-restore rename swap, and corrupt `sandboxes.json` now
+  fails daemon initialization instead of being treated as empty. Covered by
+  focused manager/image tests and the `run`/`exec` integration sections.
+
 - **`--security=strict` guest syscall hardening** (2026-08-16) — `mvm
   create/run/clone --security=strict` plumbs `SandboxSpec.security` →
   `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the agent installs a

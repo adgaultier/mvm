@@ -30,22 +30,16 @@ tests for IPv4/IPv6 loopback and non-loopback addresses.
 
 ## Active Findings
 
-### Severity 4 — Concurrent sandbox starts can launch duplicate VMs
+### Resolved — Concurrent sandbox starts could launch duplicate VMs
 
-`crates/manager/src/lib.rs:247-263` checks the state and performs asynchronous
-preparation before reserving a transitional state. Concurrent callers can both
-observe a stopped sandbox and spawn shims, orphaning one process and
-overwriting the registry entry.
+`Manager::start` now acquires a per-sandbox async lock before checking state or
+preparing storage, so concurrent callers cannot launch duplicate shims.
 
-Add per-sandbox lifecycle locking or a `Starting` state reserved before
-preparation.
+### Resolved — Image replacement could destroy the last valid image
 
-### Severity 4 — Image replacement can destroy the last valid image
-
-`crates/image/src/store.rs:117-120` removes the existing image before renaming
-the staged replacement. A failed rename loses the previously valid image.
-
-Use an atomic swap/backup-and-restore strategy and test rename failure paths.
+`crates/image/src/store.rs` now renames the existing image to a same-filesystem
+backup, installs the staged replacement, and restores the backup if installation
+fails.
 
 ### Severity 4 — Image and upload paths are unbounded in memory
 
@@ -56,21 +50,15 @@ A malicious registry or client can cause excessive memory use.
 Stream into bounded staging files, enforce compressed/uncompressed limits, and
 apply an HTTP request-body limit.
 
-### Severity 4 — Exec output is silently discarded under backpressure
+### Resolved — Exec output was silently discarded under backpressure
 
-`crates/manager/src/lib.rs:1071-1091` uses `try_send` and drops stdout/stderr
-when the bounded channel is full. Clients can receive incomplete output with
-no error.
+`attach_agent` now awaits bounded channel sends instead of using `try_send`, so
+slow clients apply backpressure rather than losing stdout/stderr frames.
 
-Use backpressure-aware sending or terminate and report the session explicitly.
+### Resolved — Corrupt registry data was treated as an empty registry
 
-### Severity 4 — Corrupt registry data is treated as an empty registry
-
-`crates/manager/src/lib.rs:103` uses `unwrap_or_default()` when loading
-`sandboxes.json`. A truncated or corrupt registry appears empty, risking
-duplicate IDs and apparent data loss.
-
-Return an initialization error and preserve the corrupt file for diagnosis.
+`Manager::new` now returns an explicit initialization error while preserving
+the corrupt registry file for diagnosis.
 
 ### Severity 3 — Sandbox ID accepts path separators after deserialization
 

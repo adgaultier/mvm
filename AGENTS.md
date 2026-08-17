@@ -180,6 +180,11 @@ candidate that is dynamically linked or not a Linux ELF at all.
   boot on the same static 192.168.127.2 anyway). Bare `--net gvproxy` runs
   a private gvproxy per sandbox; kill *and* `wait()` it, or it lingers as a
   zombie holding host ports.
+- **Sandbox starts are serialized per sandbox.** `Manager::start` acquires a
+  per-id async lock before checking state or preparing storage, preventing two
+  concurrent callers from launching duplicate shims. Agent exec output uses
+  awaited bounded-channel sends, so slow clients apply backpressure instead of
+  silently losing stdout/stderr frames.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
 - **Terminal *queries* are filtered per consumer, not per stream.** A tty

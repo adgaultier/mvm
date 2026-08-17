@@ -25,7 +25,7 @@ use mvm_common::Principal;
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 
 use agent_conn::AgentConn;
 
@@ -81,6 +81,7 @@ struct ManagerInner {
     sandboxes: RwLock<HashMap<String, SandboxEntry>>,
     session_counter: AtomicU32,
     persist_lock: Mutex<()>,
+    start_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     gvproxy_control: Option<PathBuf>,
 }
 
@@ -100,7 +101,12 @@ impl Manager {
         let registry_path = data_dir.root().join(REGISTRY_FILE);
         if registry_path.exists() {
             let data = std::fs::read_to_string(&registry_path)?;
-            let saved: Vec<Sandbox> = serde_json::from_str(&data).unwrap_or_default();
+            let saved: Vec<Sandbox> = serde_json::from_str(&data).map_err(|error| {
+                Error::Other(format!(
+                    "invalid sandbox registry {}: {error}",
+                    registry_path.display()
+                ))
+            })?;
             for mut sb in saved {
                 if sb.state == SandboxState::Running {
                     // The previous daemon is gone; if the shim is somehow
@@ -130,6 +136,7 @@ impl Manager {
                 sandboxes: RwLock::new(sandboxes),
                 session_counter: AtomicU32::new(1),
                 persist_lock: Mutex::new(()),
+                start_locks: Mutex::new(HashMap::new()),
                 gvproxy_control: std::env::var_os("MVM_GVPROXY_CONTROL").map(PathBuf::from),
             }),
         })
@@ -246,6 +253,14 @@ impl Manager {
     /// spawn the VM shim, wire logs + control channel.
     pub async fn start(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
+        let start_lock = {
+            let mut locks = self.inner.start_locks.lock().unwrap();
+            locks
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        let _start_guard = start_lock.lock().await;
         {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             let entry = sandboxes
@@ -1050,7 +1065,7 @@ impl Manager {
                 }
             };
             for event in events {
-                self.dispatch_agent_event(id, event);
+                self.dispatch_agent_event(id, event).await;
             }
         }
 
@@ -1062,32 +1077,60 @@ impl Manager {
         tracing::debug!(sandbox = %id, "guest agent disconnected");
     }
 
-    fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
+    async fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
         use protocol::AgentEvent::*;
-        let mut sandboxes = self.inner.sandboxes.write().unwrap();
-        let Some(entry) = sandboxes.get_mut(id) else {
-            return;
-        };
         match event {
             Stdout { id: sid, data } => {
                 tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stdout");
-                if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session
-                        .tx
-                        .try_send(protocol::AgentEvent::Stdout { id: sid, data });
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .and_then(|entry| entry.exec_sessions.get(&sid))
+                    .map(|session| session.tx.clone());
+                if let Some(tx) = tx {
+                    if tx
+                        .send(protocol::AgentEvent::Stdout { id: sid, data })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(sandbox = %id, session = sid, "exec receiver dropped");
+                    }
                 }
             }
             Stderr { id: sid, data } => {
                 tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stderr");
-                if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session
-                        .tx
-                        .try_send(protocol::AgentEvent::Stderr { id: sid, data });
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .and_then(|entry| entry.exec_sessions.get(&sid))
+                    .map(|session| session.tx.clone());
+                if let Some(tx) = tx {
+                    if tx
+                        .send(protocol::AgentEvent::Stderr { id: sid, data })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(sandbox = %id, session = sid, "exec receiver dropped");
+                    }
                 }
             }
             Exit { id: sid, .. } => {
-                if let Some(session) = entry.exec_sessions.remove(&sid) {
-                    let _ = session.tx.try_send(event);
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .write()
+                    .unwrap()
+                    .get_mut(id)
+                    .and_then(|entry| entry.exec_sessions.remove(&sid))
+                    .map(|session| session.tx);
+                if let Some(tx) = tx {
+                    let _ = tx.send(event).await;
                 }
             }
             Ready { workload_pid } => {
@@ -1321,7 +1364,6 @@ async fn terminate(pid: u32, escalate: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_common::auth::hash_token;
 
     #[test]
     fn tail_keeps_the_last_lines() {
