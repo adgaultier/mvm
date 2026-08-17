@@ -30,17 +30,6 @@ tests for IPv4/IPv6 loopback and non-loopback addresses.
 
 ## Active Findings
 
-### Resolved — Concurrent sandbox starts could launch duplicate VMs
-
-`Manager::start` now acquires a per-sandbox async lock before checking state or
-preparing storage, so concurrent callers cannot launch duplicate shims.
-
-### Resolved — Image replacement could destroy the last valid image
-
-`crates/image/src/store.rs` now renames the existing image to a same-filesystem
-backup, installs the staged replacement, and restores the backup if installation
-fails.
-
 ### Severity 4 — Image and upload paths are unbounded in memory
 
 `crates/image/src/registry.rs:288-314`, `crates/image/src/load.rs:172-189`,
@@ -49,16 +38,6 @@ A malicious registry or client can cause excessive memory use.
 
 Stream into bounded staging files, enforce compressed/uncompressed limits, and
 apply an HTTP request-body limit.
-
-### Resolved — Exec output was silently discarded under backpressure
-
-`attach_agent` now awaits bounded channel sends instead of using `try_send`, so
-slow clients apply backpressure rather than losing stdout/stderr frames.
-
-### Resolved — Corrupt registry data was treated as an empty registry
-
-`Manager::new` now returns an explicit initialization error while preserving
-the corrupt registry file for diagnosis.
 
 ### Severity 3 — Sandbox ID accepts path separators after deserialization
 
@@ -172,7 +151,28 @@ A manipulated environment can select an unintended executable.
 Use a trusted absolute path or implement the copy/reflink operation through
 Rust/libc APIs.
 
-## Resolved Finding
+## Resolved Findings
+
+### Resolved — Concurrent sandbox starts could launch duplicate VMs
+
+`Manager::start` now acquires a per-sandbox lifecycle gate before checking state
+or preparing storage, so concurrent callers cannot launch duplicate shims.
+
+### Resolved — Image replacement could destroy the last valid image
+
+`crates/image/src/store.rs` now renames the existing image to a same-filesystem
+backup, installs the staged replacement, and restores the backup if installation
+fails.
+
+### Resolved — Exec output was silently discarded under backpressure
+
+`attach_agent` now awaits bounded channel sends instead of using `try_send`, so
+slow clients apply backpressure rather than losing stdout/stderr frames.
+
+### Resolved — Corrupt registry data was treated as an empty registry
+
+`Manager::new` now returns an explicit initialization error while preserving
+the corrupt registry file for diagnosis.
 
 ### Incorrect BPF UAPI constants in the guest probe — fixed
 

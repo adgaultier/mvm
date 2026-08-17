@@ -51,6 +51,7 @@ struct SandboxEntry {
     /// explicit socket); lives exactly as long as the VM.
     gvproxy: Option<gvproxy::Gvproxy>,
     stop_requested: bool,
+    lifecycle: Arc<AsyncMutex<()>>,
 }
 
 impl SandboxEntry {
@@ -64,6 +65,7 @@ impl SandboxEntry {
             console_stdin: None,
             gvproxy: None,
             stop_requested: false,
+            lifecycle: Arc::new(AsyncMutex::new(())),
         }
     }
 }
@@ -81,7 +83,6 @@ struct ManagerInner {
     sandboxes: RwLock<HashMap<String, SandboxEntry>>,
     session_counter: AtomicU32,
     persist_lock: Mutex<()>,
-    start_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     gvproxy_control: Option<PathBuf>,
 }
 
@@ -136,7 +137,6 @@ impl Manager {
                 sandboxes: RwLock::new(sandboxes),
                 session_counter: AtomicU32::new(1),
                 persist_lock: Mutex::new(()),
-                start_locks: Mutex::new(HashMap::new()),
                 gvproxy_control: std::env::var_os("MVM_GVPROXY_CONTROL").map(PathBuf::from),
             }),
         })
@@ -253,14 +253,15 @@ impl Manager {
     /// spawn the VM shim, wire logs + control channel.
     pub async fn start(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
-        let start_lock = {
-            let mut locks = self.inner.start_locks.lock().unwrap();
-            locks
-                .entry(id.clone())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        let lifecycle = {
+            let sandboxes = self.inner.sandboxes.read().unwrap();
+            sandboxes
+                .get(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?
+                .lifecycle
                 .clone()
         };
-        let _start_guard = start_lock.lock().await;
+        let _lifecycle_guard = lifecycle.lock().await;
         {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             let entry = sandboxes
@@ -549,11 +550,17 @@ impl Manager {
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
     pub async fn stop(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
+        self.stop_locked(&id, id_or_name).await
+    }
+
+    async fn stop_locked(&self, id: &str, id_or_name: &str) -> Result<Sandbox> {
         let mut timings = OpTimings::begin("stop");
         let pid = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
             if !entry.info.state.is_alive() {
                 return Err(Error::InvalidState("sandbox is not running".into()));
@@ -576,15 +583,15 @@ impl Manager {
         self.persist()?;
         timings.mark("persist");
         let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(&id, op);
-        self.get(&id)
+        self.push_lifecycle(id, op);
+        self.get(id)
     }
 
     /// Change a sandbox's CPU/RAM allocation. libkrun has no CPU or memory
     /// hot-plug, so this rewrites the spec: a running VM keeps the allocation
     /// it booted with until it is restarted (the returned record's state tells
     /// the caller whether that is pending).
-    pub fn resize(
+    pub async fn resize(
         &self,
         id_or_name: &str,
         vcpus: Option<u8>,
@@ -610,6 +617,8 @@ impl Manager {
         }
 
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
         let info = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
@@ -637,6 +646,8 @@ impl Manager {
     /// Remove a sandbox (stopping it first if needed) and its filesystem.
     pub async fn remove(&self, id_or_name: &str) -> Result<()> {
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
         let alive = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             sandboxes
@@ -647,7 +658,7 @@ impl Manager {
                 .is_alive()
         };
         if alive {
-            self.stop(&id).await?;
+            self.stop_locked(&id, id_or_name).await?;
             // Give the watcher a moment to settle.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -669,6 +680,16 @@ impl Manager {
         self.persist()?;
         tracing::info!(sandbox = %id, "sandbox removed");
         Ok(())
+    }
+
+    fn lifecycle_lock(&self, id: &str, id_or_name: &str) -> Result<Arc<AsyncMutex<()>>> {
+        self.inner
+            .sandboxes
+            .read()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.lifecycle.clone())
+            .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))
     }
 
     /// Get one sandbox record.

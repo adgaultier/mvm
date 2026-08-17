@@ -12,11 +12,15 @@ set -e
 check "run -i stdin" "found" \
     "$(printf 'from-stdin\n' | timeout 60 "$MVM" run -i alpine cat | tr -d '\r' | grep -q from-stdin && echo found)"
 
-# The guest console is a tty for the workload (independent of client -t).
-# This holds on Linux/KVM (libkrun preserves the calling process's fds as the
-# guest console — and the shim's fds are the pty slave from openpty). On macOS
-# the hv backend uses a different console mechanism (virtio-console or serial
-# port emulation) that does not result in a pty device for the guest's fd 0.
+# The default guest console is a TTY for the workload on Linux/KVM,
+# independent of client -t.
+# On Linux/KVM, the default guest console is backed by a PTY, so the
+# workload's fd 0 is a TTY even without client-side -t.
+#
+# On macOS, libkrun's Hypervisor.framework backend connects the guest
+# console through virtio-console/serial emulation rather than a guest PTY.
+# Consequently [ -t 0 ] is false for the default console. This does not
+# mean -t/-it is unsupported: the explicit PTY path is tested below.
 if [ "$(uname -s)" = Linux ]; then
     check "run console is a tty" "CONSOLE-TTY" \
         "$("$MVM" run alpine sh -c '[ -t 0 ] && echo CONSOLE-TTY' 2>/dev/null | tr -d '\r')"
