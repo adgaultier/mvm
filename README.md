@@ -116,14 +116,12 @@ for sandbox control.
 | Toolchain | Rust, plus the musl target matching your host arch (`x86_64-` or `aarch64-unknown-linux-musl`) for the guest agent |
 | Optional | [gvproxy](https://github.com/containers/gvisor-tap-vsock) ≥ v0.8.9 for userspace NAT / port forwarding |
 
-Guests are the **same architecture as the host** -  on Apple Silicon pull arm64
-images (`mvm pull` resolves the matching platform manifest automatically).
 
-Rootless operation is fully supported: state lives in `~/.local/share/mvm`
-(as root: `/var/lib/mvm`; override with `MVM_DATA_DIR`).
 
-On macOS, `scripts/install-darwin.sh` installs everything (rustup, zig, libkrun
-and gvproxy from the `libkrun/krun` Homebrew tap).
+- On linux run `scripts/instal-linux.sh` to install likbrun dependencies
+- On macOS run `scripts/install-darwin.sh` to install libkrun/libkrunfw from the libkrun/krun Homebrew tap plus Zig and cargo-zigbuild for the static guest agent
+- gvproxy is optional and can be installed or selected separately with
+`MVM_GVPROXY_BIN`.
 
 ### Build
 
@@ -132,10 +130,6 @@ $ scripts/build.sh        # release binaries + static agent → dist/
 $ cargo test --workspace  # unit tests, no KVM needed
 $ just -f scripts/integration/Justfile all  # boots real VMs (needs KVM/libkrun + network)
 ```
-
-On macOS run `scripts/install-darwin.sh` once first; `build.sh` then
-cross-compiles the agent with `cargo zigbuild` and codesigns `dist/mvm` with the
-Hypervisor.framework entitlement -  without it macOS refuses to start VMs.
 
 `mvm` looks for `mvm-agent` next to its own binary, or at `MVM_AGENT_PATH`. The
 agent **must** be the static musl build; it runs inside guests whose libc you
@@ -154,22 +148,24 @@ don't control, and the daemon refuses a dynamically linked one.
 | `mvm create IMAGE [CMD…]` | create a sandbox without starting it |
 | `mvm run IMAGE [CMD…]` | create + start + attach; the sandbox survives the workload unless `--rm` |
 | `mvm ps [-a]` | list sandboxes (`-a` includes stopped ones) |
-| `mvm start [-a] SANDBOX` | start a created/stopped sandbox (`-a` also attaches) |
-| `mvm attach [--no-stdin] SANDBOX` | attach the terminal to a running sandbox's console; **ctrl-p ctrl-q** detaches and leaves the workload running |
-| `mvm exec [-i] [-t] [-u USER] SANDBOX CMD…` | run a command in a live sandbox |
-| `mvm logs [-f] [-n N] SANDBOX` | guest console output (`-n` = last N lines) |
-| `mvm stop SANDBOX` / `mvm rm [-f] SANDBOX` | lifecycle (`rm -f` force-removes a running sandbox) |
-| `mvm resize SANDBOX [--cpus N] [-m MiB] [--restart]` | change the VM's allocation |
-| `mvm inspect SANDBOX` | full sandbox JSON |
-| `mvm clone SANDBOX [--fork] [FLAG…]` | new sandbox from the source's spec |
+| `mvm start [-a] SDBX` | start a created/stopped sandbox (`-a` also attaches) |
+| `mvm attach [--no-stdin] SDBX` | attach the terminal to a running sandbox's console; **ctrl-p ctrl-q** detaches and leaves the workload running |
+| `mvm exec [-i] [-t] [-u USER] SDBX CMD…` | run a command in a live sandbox |
+| `mvm logs [-f] [-n N] SDBX` | guest console output (`-n` = last N lines) |
+| `mvm stop SDBX` / `mvm rm [-f] SDBX` | lifecycle (`rm -f` force-removes a running sandbox) |
+| `mvm resize SDBX [--cpus N] [-m MiB] [--restart]` | change the VM's allocation |
+| `mvm inspect SDBX` | full sandbox JSON |
+| `mvm clone SDBX [--fork] [FLAG…]` | new sandbox from the source's spec |
 | `mvm-tui` | live dashboard |
 
 
-Any command taking a `SANDBOX` accepts its **id, a unique id prefix, or its
+Any command taking a `SDBX` accepts its **id, a unique id prefix, or its
 name**. Names are unique -  creating a second sandbox with a taken name is
 refused; without `--name` the daemon generates one.
 
 ### `pull` / `load`
+Guests are the **same architecture as the host** -  on Apple Silicon pull arm64
+images .
 `mvm load` ingests an **OCI image layout** archive -  the `.tar` produced by
 `podman save --format oci-archive`, `buildah push oci:`, or `skopeo copy
 oci:`.
@@ -206,7 +202,7 @@ to remove it on exit.
 
 ### `resize`
 
-A microVM's size is fixed at boot, so `resize` rewrites the spec and the new
+A microVM's cpu & ram specs are fixed at boot, so `resize` rewrites the spec and the new
 allocation applies on the **next start**. `--restart` reboots the sandbox
 immediately.
 
@@ -246,24 +242,18 @@ no root -  plus `-p` port maps. The guest shares the host's network identity; us
 
 ### `gvproxy`
 
-Rootless userspace NAT (the same stack podman machine uses). Outbound internet
-plus `-p host:guest` forwards, with no setup beyond having the `gvproxy` binary
-on `PATH` (`MVM_GVPROXY_BIN` overrides):
+Rootless userspace NAT with outbound internet access and optional
+`-p host:guest` port forwards. The daemon starts and manages one private
+gvproxy instance per sandbox. Install gvproxy separately and put it on `PATH`
+or set `MVM_GVPROXY_BIN`:
 
 ```console
 $ mvm run --net gvproxy -p 8080:80 alpine sh -c 'apk add curl && ...'
 ```
 
-The daemon starts a **private gvproxy per sandbox** and stops it with the
-sandbox. The guest is configured automatically (192.168.127.2/24, gateway and
-DNS at .1). Throughput is modest (userspace TCP/IP) -  fine for package installs
-and API calls.
-
-`gvproxy:<socket>` attaches to a gvproxy you run yourself instead -  one sandbox
-per instance, listening in **vfkit** mode (libkrun speaks the vfkit datagram
-protocol, *not* `-listen-qemu`), with `MVM_GVPROXY_CONTROL` pointing at its
-`-listen` socket if you want port forwards registered through gvproxy's HTTP
-control API:
+The guest network is configured automatically. To use an externally managed
+instance, pass its vfkit socket with `gvproxy:<socket>`; set
+`MVM_GVPROXY_CONTROL` when using its port-forward control API:
 
 ```console
 $ gvproxy -listen unix:///run/gvproxy/control.sock \
@@ -271,9 +261,6 @@ $ gvproxy -listen unix:///run/gvproxy/control.sock \
 $ export MVM_GVPROXY_CONTROL=/run/gvproxy/control.sock
 $ mvm run --net gvproxy:/run/gvproxy/gvproxy.sock alpine ...
 ```
-
-On Linux, gvproxy < v0.8.9 does not implement vfkit unixgram sockets and exits
-with `unsupported 'unixgram' scheme`; use a newer build.
 
 ### `tap:<dev>`
 
@@ -453,7 +440,7 @@ POST   /agent/v1/sandbox/delegate    (not yet implemented)
 |---|---|
 | `MVM_HOST` | Daemon address for clients (default `http://127.0.0.1:24642`) |
 | `MVM_AGENT_ADDR` | Agent API listen address (default `127.0.0.1:24643`) |
-| `MVM_DATA_DIR` | State root |
+| `MVM_DATA_DIR` | State root defaults to `~/.local/share/mvm` or  `/var/lib/mvm` for root users |
 | `MVM_AGENT_PATH` | Path to the guest agent binary |
 | `MVM_STORAGE_DRIVER` | Force `overlay` or `copy` |
 | `MVM_USERNS=0` | Disable rootless user namespaces on Linux |

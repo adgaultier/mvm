@@ -23,8 +23,9 @@ just -f scripts/integration/Justfile all   # boots real VMs; needs /dev/kvm
                                  # (or `just <section>` for one, `just` to list)
 ```
 
-Hosts: Linux x86_64 (KVM) and macOS Apple Silicon (Hypervisor.framework,
-via Homebrew libkrun — `scripts/install-darwin.sh` sets the machine up).
+Hosts: Linux x86_64 (KVM) and macOS Apple Silicon (Hypervisor.framework),
+using Homebrew libkrun. `scripts/install-darwin.sh` installs libkrun, Zig, and
+cargo-zigbuild.
 Guests are same-arch as the host, so the agent's musl target follows the
 host arch; on macOS the cross-link goes through `cargo zigbuild` and the
 `mvm` binary must carry the hypervisor entitlement (build.sh codesigns
@@ -122,6 +123,12 @@ candidate that is dynamically linked or not a Linux ELF at all.
   socketpair-backed NIC precisely to switch TSI off.
 - **`krun_set_gvproxy_path` speaks the vfkit *datagram* protocol** —
   gvproxy must run with `-listen-vfkit unixgram://…`, not `-listen-qemu`.
+
+- **gvproxy requires vfkit Unix datagrams** — Linux gvproxy versions before
+  v0.8.9 do not support the `unixgram` vfkit endpoint and fail with
+  `unsupported 'unixgram' scheme`. The external form uses
+  `MVM_GVPROXY_CONTROL` for the HTTP control socket; the managed form creates
+  the control and vfkit sockets under the sandbox data directory.
 - The agent runs as **the guest's init**: it must reap zombies and only use
   std + libc (keep dependencies out of `crates/agent`). Pty sessions share
   one fd for stdin/stdout — mind the close-once logic. libkrun's own

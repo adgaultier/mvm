@@ -221,7 +221,8 @@ prebuilt images.
 - **Apple Silicon port** — mvm builds, boots and passes the integration
   suite 46/46 on aarch64-apple-darwin (2026-08-06). libkrun 1.19.4 from
   the `libkrun/krun` Homebrew tap (Hypervisor.framework, same-arch arm64
-  guests); `scripts/install-darwin.sh` provisions the machine. Mechanism:
+  guests); `scripts/install-darwin.sh` installs libkrun/libkrunfw, Zig, and
+  cargo-zigbuild. Mechanism:
   Linux-only code cfg-gated (userns, agent body, `/proc`, tap); Homebrew
   lib dir baked into every binary as rpath via `.cargo/config.toml`
   (libkrun dlopens libkrunfw by bare name); `dist/mvm` codesigned with
