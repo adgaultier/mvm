@@ -383,7 +383,7 @@ fn dispatch(client: &Client, cmd: Command) -> Result<i32, String> {
         Command::Start { sandbox, attach } => {
             let sb = client.start_sandbox(&sandbox)?;
             if attach {
-                return run::attach(client, &sandbox, false);
+                return run::attach_started(client, &sb);
             }
             println!("{}", sb.id);
             Ok(0)

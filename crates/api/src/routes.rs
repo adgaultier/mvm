@@ -117,7 +117,7 @@ async fn resize_sandbox(
     Path(id): Path<String>,
     Json(req): Json<SandboxResizeRequest>,
 ) -> Result<Json<Sandbox>, ApiError> {
-    Ok(Json(state.manager.resize(&id, req.vcpus, req.ram_mib)?))
+    Ok(Json(state.manager.resize(&id, req.vcpus, req.ram_mib).await?))
 }
 
 // ---- logs ----------------------------------------------------------------

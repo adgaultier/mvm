@@ -25,7 +25,7 @@ use mvm_common::Principal;
 use mvm_image::{ImageStore, StoredImage};
 use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 
 use agent_conn::AgentConn;
 
@@ -51,6 +51,7 @@ struct SandboxEntry {
     /// explicit socket); lives exactly as long as the VM.
     gvproxy: Option<gvproxy::Gvproxy>,
     stop_requested: bool,
+    lifecycle: Arc<AsyncMutex<()>>,
 }
 
 impl SandboxEntry {
@@ -64,6 +65,7 @@ impl SandboxEntry {
             console_stdin: None,
             gvproxy: None,
             stop_requested: false,
+            lifecycle: Arc::new(AsyncMutex::new(())),
         }
     }
 }
@@ -100,7 +102,12 @@ impl Manager {
         let registry_path = data_dir.root().join(REGISTRY_FILE);
         if registry_path.exists() {
             let data = std::fs::read_to_string(&registry_path)?;
-            let saved: Vec<Sandbox> = serde_json::from_str(&data).unwrap_or_default();
+            let saved: Vec<Sandbox> = serde_json::from_str(&data).map_err(|error| {
+                Error::Other(format!(
+                    "invalid sandbox registry {}: {error}",
+                    registry_path.display()
+                ))
+            })?;
             for mut sb in saved {
                 if sb.state == SandboxState::Running {
                     // The previous daemon is gone; if the shim is somehow
@@ -246,6 +253,15 @@ impl Manager {
     /// spawn the VM shim, wire logs + control channel.
     pub async fn start(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
+        let lifecycle = {
+            let sandboxes = self.inner.sandboxes.read().unwrap();
+            sandboxes
+                .get(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?
+                .lifecycle
+                .clone()
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
         {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             let entry = sandboxes
@@ -534,11 +550,17 @@ impl Manager {
     /// Stop a running sandbox (SIGTERM the shim, escalate to SIGKILL).
     pub async fn stop(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
+        self.stop_locked(&id, id_or_name).await
+    }
+
+    async fn stop_locked(&self, id: &str, id_or_name: &str) -> Result<Sandbox> {
         let mut timings = OpTimings::begin("stop");
         let pid = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
-                .get_mut(&id)
+                .get_mut(id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
             if !entry.info.state.is_alive() {
                 return Err(Error::InvalidState("sandbox is not running".into()));
@@ -561,15 +583,15 @@ impl Manager {
         self.persist()?;
         timings.mark("persist");
         let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(&id, op);
-        self.get(&id)
+        self.push_lifecycle(id, op);
+        self.get(id)
     }
 
     /// Change a sandbox's CPU/RAM allocation. libkrun has no CPU or memory
     /// hot-plug, so this rewrites the spec: a running VM keeps the allocation
     /// it booted with until it is restarted (the returned record's state tells
     /// the caller whether that is pending).
-    pub fn resize(
+    pub async fn resize(
         &self,
         id_or_name: &str,
         vcpus: Option<u8>,
@@ -595,6 +617,8 @@ impl Manager {
         }
 
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
         let info = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
@@ -622,6 +646,8 @@ impl Manager {
     /// Remove a sandbox (stopping it first if needed) and its filesystem.
     pub async fn remove(&self, id_or_name: &str) -> Result<()> {
         let id = self.resolve(id_or_name)?;
+        let lifecycle = self.lifecycle_lock(&id, id_or_name)?;
+        let _lifecycle_guard = lifecycle.lock().await;
         let alive = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             sandboxes
@@ -632,7 +658,7 @@ impl Manager {
                 .is_alive()
         };
         if alive {
-            self.stop(&id).await?;
+            self.stop_locked(&id, id_or_name).await?;
             // Give the watcher a moment to settle.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
@@ -654,6 +680,16 @@ impl Manager {
         self.persist()?;
         tracing::info!(sandbox = %id, "sandbox removed");
         Ok(())
+    }
+
+    fn lifecycle_lock(&self, id: &str, id_or_name: &str) -> Result<Arc<AsyncMutex<()>>> {
+        self.inner
+            .sandboxes
+            .read()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.lifecycle.clone())
+            .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))
     }
 
     /// Get one sandbox record.
@@ -1050,7 +1086,7 @@ impl Manager {
                 }
             };
             for event in events {
-                self.dispatch_agent_event(id, event);
+                self.dispatch_agent_event(id, event).await;
             }
         }
 
@@ -1062,32 +1098,60 @@ impl Manager {
         tracing::debug!(sandbox = %id, "guest agent disconnected");
     }
 
-    fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
+    async fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
         use protocol::AgentEvent::*;
-        let mut sandboxes = self.inner.sandboxes.write().unwrap();
-        let Some(entry) = sandboxes.get_mut(id) else {
-            return;
-        };
         match event {
             Stdout { id: sid, data } => {
                 tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stdout");
-                if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session
-                        .tx
-                        .try_send(protocol::AgentEvent::Stdout { id: sid, data });
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .and_then(|entry| entry.exec_sessions.get(&sid))
+                    .map(|session| session.tx.clone());
+                if let Some(tx) = tx {
+                    if tx
+                        .send(protocol::AgentEvent::Stdout { id: sid, data })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(sandbox = %id, session = sid, "exec receiver dropped");
+                    }
                 }
             }
             Stderr { id: sid, data } => {
                 tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stderr");
-                if let Some(session) = entry.exec_sessions.get(&sid) {
-                    let _ = session
-                        .tx
-                        .try_send(protocol::AgentEvent::Stderr { id: sid, data });
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .and_then(|entry| entry.exec_sessions.get(&sid))
+                    .map(|session| session.tx.clone());
+                if let Some(tx) = tx {
+                    if tx
+                        .send(protocol::AgentEvent::Stderr { id: sid, data })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(sandbox = %id, session = sid, "exec receiver dropped");
+                    }
                 }
             }
             Exit { id: sid, .. } => {
-                if let Some(session) = entry.exec_sessions.remove(&sid) {
-                    let _ = session.tx.try_send(event);
+                let tx = self
+                    .inner
+                    .sandboxes
+                    .write()
+                    .unwrap()
+                    .get_mut(id)
+                    .and_then(|entry| entry.exec_sessions.remove(&sid))
+                    .map(|session| session.tx);
+                if let Some(tx) = tx {
+                    let _ = tx.send(event).await;
                 }
             }
             Ready { workload_pid } => {
@@ -1321,7 +1385,6 @@ async fn terminate(pid: u32, escalate: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_common::auth::hash_token;
 
     #[test]
     fn tail_keeps_the_last_lines() {

@@ -44,7 +44,7 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
         // OCI whiteouts.
         if name == ".wh..wh..opq" {
             // Opaque directory: remove all existing content of the parent dir.
-            let dir = safe_join(dest, &parent)?;
+            let dir = safe_join_no_symlinks(dest, &parent)?;
             if dir.is_dir() {
                 for child in std::fs::read_dir(&dir)? {
                     let child = child?;
@@ -56,7 +56,7 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
         if let Some(rest) = name.strip_prefix(".wh.") {
             // Whiteout: delete the corresponding path.
             let removed = parent.join(rest);
-            let target = safe_join(dest, &removed)?;
+            let target = safe_join_no_symlinks(dest, &removed)?;
             remove_all(&target)?;
             continue;
         }
@@ -77,7 +77,7 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
         // tar::Entry::unpack_in does not remove the old path first, so the
         // hard-link creation fails with EEXIST instead of applying the layer.
         if header_type == tar::EntryType::Link {
-            remove_all(&safe_join(dest, &path)?)?;
+            remove_all(&safe_join_no_symlinks(dest, &path)?)?;
         }
 
         let uid = entry.header().uid().unwrap_or(0) as u32;
@@ -101,7 +101,7 @@ pub fn unpack_layer(blob: &[u8], media_type: &str, dest: &Path) -> ImgResult<()>
         // apply the recorded owner directly. Namespace-root chowns land on
         // subuids, which virtiofs then presents back correctly.
         if is_root() {
-            if let Ok(target) = safe_join(dest, &path) {
+            if let Ok(target) = safe_join_no_symlinks(dest, &path) {
                 apply_owner(&target, uid, gid, mode);
             }
         }
@@ -146,6 +146,32 @@ fn safe_join(base: &Path, p: &Path) -> ImgResult<PathBuf> {
         }
     }
     Ok(out)
+}
+
+/// Join a path for destructive or ownership operations without traversing
+/// symlink components. Lexical validation alone cannot prevent a layer from
+/// redirecting an existing parent directory outside the rootfs.
+fn safe_join_no_symlinks(base: &Path, p: &Path) -> ImgResult<PathBuf> {
+    let joined = safe_join(base, p)?;
+    let mut current = base.to_path_buf();
+    for component in p.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(img_err(format!(
+                    "symlink component in destructive layer path: {}",
+                    p.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(joined)
 }
 
 fn is_gzip(bytes: &[u8]) -> bool {
@@ -229,6 +255,24 @@ mod tests {
         assert!(!d.join("old.conf").exists());
         assert!(d.join("new.conf").exists());
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opaque_whiteout_rejects_symlink_parent() {
+        let tmp = std::env::temp_dir().join(format!("mvm-test-opq-link-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("mvm-test-opq-out-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("must-survive"), b"x").unwrap();
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::os::unix::fs::symlink(&outside, tmp.join("etc")).unwrap();
+
+        let tar = build_tar(&[("etc/.wh..wh..opq", b"")]);
+        assert!(unpack_layer(&tar, "application/vnd.oci.image.layer.v1.tar", &tmp).is_err());
+        assert!(outside.join("must-survive").exists());
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

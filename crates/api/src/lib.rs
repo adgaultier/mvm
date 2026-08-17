@@ -121,6 +121,7 @@ pub async fn serve(
     agent_addr: SocketAddr,
     manager: Manager,
 ) -> std::io::Result<()> {
+    validate_control_addr(control_addr)?;
     if control_addr == agent_addr {
         return Err(std::io::Error::other(
             "control-plane and agent listeners must use different addresses",
@@ -141,7 +142,36 @@ pub async fn serve(
 /// Serve the control plane until interrupted.
 #[cfg(not(feature = "agent-api"))]
 pub async fn serve(control_addr: SocketAddr, manager: Manager) -> std::io::Result<()> {
+    validate_control_addr(control_addr)?;
     let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
     tracing::info!("mvm daemon listening on http://{control_addr}");
     axum::serve(control_listener, router(manager)).await
+}
+
+fn validate_control_addr(addr: SocketAddr) -> std::io::Result<()> {
+    if !addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("unauthenticated control API must remain on loopback: {addr}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_control_addr;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn control_api_rejects_non_loopback_addresses() {
+        assert!(validate_control_addr("0.0.0.0:24642".parse::<SocketAddr>().unwrap()).is_err());
+        assert!(validate_control_addr("192.0.2.10:24642".parse::<SocketAddr>().unwrap()).is_err());
+    }
+
+    #[test]
+    fn control_api_allows_loopback_addresses() {
+        assert!(validate_control_addr("127.0.0.1:24642".parse::<SocketAddr>().unwrap()).is_ok());
+        assert!(validate_control_addr("[::1]:24642".parse::<SocketAddr>().unwrap()).is_ok());
+    }
 }
