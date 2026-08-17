@@ -1,8 +1,10 @@
 //! Higher-level CLI flows: pull progress, run, exec.
 
 use std::io::{Read, Write};
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use mvm_common::protocol::{AgentEvent, FrameDecoder};
+use mvm_common::{protocol::AgentEvent, protocol::FrameDecoder, Sandbox};
 
 use crate::client::Client;
 use crate::BoxArgs;
@@ -210,6 +212,32 @@ pub fn attach(client: &Client, sandbox: &str, no_stdin: bool) -> Result<i32, Str
     )
 }
 
+/// Attach immediately after `start -a`. The sandbox may have an old console
+/// log from a previous boot; a start-attached session should show only the new
+/// boot rather than replaying that historical backlog.
+pub fn attach_started(client: &Client, started: &Sandbox) -> Result<i32, String> {
+    let interactive = started.spec.attach_stdin;
+    let local_tty = unsafe { libc::isatty(0) == 1 };
+    let detach = (interactive && started.spec.tty && local_tty).then_some(DETACH_KEYS);
+    eprintln!(
+        "mvm: attached to {} — detach with {}",
+        started.name(),
+        if detach.is_some() {
+            "ctrl-p ctrl-q"
+        } else {
+            "ctrl-c"
+        }
+    );
+    console_session(
+        client,
+        &started.id.to_string(),
+        interactive,
+        started.spec.tty,
+        detach,
+        Some(0),
+    )
+}
+
 /// ^P ^Q — docker's default detach sequence.
 const DETACH_KEYS: [u8; 2] = [0x10, 0x11];
 
@@ -398,6 +426,42 @@ impl DetachScanner {
 /// The terminal settings to put back, shared because a detach leaves from a
 /// helper thread and never runs the guard's `Drop`.
 static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
+static TERMINAL_SIGNAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+static mut SIGNAL_TERMIOS: MaybeUninit<libc::termios> = MaybeUninit::uninit();
+
+extern "C" fn restore_terminal_on_signal(signal: libc::c_int) {
+    if TERMINAL_SIGNAL_ACTIVE.load(Ordering::Acquire) {
+        unsafe {
+            libc::tcsetattr(
+                0,
+                libc::TCSANOW,
+                std::ptr::addr_of!(SIGNAL_TERMIOS).cast::<libc::termios>(),
+            );
+            libc::signal(signal, libc::SIG_DFL);
+            libc::raise(signal);
+        }
+    }
+}
+
+fn install_terminal_signal_handlers() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            restore_terminal_on_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            restore_terminal_on_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+fn reset_terminal_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+    }
+}
 
 /// Undo raw mode, once, whoever gets there first.
 fn restore_terminal() {
@@ -405,9 +469,11 @@ fn restore_terminal() {
         return;
     };
     if let Some(term) = saved.take() {
+        TERMINAL_SIGNAL_ACTIVE.store(false, Ordering::Release);
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &term);
         }
+        reset_terminal_signal_handlers();
     }
 }
 
@@ -426,15 +492,27 @@ impl RawTermGuard {
                 return None;
             }
             let orig = term;
+            let mut saved = ORIGINAL_TERMIOS.lock().ok()?;
+            if saved.is_some() {
+                return None;
+            }
+            std::ptr::write(
+                std::ptr::addr_of_mut!(SIGNAL_TERMIOS),
+                MaybeUninit::new(orig),
+            );
+            TERMINAL_SIGNAL_ACTIVE.store(true, Ordering::Release);
+            install_terminal_signal_handlers();
             // Fully raw, both directions: raw mode only engages with `-t`,
             // and then the guest workload runs on a guest pty whose line
             // discipline already emits CRLF. Leaving OPOST/ONLCR on here
             // would translate that '\n' a second time.
             libc::cfmakeraw(&mut term);
             if libc::tcsetattr(0, libc::TCSANOW, &term) != 0 {
+                TERMINAL_SIGNAL_ACTIVE.store(false, Ordering::Release);
+                reset_terminal_signal_handlers();
                 return None;
             }
-            *ORIGINAL_TERMIOS.lock().ok()? = Some(orig);
+            *saved = Some(orig);
             Some(Self)
         }
     }

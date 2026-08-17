@@ -30,6 +30,13 @@ if command -v script >/dev/null 2>&1; then
     rm -f "$ATT_OUT"
     check "sandbox alive after detach" "alive" \
         "$("$MVM" exec att echo alive | tr -d '\r')"
+    "$MVM" stop att >/dev/null 2>&1
+    RESTART_OUT=$(mktemp /tmp/mvm-itest-restart.XXXXXX)
+    run_pty timeout 30 "$MVM" start -a att \
+        < <(sleep 2; printf 'exit\n') > "$RESTART_OUT" 2>&1 || true
+    check "start -a does not replay old console" "1" \
+        "$(! grep -q ATTACH-OK "$RESTART_OUT" && echo 1)"
+    rm -f "$RESTART_OUT"
 fi
 
 # Attaching to something that is not running names the fix.
