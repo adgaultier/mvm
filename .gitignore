@@ -26,7 +26,7 @@ __pycache__/
 /.ripgreprc
 /.zprofile
 /.zshrc
-scripts/script.result
+
 
 # Integration-test runtime (daemon pid, isolated data dir)
 scripts/integration/.runtime/
