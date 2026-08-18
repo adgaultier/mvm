@@ -7,6 +7,8 @@ mod agent_api;
 mod guestd_conn;
 pub mod console_filter;
 mod gvproxy;
+#[cfg(feature = "agent-api")]
+mod notifications;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -686,6 +688,26 @@ impl Manager {
             pending_restart = info.state.is_alive(),
             "sandbox resized"
         );
+        Ok(info)
+    }
+
+    /// Register the shell command template the control plane runs with
+    /// `mvm exec` to deliver async notifications to this agent (`$MSG` is the
+    /// placeholder for the serialized `Notification`). Called by the agent
+    /// itself over the Agent API; persisted like the rest of the record.
+    #[cfg(feature = "agent-api")]
+    pub fn set_notification_command(&self, id_or_name: &str, command: String) -> Result<Sandbox> {
+        let id = self.resolve(id_or_name)?;
+        let info = {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            let entry = sandboxes
+                .get_mut(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
+            entry.info.notification_command = Some(command);
+            entry.info.clone()
+        };
+        self.persist()?;
+        tracing::info!(sandbox = %id, "notification delivery command registered");
         Ok(info)
     }
 
@@ -1529,6 +1551,36 @@ mod tests {
         entry.info.guest_token_created_at = None;
         drop(sandboxes);
         assert!(mgr.authenticate_vm(&token).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(feature = "agent-api")]
+    fn set_notification_command_mutates_and_persists() {
+        let dir = std::env::temp_dir().join(format!("mvm-notif-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mgr = Manager::new(DataDir::at(dir.clone())).unwrap();
+
+        let mut sb = Sandbox::new(SandboxSpec::default());
+        sb.state = SandboxState::Created;
+        let id = sb.id.clone();
+        mgr.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .insert(id.to_string(), SandboxEntry::new(sb));
+
+        let cmd = "curl -sS -X POST \"localhost:4096/session/$SID/prompt_async\" -d \"$MSG\"";
+        let record = mgr.set_notification_command(id.as_str(), cmd.into()).unwrap();
+        assert_eq!(record.notification_command.as_deref(), Some(cmd));
+
+        // The command is persisted with the registry, not just held in memory.
+        let reloaded = Manager::new(DataDir::at(dir.clone())).unwrap();
+        let sandboxes = reloaded.inner.sandboxes.read().unwrap();
+        let entry = sandboxes.get(id.as_str()).unwrap();
+        assert_eq!(entry.info.notification_command.as_deref(), Some(cmd));
+        drop(sandboxes);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

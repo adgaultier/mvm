@@ -302,6 +302,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `agent-api` feature): `--no-default-features` drops the accept loop and the
   token-verification code, while token *minting* into the guest env stays (it
   is part of the boot plumbing).
+- **Control-plane notification delivery runs `sh -c` through `mvm exec`.**
+  A sandbox's `notification_command` (`async_cmd`, `$MSG` = the serialized
+  `Notification`) is a template the control plane executes as
+  `sh -c <template>` via the manager's `exec` — so delivery only works while
+  the guestd is up and the sandbox is `Running` (that's by design: the spec
+  delivers asynchronously to *running* agents). `$MSG` substitution is a
+  literal string replace (`NOTIF_MSG_PLACEHOLDER`), not a shell expansion,
+  so the template is free to use `$MSG` inside single quotes for the agent's
+  own shell. `test_notification` (Agent API method + `mvm-agent-mcp` tool)
+  fires one mock notification of every kind through this same path and is
+  the end-to-end wiring check in `agent-api.sh`.
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
   driver writes the rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't

@@ -61,6 +61,30 @@ if [ "$HAVE_PROBE" = 1 ]; then
         "$(agent_api_call agent-a "$TOKEN_A" inspect | grep -c "\"id\": *\"$SB_A\"")"
     check "A's token cannot reach B's socket" "1" \
         "$(agent_api_call agent-b "$TOKEN_A" inspect | grep -c '"ok": *false')"
+    check "agent API set_notification_command registers template" "1" \
+        "$(agent_api_call agent-a "$TOKEN_A" set_notification_command '{"command":"echo $MSG >> /tmp/notifs.log"}' | grep -c '"ok": *true')"
+    check "notification command surfaces in mvm inspect" "1" \
+        "$("$MVM" inspect agent-a | grep -c '"notification_command": *"echo \$MSG >> /tmp/notifs.log"')"
+    check "notification command is sandbox-scoped (B unaffected)" "0" \
+        "$("$MVM" inspect agent-b | grep -c 'notification_command')"
+
+    # The real control-plane delivery path: the agent asks the control plane
+    # (via the Agent API) to fire one mock notification of every kind, and the
+    # control plane delivers each through the registered command — a
+    # full-loop test of the async-notification mechanism.
+    PROBE_RESP=$(agent_api_call agent-a "$TOKEN_A" test_notification)
+    # The response is one compact JSON line: the outer `{"ok":true,"result":[...]}`
+    # envelope plus a 6-element delivery array. Count only the deliveries whose
+    # `kind` is followed by `"ok":true` (skipping the envelope's own ok field).
+    check "control plane fired all 6 mock notification kinds" "6" \
+        "$(printf '%s\n' "$PROBE_RESP" | grep -o '"kind": *"[^"]*", *"ok": *true' | wc -l | tr -d ' ')"
+    NOTIF_LOG=$("$MVM" exec agent-a cat /tmp/notifs.log 2>/dev/null || true)
+    MISSING=0
+    for kind in child-ttl-about-to-expire restarted-after-idle need-input finished terminated input; do
+        printf '%s\n' "$NOTIF_LOG" | grep -q "$kind" || MISSING=$((MISSING + 1))
+    done
+    check "mock notifications reached the agent's endpoint" "0" "$MISSING"
+
     check "agent API delegate not implemented" "1" \
         "$(agent_api_call agent-a "$TOKEN_A" delegate '{"timeout":1,"command":["true"]}' | grep -c 'not yet implemented')"
 else

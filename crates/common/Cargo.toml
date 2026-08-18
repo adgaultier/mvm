@@ -17,7 +17,8 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [features]
-# VM-authenticated Agent API surface (`Principal`, `DelegateRequest`). The
-# token *minting* plumbing (`generate_token`/`hash_token`) is always compiled:
-# it is part of the guest env channel, gated by the `mvm` binary's feature.
+# VM-authenticated Agent API surface (the `agent_api` module: request/response
+# envelopes, `Principal`, notifications). The token *minting* plumbing
+# (`generate_token`/`hash_token`) is always compiled: it is part of the guest
+# env channel, gated by the `mvm` binary's feature.
 agent-api = []

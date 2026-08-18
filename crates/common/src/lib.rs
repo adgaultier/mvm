@@ -1,5 +1,7 @@
 //! Shared types for the mvm microVM sandbox platform.
 
+#[cfg(feature = "agent-api")]
+pub mod agent_api;
 pub mod api;
 pub mod auth;
 pub mod id;

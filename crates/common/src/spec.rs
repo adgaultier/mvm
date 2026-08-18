@@ -271,6 +271,13 @@ pub struct Sandbox {
     /// (bounded by the manager). The TUI renders these as flamegraph bars.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle: Vec<LifecycleOp>,
+    /// Shell command template the control plane runs with `mvm exec` to
+    /// deliver async notifications to this agent (the spec's `async_cmd`;
+    /// `$MSG` is the placeholder for the serialized `Notification` JSON).
+    /// Registered by the agent itself over the Agent API.
+    #[cfg(feature = "agent-api")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_command: Option<String>,
     /// SHA-256 hash of the sandbox's VM-scoped bearer token, held only while
     /// the VM is running. This is authentication material internal to the
     /// manager: `#[serde(skip)]` keeps it out of every API response and out
@@ -299,6 +306,8 @@ impl Sandbox {
             finished_at: None,
             console_size: None,
             lifecycle: Vec::new(),
+            #[cfg(feature = "agent-api")]
+            notification_command: None,
             guest_token_hash: None,
             guest_token_created_at: None,
         }
