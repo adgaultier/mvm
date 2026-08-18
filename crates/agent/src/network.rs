@@ -3,17 +3,12 @@ pub(super) fn configure_network() {
     let Ok(spec) = std::env::var("MVM_NET_CONFIG") else {
         return;
     };
-    let parsed = (|| {
-        let (addr, gw) = spec.split_once(',')?;
-        let (ip, prefix) = addr.split_once('/')?;
-        let ip: std::net::Ipv4Addr = ip.parse().ok()?;
-        let prefix: u32 = prefix.parse().ok()?;
-        let gw: std::net::Ipv4Addr = gw.parse().ok()?;
-        Some((ip, prefix.min(32), gw))
-    })();
-    let Some((ip, prefix, gw)) = parsed else {
-        eprintln!("mvm-agent: bad MVM_NET_CONFIG '{spec}'");
-        return;
+    let (ip, prefix, gw) = match parse_net_config(&spec) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("mvm-agent: bad MVM_NET_CONFIG '{spec}': {error}");
+            return;
+        }
     };
 
     unsafe {
@@ -60,6 +55,28 @@ pub(super) fn configure_network() {
     write_resolv_conf(gw);
 }
 
+fn parse_net_config(spec: &str) -> Result<(std::net::Ipv4Addr, u32, std::net::Ipv4Addr), String> {
+    let (addr, gateway) = spec
+        .split_once(',')
+        .ok_or_else(|| "expected <ip>/<prefix>,<gateway>".to_string())?;
+    let (ip, prefix) = addr
+        .split_once('/')
+        .ok_or_else(|| "missing address prefix".to_string())?;
+    let ip = ip
+        .parse()
+        .map_err(|error| format!("invalid guest address: {error}"))?;
+    let prefix: u32 = prefix
+        .parse()
+        .map_err(|error| format!("invalid network prefix: {error}"))?;
+    if prefix > 32 {
+        return Err(format!("network prefix {prefix} exceeds IPv4 limit 32"));
+    }
+    let gateway = gateway
+        .parse()
+        .map_err(|error| format!("invalid gateway address: {error}"))?;
+    Ok((ip, prefix, gateway))
+}
+
 fn write_resolv_conf(dns: std::net::Ipv4Addr) {
     let _ = std::fs::create_dir_all("/etc");
     let _ = std::fs::write("/etc/resolv.conf", format!("nameserver {dns}\n"));
@@ -98,5 +115,30 @@ fn put_sockaddr_in_raw(slot: &mut libc::sockaddr, ip: std::net::Ipv4Addr) {
     };
     unsafe {
         std::ptr::write(slot as *mut libc::sockaddr as *mut libc::sockaddr_in, sin);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_net_config;
+
+    #[test]
+    fn parses_valid_static_network_config() {
+        let parsed = parse_net_config("192.168.127.2/24,192.168.127.1").unwrap();
+        assert_eq!(parsed.0.to_string(), "192.168.127.2");
+        assert_eq!(parsed.1, 24);
+        assert_eq!(parsed.2.to_string(), "192.168.127.1");
+    }
+
+    #[test]
+    fn rejects_invalid_prefix_instead_of_clamping_it() {
+        let error = parse_net_config("192.168.127.2/33,192.168.127.1").unwrap_err();
+        assert!(error.contains("exceeds IPv4 limit 32"));
+    }
+
+    #[test]
+    fn rejects_malformed_config() {
+        assert!(parse_net_config("192.168.127.2,192.168.127.1").is_err());
+        assert!(parse_net_config("192.168.127.2/24,not-an-ip").is_err());
     }
 }

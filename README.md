@@ -141,7 +141,7 @@ don't control, and the daemon refuses a dynamically linked one.
 
 | Command | Description |
 |---|---|
-| `mvm serve [--addr HOST:PORT] [--agent-addr HOST:PORT]` | run the daemon |
+| `mvm serve [--addr HOST:PORT] [--agent-addr HOST:PORT]` | run the daemon (listen address is `--addr`, not `--host`; the unauthenticated control plane is loopback-only, while the token-authenticated agent API may bind elsewhere) |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm load --name IMAGE FILE` | load an OCI image layout archive (`.tar`) into the local store |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
