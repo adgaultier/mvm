@@ -5,7 +5,7 @@ mod run;
 #[cfg(target_os = "linux")]
 mod userns;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use client::Client;
 use mvm_common::{DataDir, Mount, NetworkMode, Sandbox, SandboxSpec};
 use std::net::SocketAddr;
@@ -254,7 +254,11 @@ struct CloneArgs {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // Parse once so `serve` can tell an explicit `--host` (client-side daemon
+    // address) from the default; the flag is meaningless to the daemon.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let host_on_cli = matches.value_source("host") == Some(clap::parser::ValueSource::CommandLine);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -270,6 +274,17 @@ fn main() {
             #[cfg(feature = "agent-api")]
             agent_addr,
         } => {
+            // `--host` is the client-side daemon address (MVM_HOST), not a
+            // listen option — silently accepting it here used to make
+            // `serve --host 0.0.0.0` look like it had any effect.
+            if host_on_cli {
+                eprintln!(
+                    "error: `serve` does not accept --host (it sets the client-side daemon \
+                     address, MVM_HOST); use --addr <IP:PORT> for the listen address \
+                     (the control plane is loopback-only)"
+                );
+                std::process::exit(1);
+            }
             // Must run before the tokio runtime exists (single-threaded
             // requirement of unshare) — may re-exec and never return.
             #[cfg(target_os = "linux")]

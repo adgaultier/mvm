@@ -127,6 +127,10 @@ pub async fn serve(
             "control-plane and agent listeners must use different addresses",
         ));
     }
+    // Unlike the control plane, the agent listener is deliberately NOT
+    // restricted to loopback: every `/agent/v1` request requires a VM-scoped
+    // bearer token, so `--agent-addr 0.0.0.0:<port>` is a supported way to
+    // expose the agent surface beyond localhost.
     let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
     let agent_listener = tokio::net::TcpListener::bind(agent_addr).await?;
     tracing::info!("mvm daemon listening on http://{control_addr}");
