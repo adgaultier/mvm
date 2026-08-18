@@ -285,17 +285,23 @@ candidate that is dynamically linked or not a Linux ELF at all.
   token-free — and the shim forwards it into the guest via the `MVM_*` env
   channel, where it is deliberately **not scrubbed**: it must reach the
   workload's environment (and every exec session, via `baseline_env`) so the
-  tools it spawns (the `mvm-agent-mcp` bridge) can authenticate to
-  `/agent/v1`. The plaintext therefore exists only transiently — in the shim's
-  process environment, in the guest environment, and on `/proc/cmdline` (the
-  `MVM_*` channel rides the kernel cmdline) — and is never written to host
-  disk. The Agent API routes carry no `{id}` — the sandbox is derived from the
-  token, so a caller can only act on itself. Token lookup uses a constant-time
-  hash compare over the sandbox list (no `HashMap` keyed on the secret). The
-  whole surface is gated behind the `agent-api` cargo feature of the `mvm`
-  binary (on by default): `--no-default-features` drops the `/agent/v1`
-  listener, the `--agent-addr` flag and the token-verification code, while
-  token *minting* into the guest env stays (it is part of the boot plumbing).
+  tools it spawns (the `mvm-agent-mcp` bridge) can authenticate over the
+  Agent API's vsock channel. The plaintext therefore exists only transiently
+  — in the shim's process environment, in the guest environment, and on
+  `/proc/cmdline` (the `MVM_*` channel rides the kernel cmdline) — and is
+  never written to host disk. The Agent API is not HTTP: it's a per-sandbox
+  vsock channel (guest → CID 2, port 24643 = `AGENT_API_VSOCK_PORT`), backed
+  host-side by a per-sandbox unix socket (`<sandbox_dir>/agent-api.sock`,
+  same libkrun vsock-over-unix-socket bridge as the exec control channel) —
+  there is no shared listener or `{id}` in any request; identity comes from
+  *both* which socket accepted the connection and the bearer token in the
+  request body, and `Manager::authorize` checks they agree. Token lookup uses
+  a constant-time hash compare over the sandbox list (no `HashMap` keyed on
+  the secret). The whole surface is gated behind the `agent-api` cargo
+  feature (on `mvm-manager`, on by default via the `mvm` binary's own
+  `agent-api` feature): `--no-default-features` drops the accept loop and the
+  token-verification code, while token *minting* into the guest env stays (it
+  is part of the boot plumbing).
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
   driver writes the rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't
@@ -320,8 +326,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
 
 ## Runtime env vars
 
-`MVM_HOST` (client → daemon addr), `MVM_AGENT_ADDR` (Agent API listen addr,
-default `127.0.0.1:24643`), `MVM_DATA_DIR` (state root),
+`MVM_HOST` (client → daemon addr), `MVM_DATA_DIR` (state root),
 `MVM_AGENT_PATH` (guest agent binary), `MVM_STORAGE_DRIVER`
 (`overlay`/`copy`), `MVM_USERNS=0` (disable userns mode), `MVM_GVPROXY_BIN`
 (gvproxy binary for managed `--net gvproxy`), `MVM_GVPROXY_CONTROL`
@@ -332,7 +337,8 @@ Daemon → guest agent (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
 `MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
 `MVM_HOST_OS` — scrubbed by the agent before it spawns the workload — plus
 `MVM_AGENT_TOKEN`, which is deliberately *not* scrubbed so the workload's
-tooling (the `mvm-agent-mcp` bridge) can authenticate to `/agent/v1`.
+tooling (the `mvm-agent-mcp` bridge) can authenticate over the Agent API's
+vsock channel.
 
 ## Conventions
 

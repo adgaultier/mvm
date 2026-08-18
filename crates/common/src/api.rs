@@ -65,10 +65,10 @@ pub struct CloneRequest {
     pub fork: bool,
 }
 
-/// POST /agent/v1/sandboxes/{id}/delegate — ask the host to launch a child
-/// clone of the calling sandbox, bounded by `timeout`. Not yet implemented:
-/// the route authenticates and authorizes, then reports that delegation is
-/// still in progress. Gated behind the `agent-api` feature.
+/// Agent API "delegate" params — ask the host to launch a child clone of the
+/// calling sandbox, bounded by `timeout`. Not yet implemented: the handler
+/// authenticates and authorizes, then reports that delegation is still in
+/// progress. Gated behind the `agent-api` feature.
 #[cfg(feature = "agent-api")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegateRequest {
@@ -77,6 +77,51 @@ pub struct DelegateRequest {
     /// Command for the child sandbox (image/env/etc. inherit from the caller;
     /// mounts are supplied by the host policy, not the caller).
     pub command: Vec<String>,
+}
+
+/// Agent API request envelope: the guest's `mvm-agent-mcp` bridge dials the
+/// host over vsock (`protocol::AGENT_API_VSOCK_PORT`) and sends exactly one
+/// of these per connection, length-prefixed (`protocol::encode_frame`).
+/// `token` is the VM-scoped bearer token (see `auth`), presented in the body
+/// rather than a header since this isn't HTTP.
+#[cfg(feature = "agent-api")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentApiRequest {
+    pub method: String,
+    pub token: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Agent API response envelope: exactly one per request, then the connection
+/// closes.
+#[cfg(feature = "agent-api")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentApiResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "agent-api")]
+impl AgentApiResponse {
+    pub fn ok(result: serde_json::Value) -> Self {
+        Self {
+            ok: true,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            result: None,
+            error: Some(message.into()),
+        }
+    }
 }
 
 /// Uniform error body.

@@ -85,6 +85,34 @@ prebuilt images.
 
 ## Done
 
+- **Agent API: vsock transport, no more HTTP** (2026-08-18) — replaced the
+  shared `--agent-addr` HTTP listener (below) with a per-sandbox vsock
+  channel: the guest dials out to CID 2, port 24643
+  (`protocol::AGENT_API_VSOCK_PORT`), bridged host-side by a per-sandbox
+  unix socket (`<sandbox_dir>/agent-api.sock`) — the same libkrun
+  vsock-over-unix-socket mechanism the exec control channel already used,
+  set up in `Manager::start` alongside it and gated by the same condition
+  (only when the exec-agent is injected). Motivation:
+  `doc/agentic/notifications-delegation.md` — gvproxy cannot forward a guest
+  connection to a host-loopback-only listener without exposing the agent
+  surface on a real LAN-reachable address, so HTTP over the network stack was
+  a dead end regardless of `passt` vs `gvproxy`. Wire format is
+  length-prefixed JSON (`protocol::encode_frame`), one request per
+  connection: `{"method","token","params"}` ->
+  `{"ok","result"|"error"}` (`mvm_common::api::{AgentApiRequest,
+  AgentApiResponse}`), dispatched in the new `mvm-manager::agent_api` module.
+  Identity now comes from two independent checks that must agree: which
+  per-sandbox socket accepted the connection, and the bearer token in the
+  body (`Manager::authenticate_vm` + `authorize`) — closing a gap the old
+  shared-listener design couldn't. `mvm-api`'s `/agent/v1` routes, the
+  `agent-api` feature on that crate, and the CLI's `--agent-addr`/
+  `MVM_AGENT_ADDR` flag are gone; `agent-api` is now purely a
+  `mvm-manager`/`mvm-common` feature. Guest-side bridge:
+  `scripts/agents/mvm-agent-mcp` (draft). Still open: delegate mechanics, and
+  a real guest-side integration test client (the rewritten
+  `scripts/integration/sections/agent-api.sh` only exercises the wire
+  protocol when the guest happens to have `python3`).
+
 - **Manager lifecycle and image-swap safety** (2026-08-17) — sandbox starts
   are serialized per sandbox, exec output uses awaited bounded-channel sends
   instead of dropping frames under backpressure, image pull/load replacement

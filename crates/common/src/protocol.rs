@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 /// Vsock port the guest agent connects to for the control channel.
 pub const AGENT_VSOCK_PORT: u32 = 1024;
 
+/// Vsock port the guest's Agent API bridge (`mvm-agent-mcp`) dials to reach
+/// the host's per-sandbox Agent API listener. Mapped alongside the control
+/// channel (same host unix-socket-backed vsock mechanism, opposite
+/// direction: the guest connects out, one connection per request).
+pub const AGENT_API_VSOCK_PORT: u32 = 24643;
+
 /// Path of the agent inside the guest rootfs.
 pub const GUEST_AGENT_PATH: &str = "/.mvm/agent";
 

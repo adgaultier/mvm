@@ -16,7 +16,12 @@ Assume API clients may be malicious or compromised.
 Add authentication and authorization to the HTTP API.
 Prefer a Unix-domain socket with appropriate filesystem permissions for local operation.
 Require authentication when binding TCP beyond loopback.
-Reject or warn on --addr 0.0.0.0 / non-loopback listeners without an explicit authentication mechanism.
+
+> **MOOT (2026-08-18).** `mvm serve --port <PORT>` always binds `127.0.0.1`
+> (only the port is configurable), so a non-loopback control plane isn't a
+> config a user can reach for in the first place, not just one that's
+> rejected at startup.
+
 Introduce sandbox ownership/tenant identity and enforce authorization on every sandbox operation.
 Define capabilities such as inspect, exec, start, stop, delete, mount, and network.
 Ensure an authenticated API client cannot control another user's sandbox unless explicitly authorized.
@@ -34,6 +39,16 @@ Ensure an authenticated API client cannot control another user's sandbox unless 
 > `/proc/cmdline`, deliberately not scrubbed so the workload's tooling can
 > present it); it is never persisted. Regenerated on restart, revoked on
 > stop/removal; the control plane never accepts it.
+>
+> **UPDATED (2026-08-18).** The `/agent/v1` HTTP listener and `--agent-addr`
+> are gone (see `doc/agentic/notifications-delegation.md` for why gvproxy
+> ruled HTTP out entirely). The Agent API is now a per-sandbox vsock channel
+> — guest dials CID 2 port 24643, host bridges it to
+> `<sandbox_dir>/agent-api.sock` — so the token check in
+> `mvm-manager::agent_api::dispatch` is now defense-in-depth on top of
+> socket-level scoping (`Manager::authorize` also checks the token's VM
+> matches the sandbox whose socket accepted the connection), not the sole
+> isolation mechanism.
 
 Provision each VM with a cryptographically random, VM-scoped bearer token for authenticating to the restricted Agent API.
 

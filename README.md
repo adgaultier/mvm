@@ -141,7 +141,7 @@ don't control, and the daemon refuses a dynamically linked one.
 
 | Command | Description |
 |---|---|
-| `mvm serve [--addr HOST:PORT] [--agent-addr HOST:PORT]` | run the daemon (listen address is `--addr`, not `--host`; the unauthenticated control plane is loopback-only, while the token-authenticated agent API may bind elsewhere) |
+| `mvm serve [--port PORT]` | run the daemon (always binds `127.0.0.1`) |
 | `mvm pull IMAGE` | pull an OCI image (docker references) |
 | `mvm load --name IMAGE FILE` | load an OCI image layout archive (`.tar`) into the local store |
 | `mvm images` / `mvm rmi IMAGE` | list / remove local images |
@@ -417,21 +417,27 @@ POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar
 ```
 
 
-### Agent API (`/agent/v1`)
+### Agent API
 WIP, Gated behind `agent-api` cargo feature
 
 The Agent API provides a VM-scoped control interface for workloads running
-inside a sandbox. A per-sandbox bearer token authenticates requests; the
-token is minted at boot and revoked when the sandbox stops or is removed.
+inside a sandbox. It does **not** ride HTTP: each running sandbox gets its
+own vsock channel (guest connects out to CID 2, port 24643 —
+`AGENT_API_VSOCK_PORT`), backed on the host by a per-sandbox unix socket, the
+same mechanism used for the exec control channel
 
-The caller is identified from the token, so the API does not expose sandbox
-IDs in its routes. A sandbox can only operate on itself.
+A per-sandbox bearer token (minted at boot, revoked when the sandbox stops
+or is removed) is still required in the request body and cross-checked
+against the socket that accepted the connection. Methods:
 
 ```text
-GET    /agent/v1/sandbox
-POST   /agent/v1/sandbox/stop
-POST   /agent/v1/sandbox/delegate    (not yet implemented)
+inspect                              -> the caller's own sandbox record
+stop                                  -> stops the caller's own sandbox
+delegate {timeout, command}           -> not yet implemented
 ```
+
+See `scripts/agents/mvm-agent-mcp` for the guest-side MCP bridge that speaks
+this protocol.
 
 
 ## Environment
@@ -439,7 +445,6 @@ POST   /agent/v1/sandbox/delegate    (not yet implemented)
 | Variable | Effect |
 |---|---|
 | `MVM_HOST` | Daemon address for clients (default `http://127.0.0.1:24642`) |
-| `MVM_AGENT_ADDR` | Agent API listen address (default `127.0.0.1:24643`) |
 | `MVM_DATA_DIR` | State root defaults to `~/.local/share/mvm` or  `/var/lib/mvm` for root users |
 | `MVM_AGENT_PATH` | Path to the guest agent binary |
 | `MVM_STORAGE_DRIVER` | Force `overlay` or `copy` |

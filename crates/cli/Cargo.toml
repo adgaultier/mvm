@@ -23,8 +23,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
-# VM-authenticated Agent API (`/agent/v1`): exposes `serve --agent-addr` and
-# enables the agent listener. On by default; build with `--no-default-features`
+# VM-authenticated Agent API: a per-sandbox vsock channel the guest's
+# `mvm-agent-mcp` bridge dials into (see `mvm_common::protocol::
+# AGENT_API_VSOCK_PORT`). On by default; build with `--no-default-features`
 # to compile mvm without the Agent API surface.
 default = ["agent-api"]
-agent-api = ["mvm-api/agent-api"]
+agent-api = ["mvm-manager/agent-api"]

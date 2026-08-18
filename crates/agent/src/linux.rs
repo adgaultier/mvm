@@ -73,10 +73,10 @@ struct Agent {
     /// the console (`AgentRequest::ConsoleResize`) without coupling to the
     /// bridge threads' lifetimes. Closed exactly once when the agent drops.
     console_pty: Option<OwnedFd>,
-    /// VM-scoped bearer token for the host's Agent API (`/agent/v1`). Not
-    /// yet used here (no in-guest HTTP client), but captured and held so the
-    /// MCP bridge can present it when that lands. Scrubbbed from the workload
-    /// environment before it spawns.
+    /// VM-scoped bearer token for the host's Agent API (vsock, see
+    /// `mvm_common::protocol::AGENT_API_VSOCK_PORT`). Not yet used here, but
+    /// captured and held so the mvm-agent-mcp bridge can present it.
+    /// Scrubbed from the workload environment before it spawns.
     #[allow(dead_code)]
     agent_token: Option<String>,
     /// Strict security profile: exec sessions install the high-risk-syscall
@@ -131,7 +131,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // VM-scoped bearer token for the host's Agent API. Deliberately NOT
     // scrubbed: it must reach the workload's environment so the tools it
-    // spawns (the mvm-agent-mcp bridge) can authenticate to `/agent/v1`.
+    // spawns (the mvm-agent-mcp bridge) can authenticate over vsock.
     let agent_token = std::env::var("MVM_AGENT_TOKEN").ok();
 
     // Strict security profile: the workload (and everything it spawns) gets

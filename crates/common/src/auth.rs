@@ -1,5 +1,6 @@
 //! Principals and VM-scoped bearer tokens for authenticating the restricted
-//! Agent API (`/agent/v1`).
+//! Agent API (a per-sandbox vsock channel; see
+//! `protocol::AGENT_API_VSOCK_PORT`).
 //!
 //! A sandbox's VM is provisioned a cryptographically random token at boot;
 //! only its SHA-256 hash is ever kept host-side, and only in the manager's
