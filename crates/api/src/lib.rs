@@ -1,17 +1,14 @@
 //! HTTP API server exposing the sandbox manager over REST.
 //!
-//! Two surfaces, bound to different listeners:
-//! - the privileged control plane (`/api/v1`, `router`), used by the CLI/TUI;
-//! - the restricted Agent API (`/agent/v1`, `agent_router`), authenticated by
-//!   each VM's scoped bearer token and authorized against the caller's own
-//!   sandbox only.
+//! `/api/v1` (`router`) is the privileged control plane, used by the
+//! CLI/TUI. The Agent API — the restricted surface a sandbox calls back into
+//! the host with — no longer rides HTTP: it is a per-sandbox vsock channel
+//! set up by `mvm-manager` when the guest boots (see
+//! `mvm_common::protocol::AGENT_API_VSOCK_PORT`), not exposed by this
+//! listener at all.
 
 mod error;
 mod routes;
-#[cfg(feature = "agent-api")]
-mod auth;
-#[cfg(feature = "agent-api")]
-mod routes_agent;
 
 use axum::Router;
 use mvm_manager::Manager;
@@ -105,46 +102,7 @@ pub fn router(manager: Manager) -> Router {
     .with_state(state)
 }
 
-/// Agent API router: every route requires a valid VM-scoped bearer token.
-#[cfg(feature = "agent-api")]
-pub fn agent_router(manager: Manager) -> Router {
-    let state = AppState { manager };
-    with_trace_layer(Router::new().nest("/agent/v1", routes_agent::agent_routes()))
-        .with_state(state)
-}
-
-/// Serve the control plane and the Agent API on their own listeners until one
-/// of them stops.
-#[cfg(feature = "agent-api")]
-pub async fn serve(
-    control_addr: SocketAddr,
-    agent_addr: SocketAddr,
-    manager: Manager,
-) -> std::io::Result<()> {
-    validate_control_addr(control_addr)?;
-    if control_addr == agent_addr {
-        return Err(std::io::Error::other(
-            "control-plane and agent listeners must use different addresses",
-        ));
-    }
-    // Unlike the control plane, the agent listener is deliberately NOT
-    // restricted to loopback: every `/agent/v1` request requires a VM-scoped
-    // bearer token, so `--agent-addr 0.0.0.0:<port>` is a supported way to
-    // expose the agent surface beyond localhost.
-    let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
-    let agent_listener = tokio::net::TcpListener::bind(agent_addr).await?;
-    tracing::info!("mvm daemon listening on http://{control_addr}");
-    tracing::info!("mvm agent API listening on http://{agent_addr}");
-    let control = axum::serve(control_listener, router(manager.clone()));
-    let agent = axum::serve(agent_listener, agent_router(manager));
-    tokio::select! {
-        r = control => r,
-        r = agent => r,
-    }
-}
-
 /// Serve the control plane until interrupted.
-#[cfg(not(feature = "agent-api"))]
 pub async fn serve(control_addr: SocketAddr, manager: Manager) -> std::io::Result<()> {
     validate_control_addr(control_addr)?;
     let control_listener = tokio::net::TcpListener::bind(control_addr).await?;

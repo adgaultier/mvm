@@ -28,6 +28,12 @@ pub struct ShimConfig {
     /// the guest is booted with the agent as PID 1 and the workload as its
     /// child (enables `exec`).
     pub agent_socket: Option<PathBuf>,
+    /// Host unix socket for the guest's Agent API bridge (`mvm-agent-mcp`):
+    /// the guest dials out over vsock, one connection per request. Mapped
+    /// only alongside `agent_socket` (both ride the injected exec-agent's
+    /// boot path).
+    #[serde(default)]
+    pub agent_api_socket: Option<PathBuf>,
     /// Allocate a guest PTY for the initial workload and bridge the console.
     #[serde(default)]
     pub console_tty: bool,
@@ -142,6 +148,11 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
     if let Some(agent_sock) = &config.agent_socket {
         // Host listens on the unix socket; the guest agent connects out.
         ctx.add_vsock_port(protocol::AGENT_VSOCK_PORT, agent_sock, false)?;
+        if let Some(api_sock) = &config.agent_api_socket {
+            // Same direction as the control channel: the guest's Agent API
+            // bridge dials out, one vsock connection per request.
+            ctx.add_vsock_port(protocol::AGENT_API_VSOCK_PORT, api_sock, false)?;
+        }
         // libkrun's init execs KRUN_INIT with the exec path already prepended
         // as argv[0], so argv here is *just* the workload command. Repeating
         // the agent path would make the agent run itself as its own workload:
@@ -207,7 +218,8 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         // a shim *process* env var (never from shim.json, and the plaintext is
         // never persisted anywhere on the host), then rides the `MVM_*` channel
         // into the guest. Deliberately not scrubbed there: the workload's own
-        // tooling (the mvm-agent-mcp bridge) presents it to `/agent/v1`.
+        // tooling (the mvm-agent-mcp bridge) presents it over the Agent API
+        // vsock channel.
         if let Ok(token) = std::env::var("MVM_AGENT_TOKEN") {
             env.push(format!("MVM_AGENT_TOKEN={token}"));
         }

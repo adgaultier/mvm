@@ -16,9 +16,7 @@ _serve:
     MVM=${MVM_BIN:-{{justfile_directory()}}/../../target/release/mvm}
     AGENT=${MVM_AGENT_BIN:-{{justfile_directory()}}/../../target/$MUSL_TARGET/release/mvm-agent}
     PORT=24699
-    AGENT_PORT=24700
     MVM_HOST="http://127.0.0.1:$PORT"
-    MVM_AGENT_ADDR="127.0.0.1:$AGENT_PORT"
     # Keep the data dir SHORT: gvproxy binds unix sockets under
     # <data>/sandboxes/<id>/, and macOS's sockaddr_un.sun_path is limited to
     # 104 bytes. A repo-relative .runtime/data/... path runs past that and
@@ -26,8 +24,10 @@ _serve:
     MVM_DATA_DIR="/tmp/mvm-itest-$$"
     MVM_AGENT_PATH="$(cd {{justfile_directory()}}/../.. && pwd)/$AGENT"
     MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
-    AGENT_API=0
-    "$MVM" serve --help 2>&1 | grep -q -- '--agent-addr' && AGENT_API=1
+    # The Agent API is a per-sandbox vsock channel now (no host-wide address
+    # or CLI flag to probe); it is on by default (`agent-api` feature) and
+    # this repo doesn't maintain a build without it.
+    AGENT_API=1
 
     if [ "$(uname -s)" = Darwin ]; then
         [ -f "$(brew --prefix)/lib/libkrun.dylib" ] || {
@@ -64,9 +64,7 @@ _serve:
         "export MVM=\"$MVM\"" \
         "export AGENT=\"$AGENT\"" \
         "export PORT=$PORT" \
-        "export AGENT_PORT=$AGENT_PORT" \
         "export MVM_HOST=\"$MVM_HOST\"" \
-        "export MVM_AGENT_ADDR=\"$MVM_AGENT_ADDR\"" \
         "export MVM_DATA_DIR=\"$MVM_DATA_DIR\"" \
         "export MVM_AGENT_PATH=\"$MVM_AGENT_PATH\"" \
         "export MVM_GVPROXY_CONTROL=\"$MVM_GVPROXY_CONTROL\"" \
@@ -85,11 +83,7 @@ _serve:
     rm -rf "$MVM_DATA_DIR"
     mkdir -p "$MVM_DATA_DIR"
 
-    if [ "$AGENT_API" = 1 ]; then
-        "$MVM" serve --addr "127.0.0.1:$PORT" --agent-addr "127.0.0.1:$AGENT_PORT" >/dev/null 2>&1 &
-    else
-        "$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
-    fi
+    "$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
     echo $! > "{{RUNTIME}}/daemon.pid"
     for _ in $(seq 1 50); do
         curl -sf "$MVM_HOST/health" >/dev/null 2>&1 && break

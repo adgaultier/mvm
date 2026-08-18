@@ -37,10 +37,6 @@ enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1:24642")]
         addr: SocketAddr,
-        /// Address for the VM-authenticated Agent API (`/agent/v1`).
-        #[cfg(feature = "agent-api")]
-        #[arg(long, env = "MVM_AGENT_ADDR", default_value = "127.0.0.1:24643")]
-        agent_addr: SocketAddr,
     },
     /// Pull an OCI image.
     Pull { image: String },
@@ -269,11 +265,7 @@ fn main() {
         .init();
 
     let code = match cli.command {
-        Command::Serve {
-            addr,
-            #[cfg(feature = "agent-api")]
-            agent_addr,
-        } => {
+        Command::Serve { addr } => {
             // `--host` is the client-side daemon address (MVM_HOST), not a
             // listen option — silently accepting it here used to make
             // `serve --host 0.0.0.0` look like it had any effect.
@@ -289,14 +281,7 @@ fn main() {
             // requirement of unshare) — may re-exec and never return.
             #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
-            #[cfg(feature = "agent-api")]
-            {
-                serve(addr, agent_addr)
-            }
-            #[cfg(not(feature = "agent-api"))]
-            {
-                serve(addr)
-            }
+            serve(addr)
         }
         Command::VmShim { config } => vm_shim(&config),
         other => {
@@ -639,43 +624,6 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
     })
 }
 
-#[cfg(feature = "agent-api")]
-fn serve(addr: SocketAddr, agent_addr: SocketAddr) -> i32 {
-    let data_dir = match DataDir::resolve() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: cannot resolve data dir: {e}");
-            return 1;
-        }
-    };
-    eprintln!("mvm: data dir {}", data_dir.root().display());
-    // The manager owns a reqwest::blocking registry client, which must be
-    // constructed outside the tokio runtime.
-    let manager = match mvm_manager::Manager::new(data_dir) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: cannot initialize manager: {e}");
-            return 1;
-        }
-    };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("error: cannot start async runtime: {e}");
-            return 1;
-        }
-    };
-    if let Err(e) = runtime.block_on(mvm_api::serve(addr, agent_addr, manager)) {
-        eprintln!("error: server: {e}");
-        return 1;
-    }
-    0
-}
-
-#[cfg(not(feature = "agent-api"))]
 fn serve(addr: SocketAddr) -> i32 {
     let data_dir = match DataDir::resolve() {
         Ok(d) => d,

@@ -1,6 +1,9 @@
 //! Sandbox lifecycle manager: create/start/exec/stop/rm, log streaming,
-//! persistence, and the host side of the guest-agent control channel.
+//! persistence, and the host side of the guest-agent control channel and
+//! Agent API (both vsock).
 
+#[cfg(feature = "agent-api")]
+mod agent_api;
 mod agent_conn;
 pub mod console_filter;
 mod gvproxy;
@@ -52,6 +55,9 @@ struct SandboxEntry {
     gvproxy: Option<gvproxy::Gvproxy>,
     stop_requested: bool,
     lifecycle: Arc<AsyncMutex<()>>,
+    /// Accept loop for this sandbox's Agent API vsock listener; aborted when
+    /// the shim exits (the socket only makes sense while the guest is up).
+    agent_api_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SandboxEntry {
@@ -66,6 +72,7 @@ impl SandboxEntry {
             gvproxy: None,
             stop_requested: false,
             lifecycle: Arc::new(AsyncMutex::new(())),
+            agent_api_task: None,
         }
     }
 }
@@ -322,6 +329,22 @@ impl Manager {
             None => None,
         };
 
+        // 3b. Agent API listener (vsock bridge for the guest's
+        // `mvm-agent-mcp`): same gate as the control channel — both ride the
+        // injected exec-agent's boot path.
+        #[cfg(feature = "agent-api")]
+        let agent_api_socket = agent_socket.as_ref().map(|_| {
+            let sock = sb_dir.join("agent-api.sock");
+            let _ = std::fs::remove_file(&sock);
+            sock
+        });
+        #[cfg(not(feature = "agent-api"))]
+        let agent_api_socket: Option<PathBuf> = None;
+        let agent_api_listener = match &agent_api_socket {
+            Some(path) => Some(tokio::net::UnixListener::bind(path)?),
+            None => None,
+        };
+
         // 4. Networking: `--net gvproxy` without a socket means we own the
         // gvproxy. One vfkit datagram socket only ever serves one VM, so it
         // has to be per-sandbox and torn down with it.
@@ -383,6 +406,7 @@ impl Manager {
             ports: spec.ports.clone(),
             mounts: spec.mounts.clone(),
             agent_socket: agent_socket.clone(),
+            agent_api_socket: agent_api_socket.clone(),
             console_tty: spec.tty,
             console_size: spec.tty_size,
             user,
@@ -488,6 +512,28 @@ impl Manager {
                     Err(e) => tracing::warn!("agent accept failed: {e}"),
                 }
             });
+        }
+
+        // 9b. Agent API accept loop: unlike the control channel above, this
+        // runs for the sandbox's whole lifetime (one connection per guest
+        // request, not one connection total).
+        let agent_api_task = {
+            #[cfg(feature = "agent-api")]
+            {
+                agent_api_listener
+                    .map(|listener| agent_api::spawn_accept_loop(self.clone(), id.clone(), listener))
+            }
+            #[cfg(not(feature = "agent-api"))]
+            {
+                drop(agent_api_listener);
+                None
+            }
+        };
+        if let Some(task) = agent_api_task {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            if let Some(entry) = sandboxes.get_mut(&id) {
+                entry.agent_api_task = Some(task);
+            }
         }
 
         // 10. Child watcher.
@@ -964,6 +1010,9 @@ impl Manager {
             entry.agent = None;
             entry.exec_sessions.clear();
             entry.console_stdin = None;
+            if let Some(task) = entry.agent_api_task.take() {
+                task.abort();
+            }
             entry.info.agent_token_hash = None;
             entry.info.agent_token_created_at = None;
             entry.info.state = if entry.stop_requested {

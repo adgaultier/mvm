@@ -34,6 +34,16 @@ Ensure an authenticated API client cannot control another user's sandbox unless 
 > `/proc/cmdline`, deliberately not scrubbed so the workload's tooling can
 > present it); it is never persisted. Regenerated on restart, revoked on
 > stop/removal; the control plane never accepts it.
+>
+> **UPDATED (2026-08-18).** The `/agent/v1` HTTP listener and `--agent-addr`
+> are gone (see `doc/agentic/notifications-delegation.md` for why gvproxy
+> ruled HTTP out entirely). The Agent API is now a per-sandbox vsock channel
+> — guest dials CID 2 port 24643, host bridges it to
+> `<sandbox_dir>/agent-api.sock` — so the token check in
+> `mvm-manager::agent_api::dispatch` is now defense-in-depth on top of
+> socket-level scoping (`Manager::authorize` also checks the token's VM
+> matches the sandbox whose socket accepted the connection), not the sole
+> isolation mechanism.
 
 Provision each VM with a cryptographically random, VM-scoped bearer token for authenticating to the restricted Agent API.
 
