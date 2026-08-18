@@ -1,5 +1,4 @@
 #  NOTIFICATIONS / TIMEOUTS / DELEGATION
-#  NOTIFICATIONS / TIMEOUTS / DELEGATION
 
 ## NOTIFICATION SPECS
 ```
@@ -21,10 +20,13 @@ notifications:
 ```
 all notification are passed asyncronously to running agents via via `mvm exec <async_cmd>`
 
-where `async_cmd` is typically :
+c
  > curl http://localhost:`<local-agent-server-port>`/`<agent_async_notif_endpoint>`/`<msg>`
 and msg is serialized notification 
-
+for opencode:
+```
+SID=$(curl -s localhost:4096/session | jq -r 'sort_by(.time.updated) | reverse | map(select(.parentID == null)) | .[0].id'); curl -sS -X POST "localhost:4096/session/$SID/prompt_async" -H 'Content-Type: application/json' -d "$(jq -n --arg text "$MSG" '{parts:[{type:"text",text:$text}]}')"
+```
 
 ## IDLE AGENTS
 if an agent is idle, then :

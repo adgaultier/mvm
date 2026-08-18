@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SandboxId;
+use crate::{Sandbox, SandboxId, SandboxState};
 
 /// Agent API "delegate" params — ask the host to launch a child clone of the
 /// calling sandbox, bounded by `timeout`. Not yet implemented: the handler
@@ -220,6 +220,54 @@ impl Notification {
     }
 }
 
+/// Redacted, agent-facing view of the calling sandbox. The Agent API must
+/// never hand a workload the full `Sandbox` record: host mount paths, the
+/// network profile, port mappings, host process PIDs and lifecycle telemetry
+/// are control-plane internals. The agent gets its own identity, resource
+/// allocation and lifecycle status — plus delegation/lineage placeholders
+/// (`parent`, `children`, `capabilities`, `budget`) that are always empty
+/// until delegation is implemented.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentInfo {
+    /// The agent's own sandbox id.
+    pub id: SandboxId,
+    /// The sandbox's friendly name, if set.
+    pub name: Option<String>,
+    /// Lifecycle status (created/running/stopped/exited/failed).
+    pub state: SandboxState,
+    /// vCPUs allocated to the sandbox.
+    pub vcpus: u8,
+    /// RAM in MiB allocated to the sandbox.
+    pub ram_mib: u32,
+    /// The parent agent that delegated to this sandbox, if any (None = root).
+    /// Placeholder: always None until delegation is implemented.
+    pub parent: Option<SandboxId>,
+    /// Child agents this sandbox delegated to. Placeholder: always empty.
+    pub children: Vec<SandboxId>,
+    /// Capabilities this sandbox may delegate to its children. Placeholder:
+    /// always None until delegation is implemented.
+    pub capabilities: Option<serde_json::Value>,
+    /// Resource budget this sandbox may delegate to its children. Placeholder:
+    /// always None until delegation is implemented.
+    pub budget: Option<serde_json::Value>,
+}
+
+impl From<&Sandbox> for AgentInfo {
+    fn from(sandbox: &Sandbox) -> Self {
+        Self {
+            id: sandbox.id.clone(),
+            name: sandbox.spec.name.clone(),
+            state: sandbox.state,
+            vcpus: sandbox.spec.vcpus,
+            ram_mib: sandbox.spec.ram_mib,
+            parent: None,
+            children: Vec::new(),
+            capabilities: None,
+            budget: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +320,82 @@ mod tests {
         let back: AgentApiRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.method, "delegate");
         assert_eq!(back.params["timeout"], 60);
+    }
+
+    #[test]
+    fn agent_info_redacts_control_plane_fields() {
+        use std::collections::BTreeMap;
+
+        use crate::spec::{LifecycleOp, Mount, NetworkMode, Sandbox, SandboxSpec, SecurityProfile};
+
+        let spec = SandboxSpec {
+            name: Some("agent-1".to_string()),
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string(), "infinity".to_string()],
+            env: vec!["SECRET=1".to_string()],
+            workdir: None,
+            user: Some("1000:1000".to_string()),
+            vcpus: 2,
+            ram_mib: 1024,
+            attach_stdin: false,
+            tty: false,
+            tty_size: None,
+            network: NetworkMode::Gvproxy { socket: None },
+            ports: vec!["8080:80".to_string()],
+            mounts: vec![Mount {
+                host: "/host/secret".into(),
+                guest: "/guest/data".into(),
+                read_only: true,
+            }],
+            security: SecurityProfile::Strict,
+            labels: BTreeMap::from([("team".to_string(), "infra".to_string())]),
+        };
+        let mut sandbox = Sandbox::new(spec);
+        sandbox.state = SandboxState::Running;
+        sandbox.pid = Some(1234);
+        sandbox.gvproxy_pid = Some(5678);
+        sandbox.lifecycle.push(LifecycleOp {
+            op: "start".to_string(),
+            at: chrono::Utc::now(),
+            total_ms: 10,
+            phases: vec![],
+        });
+        sandbox.guest_token_hash = Some("deadbeef".to_string());
+
+        let json = serde_json::to_value(AgentInfo::from(&sandbox)).unwrap();
+        let obj = json.as_object().unwrap();
+        for key in obj.keys() {
+            assert!(
+                [
+                    "id", "name", "state", "vcpus", "ram_mib", "parent", "children",
+                    "capabilities", "budget",
+                ]
+                .contains(&key.as_str()),
+                "unexpected field in AgentInfo: {key}"
+            );
+        }
+        assert_eq!(json["state"], serde_json::json!("running"));
+        assert_eq!(json["vcpus"], 2);
+        assert_eq!(json["ram_mib"], 1024);
+        assert_eq!(json["name"], serde_json::json!("agent-1"));
+        assert_eq!(json["parent"], serde_json::Value::Null);
+        assert_eq!(json["children"], serde_json::json!([]));
+        assert_eq!(json["capabilities"], serde_json::Value::Null);
+        assert_eq!(json["budget"], serde_json::Value::Null);
+
+        let serialized = json.to_string();
+        for leaked in [
+            "/host/secret",
+            "8080:80",
+            "SECRET=1",
+            "deadbeef",
+            "gvproxy_pid",
+            "lifecycle",
+        ] {
+            assert!(
+                !serialized.contains(leaked),
+                "AgentInfo leaked control-plane field '{leaked}'"
+            );
+        }
     }
 }

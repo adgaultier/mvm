@@ -16,7 +16,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
 use mvm_common::agent_api::{
-    AgentApiRequest, AgentApiResponse, DelegateRequest, SetNotificationCommandParams,
+    AgentApiRequest, AgentApiResponse, AgentInfo, DelegateRequest, SetNotificationCommandParams,
 };
 use mvm_common::protocol::{encode_frame, MAX_FRAME};
 use mvm_common::Principal;
@@ -112,11 +112,11 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
 
     match request.method.as_str() {
         "inspect" => match manager.get(vm_id.as_str()) {
-            Ok(sandbox) => to_response(&sandbox),
+            Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
             Err(e) => AgentApiResponse::err(e.to_string()),
         },
         "stop" => match manager.stop(vm_id.as_str()).await {
-            Ok(sandbox) => to_response(&sandbox),
+            Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
             Err(e) => AgentApiResponse::err(e.to_string()),
         },
         "delegate" => match serde_json::from_value::<DelegateRequest>(request.params.clone()) {
@@ -126,7 +126,7 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
         "set_notification_command" => {
             match serde_json::from_value::<SetNotificationCommandParams>(request.params.clone()) {
                 Ok(params) => match manager.set_notification_command(vm_id.as_str(), params.command) {
-                    Ok(sandbox) => to_response(&sandbox),
+                    Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
                     Err(e) => AgentApiResponse::err(e.to_string()),
                 },
                 Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),

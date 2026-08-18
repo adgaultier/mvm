@@ -104,6 +104,17 @@ prebuilt images.
   a real dispatcher for actual lifecycle events (child TTL expiry, idle
   restarts, parent input), the notification queue, and TTL/idle timeouts.
 
+- **Agent API returns a redacted `AgentInfo`, not the `Sandbox` record**
+  (2026-08-18) — `inspect`, `stop` and `set_notification_command` used to
+  echo the full `Sandbox` (host mount paths, network profile, port mappings,
+  `pid`/`gvproxy_pid`, lifecycle telemetry) to the workload. They now return
+  `AgentInfo` (`mvm_common::agent_api`, feature-gated): `id`, `name`, `state`,
+  `vcpus`, `ram_mib`, plus delegation/lineage placeholders — `parent:
+  Option<SandboxId>` (singular, None = root), `children: Vec`, `capabilities`
+  and `budget` — all empty until delegation lands. Unit test asserts no
+  sensitive field is serialized; `agent-api.sh` greps the live `inspect`
+  response for the control-plane field names.
+
 - **Agent API: vsock transport, no more HTTP** (2026-08-18) — replaced the
   shared `--agent-addr` HTTP listener (below) with a per-sandbox vsock
   channel: the guest dials out to CID 2, port 24643

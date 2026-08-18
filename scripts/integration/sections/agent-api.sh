@@ -59,6 +59,8 @@ check "control plane hides the token hash" "0" \
 if [ "$HAVE_PROBE" = 1 ]; then
     check "agent API inspect self (A)" "1" \
         "$(agent_api_call agent-a "$TOKEN_A" inspect | grep -c "\"id\": *\"$SB_A\"")"
+    check "agent API inspect hides control-plane fields" "0" \
+        "$(agent_api_call agent-a "$TOKEN_A" inspect | grep -c -E '"(mounts|ports|env|pid|gvproxy_pid|lifecycle|spec|guest_token_hash)"')"
     check "A's token cannot reach B's socket" "1" \
         "$(agent_api_call agent-b "$TOKEN_A" inspect | grep -c '"ok": *false')"
     check "agent API set_notification_command registers template" "1" \
