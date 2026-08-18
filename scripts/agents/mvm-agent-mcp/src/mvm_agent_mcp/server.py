@@ -294,7 +294,7 @@ def test_notification() -> dict:
     NOTIFICATION_CMD, `$MSG` substituted). Returns a per-kind report
     (kind/ok/exit_code/output/error) — a good end-to-end check of a fresh
     agent's notification wiring."""
-    return client.request("test_notification")
+    return {"notifications": client.request("test_notification")}
 
 
 def register_notification_command() -> None:
