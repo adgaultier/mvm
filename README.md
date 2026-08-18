@@ -431,7 +431,11 @@ or is removed) is still required in the request body and cross-checked
 against the socket that accepted the connection. Methods:
 
 ```text
-inspect                              -> the caller's own sandbox record
+inspect                              -> the caller's own agent info (redacted:
+                                        id, state, vcpus, ram_mib, parent/children,
+                                        capability placeholders; control-plane
+                                        internals like host mounts/ports/pids are
+                                        never exposed)
 stop                                  -> stops the caller's own sandbox
 delegate {timeout, command}           -> not yet implemented
 ```
