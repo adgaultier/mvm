@@ -61,25 +61,25 @@ impl DataDir {
     }
 }
 
-/// Path to the guest agent binary, resolved at runtime.
+/// Path to the guestd binary, resolved at runtime.
 ///
-/// Priority: $MVM_AGENT_PATH (always honored), then — skipping any candidate
+/// Priority: $MVM_GUESTD_PATH (always honored), then — skipping any candidate
 /// that could not exec inside guests whose libc we don't control (anything
 /// but a static ELF, i.e. dynamically linked or not Linux-ELF at all) —
 /// alongside the current executable, the musl target dir of a dev tree
 /// (matching the host arch: guests are same-arch), and PATH.
-pub fn agent_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("MVM_AGENT_PATH") {
+pub fn guestd_binary() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("MVM_GUESTD_PATH") {
         let p = PathBuf::from(p);
         if p.exists() {
             match elf_kind(&p) {
                 ElfKind::Dynamic => eprintln!(
-                    "mvm: warning: MVM_AGENT_PATH agent {} is dynamically linked; \
+                    "mvm: warning: MVM_GUESTD_PATH guestd {} is dynamically linked; \
                      it will fail to exec in guests without a matching libc",
                     p.display()
                 ),
                 ElfKind::NotElf => eprintln!(
-                    "mvm: warning: MVM_AGENT_PATH agent {} is not a Linux ELF; \
+                    "mvm: warning: MVM_GUESTD_PATH guestd {} is not a Linux ELF; \
                      it cannot run inside guests",
                     p.display()
                 ),
@@ -93,15 +93,15 @@ pub fn agent_binary() -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("mvm-agent"));
-            // Dev tree: exe in target/<profile>/, static agent in
+            candidates.push(dir.join("mvm-guestd"));
+            // Dev tree: exe in target/<profile>/, static guestd in
             // target/<arch>-unknown-linux-musl/release/.
             if let Some(target) = dir.parent() {
-                candidates.push(target.join(&musl_target).join("release").join("mvm-agent"));
+                candidates.push(target.join(&musl_target).join("release").join("mvm-guestd"));
             }
         }
     }
-    if let Some(p) = which("mvm-agent") {
+    if let Some(p) = which("mvm-guestd") {
         candidates.push(p);
     }
 
@@ -112,13 +112,13 @@ pub fn agent_binary() -> Option<PathBuf> {
         match elf_kind(&candidate) {
             ElfKind::Static => return Some(candidate),
             ElfKind::Dynamic => eprintln!(
-                "mvm: skipping dynamically-linked agent candidate {} \
-                 (build the static one: cargo build --release -p mvm-agent \
+                "mvm: skipping dynamically-linked guestd candidate {} \
+                 (build the static one: cargo build --release -p mvm-guestd \
                  --target {musl_target})",
                 candidate.display()
             ),
             ElfKind::NotElf => eprintln!(
-                "mvm: skipping non-Linux agent candidate {} \
+                "mvm: skipping non-Linux guestd candidate {} \
                  (build the static one: scripts/build.sh)",
                 candidate.display()
             ),
@@ -209,32 +209,32 @@ mod tests {
     use super::*;
 
     /// Uses the workspace's own build artifacts when present: the host
-    /// agent must register as dynamic (Linux) or non-ELF (macOS dev tree),
+    /// guestd must register as dynamic (Linux) or non-ELF (macOS dev tree),
     /// the musl one as static.
     #[test]
-    fn classifies_agent_binaries() {
+    fn classifies_guestd_binaries() {
         let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        let dynamic = target.join("debug/mvm-agent");
+        let dynamic = target.join("debug/mvm-guestd");
         if dynamic.is_file() {
             #[cfg(target_os = "linux")]
             assert!(
                 matches!(elf_kind(&dynamic), ElfKind::Dynamic),
-                "gnu agent should be dynamic"
+                "gnu guestd should be dynamic"
             );
             #[cfg(not(target_os = "linux"))]
             assert!(
                 matches!(elf_kind(&dynamic), ElfKind::NotElf),
-                "host agent should not be a Linux ELF"
+                "host guestd should not be a Linux ELF"
             );
         }
         let static_ = target.join(format!(
-            "{}-unknown-linux-musl/release/mvm-agent",
+            "{}-unknown-linux-musl/release/mvm-guestd",
             std::env::consts::ARCH
         ));
         if static_.is_file() {
             assert!(
                 matches!(elf_kind(&static_), ElfKind::Static),
-                "musl agent should be static"
+                "musl guestd should be static"
             );
         }
     }

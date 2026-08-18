@@ -50,8 +50,8 @@ Plan (mirror the gvproxy flow):
 4. Port maps: translate mvm's `-p host:guest` into passt `-t`/`-u` forwards
    (crun's handler uses `-t all -u all`; we want per-map), instead of
    `krun_set_port_map`.
-5. Agent: confirm eth0 comes up via passt's DHCP (libkrun's init embeds a
-   DHCP client, but the agent IS init here — may need a DHCP/static bootstrap
+5. guestd: confirm eth0 comes up via passt's DHCP (libkrun's init embeds a
+   DHCP client, but the guestd IS init here — may need a DHCP/static bootstrap
    like gvproxy's; verify what the workload sees).
 6. Env: `MVM_PASST_BIN` (default `passt`, macOS needs no Homebrew libkrun
    dependency here since passt is standalone). Docs: README network table +
@@ -60,11 +60,11 @@ Plan (mirror the gvproxy flow):
 
 
 ## 5. Daemon logging & tracing
-Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for agent-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line. (The `start` `boot_ms`/`total_ms` now come from `Sandbox.lifecycle` — see item 6.)
+Mostly done: added `sandbox started/created/removed` and `image pulled/loaded/removed` INFO lines, WARNs for guestd-injection failure, unexpected shim exit, and auth rejections, plus DEBUG/TRACE step-level detail (start lifecycle, exec sessions, gvproxy, storage driver selection) — see the `tracing::` calls in `manager`/`api`/`image`/`storage`. Remaining: fold the pre-tracing `eprintln!` startup banner (data dir, userns, storage) into one structured `info` line. (The `start` `boot_ms`/`total_ms` now come from `Sandbox.lifecycle` — see item 6.)
 
 ## 6. Add startup latency instrumentation
 Measure startup latency end-to-end and surface it. **Timing capture is done**
-(2026-08-14): the manager records `total`, `vm_boot` (shim spawn -> agent
+(2026-08-14): the manager records `total`, `vm_boot` (shim spawn -> guestd
 ready) and per-phase wall times for create/start/stop with monotonic
 `Instant`s, as `Sandbox.lifecycle` — see the Done entry; the TUI inspect modal
 renders them as flamegraph bars. Remaining: a `--timings` CLI/API output
@@ -92,7 +92,7 @@ prebuilt images.
   unix socket (`<sandbox_dir>/agent-api.sock`) — the same libkrun
   vsock-over-unix-socket mechanism the exec control channel already used,
   set up in `Manager::start` alongside it and gated by the same condition
-  (only when the exec-agent is injected). Motivation:
+  (only when the exec-guestd is injected). Motivation:
   `doc/agentic/notifications-delegation.md` — gvproxy cannot forward a guest
   connection to a host-loopback-only listener without exposing the agent
   surface on a real LAN-reachable address, so HTTP over the network stack was
@@ -122,14 +122,14 @@ prebuilt images.
 
 - **`--security=strict` guest syscall hardening** (2026-08-16) — `mvm
   create/run/clone --security=strict` plumbs `SandboxSpec.security` →
-  `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the agent installs a
+  `ShimConfig.security` → `MVM_SECURITY_STRICT`, and the guestd installs a
   workload-scoped second seccomp filter (`build_strict` in
-  `crates/agent/src/seccomp.rs`, applied via `apply_strict_seccomp` in the
+  `crates/guestd/src/seccomp.rs`, applied via `apply_strict_seccomp` in the
   workload's `pre_exec` *before* the privilege drop, and in exec sessions)
   denying `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, the
   `io_uring_*` trio, ptrace, namespace/mount changes, module loading, and
-  kexec with `EPERM`. The agent keeps the full syscall surface
-  (needed for exec/pty — and, later, for the agent itself loading eBPF in
+  kexec with `EPERM`. The guestd keeps the full syscall surface
+  (needed for exec/pty — and, later, for the guestd itself loading eBPF in
   Phase 2). `scripts/integration/probes/bpfprobe.c` (wired into the
   `bpfprobe` integration section) probes the libkrunfw guest kernel's
   BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
@@ -145,7 +145,7 @@ prebuilt images.
   `total_ms`, ordered `phases`) using monotonic `Instant`s, stored bounded
   (16) on `Sandbox.lifecycle` and serialized into the API. Phase lists:
   `create` validate/register/persist,
-  `start` rootfs/agent/gvproxy/ports/shim/persist/boot (shim->agent-ready),
+  `start` rootfs/guestd/gvproxy/ports/shim/persist/boot (shim->guestd-ready),
   `stop` terminate/persist. The TUI inspect modal renders one segmented
   colored bar per op (`tui::flame_bar_line`/`flame_legend`, `█` runs
   proportional to ms + a `░` tail for the untimed slack), showing the full
@@ -170,7 +170,7 @@ prebuilt images.
   authenticated per request by `Authorization: Bearer <token>` and resolved
   to `Principal::Vm(vm_id)` — routes carry no `{id}`, so a VM can only act
   on itself. 32-byte token minted in `Manager::start`; only a SHA-256 hash
-  (`agent_token_hash`) is kept in the manager's memory (`#[serde(skip)]`:
+  (`guest_token_hash`) is kept in the manager's memory (`#[serde(skip)]`:
   never in API responses, never persisted), cleared on stop/exit. Plaintext
   passed to the shim as a process env var (never `shim.json`) and forwarded
   into the guest over the `MVM_*` channel (readable via `/proc/cmdline`, and
@@ -182,8 +182,8 @@ prebuilt images.
 
 - **Devpts stacking investigation (TODO#5)** (2026-08-10) — the original item
   reported that `tty` fails and `ls /dev/pts` is empty. Neither reproduces:
-  the agent mounts devpts *before* `openpty()`, so ptys land in the topmost
-  (visible) instance. Two devpts instances exist (libkrun init + agent), but
+  the guestd mounts devpts *before* `openpty()`, so ptys land in the topmost
+  (visible) instance. Two devpts instances exist (libkrun init + guestd), but
   `tty`, `ls /dev/pts`, `ttyname`, and non-root access all work. Added 4
   integration tests to the `console-resize`/`exec` integration sections
   (devpts count, ls, ttyname, non-root); all pass. The item is downgraded to
@@ -191,20 +191,20 @@ prebuilt images.
   deduplicate the devpts mount.
 
 - **Raw socket creation banned in the guest (seccomp-bpf)** (2026-08-09) —
-  the agent installs a hand-built `SECCOMP_MODE_FILTER` at the top of
+  the guestd installs a hand-built `SECCOMP_MODE_FILTER` at the top of
   `real_main` (before mounts/network; install failure is fatal, always-on, no
   opt-out) that denies `socket(2)` for `AF_PACKET` (any type) and
   `AF_INET`/`AF_INET6` with `(type & 0xf) == SOCK_RAW` → `ERRNO|EPERM`,
   allows everything else (incl. `AF_NETLINK`, which the network bootstrap
   creates with a raw type), and kills on a mismatched audit arch.
-  `crates/agent/src/seccomp.rs` builds the BPF with `libc::sock_filter` /
+  `crates/guestd/src/seccomp.rs` builds the BPF with `libc::sock_filter` /
   `sock_fprog` + `prctl` (no new deps, musl-safe); the filter is inherited by
   every descendant (workload, exec sessions) and cannot be weakened.
   `scripts/integration/probes/rawprobe.c` probes the full matrix in-VM as
   both a workload and an exec session via `just raw-seccomp` (80/80 green).
 
 - **Live console window resize for `mvm run -it` / `mvm attach`** (2026-08-09) —
-  the console now tracks the terminal like `exec` does. The agent `dup`s the
+  the console now tracks the terminal like `exec` does. The guestd `dup`s the
   workload pty master for itself (`console_pty: Option<OwnedFd>`, bridge keeps
   the original) and answers `AgentRequest::ConsoleResize` with `TIOCSWINSZ`
   (logged, not fatal, on failure); `POST /sandboxes/{id}/console/resize`
@@ -236,7 +236,7 @@ prebuilt images.
 
 - **Dropped the `ext4` storage driver** (2026-08-06) — removed the
   opt-in block-device root and everything that existed only to serve it:
-  `mkfs.ext4 -d` image building, the agent's `pivot_root` onto /dev/vda
+  `mkfs.ext4 -d` image building, the guestd's `pivot_root` onto /dev/vda
   (plus `apply_ownership` and the `mount` helper), the `root_disk`
   plumbing through `PreparedRootfs`/`ShimConfig`/the shim's virtio-blk
   attach, `MVM_ROOT_DISK`/`MVM_WORKDIR`, and the whole ownership-manifest
@@ -245,12 +245,12 @@ prebuilt images.
   chown, which the userns mode later solved properly for the default
   virtiofs path; it was opt-in, never exercised by `integration.sh`, and
   needed e2fsprogs (absent on macOS). Storage is now `overlay` + `copy`.
-- **`run -t` lost the workload's last output** — the agent bridges the
+- **`run -t` lost the workload's last output** — the guestd bridges the
   workload's guest pty to the console on a detached thread, but nothing
   waited for it: once the workload exited, `real_main` returned and
   `process::exit` tore the process down mid-drain, so a short-lived `-t`
   workload raced its own final bytes. Reproduced at ~8/15 (`run -t alpine
-  printf 'A\n'` losing its CRLF); the agent now keeps the thread's
+  printf 'A\n'` losing its CRLF); the guestd now keeps the thread's
   JoinHandle and joins it before reporting `WorkloadExit` → 20/20.
 
 - **Apple Silicon port** — mvm builds, boots and passes the integration
@@ -258,12 +258,12 @@ prebuilt images.
   the `libkrun/krun` Homebrew tap (Hypervisor.framework, same-arch arm64
   guests); `scripts/install-darwin.sh` installs libkrun/libkrunfw, Zig, and
   cargo-zigbuild. Mechanism:
-  Linux-only code cfg-gated (userns, agent body, `/proc`, tap); Homebrew
+  Linux-only code cfg-gated (userns, guestd body, `/proc`, tap); Homebrew
   lib dir baked into every binary as rpath via `.cargo/config.toml`
   (libkrun dlopens libkrunfw by bare name); `dist/mvm` codesigned with
   the hypervisor entitlement (without it `krun_start_enter` → EINVAL);
-  agent cross-compiled with `cargo zigbuild` (host-arch musl target,
-  `agent_binary()` now rejects non-ELF candidates); copy driver uses
+  guestd cross-compiled with `cargo zigbuild` (host-arch musl target,
+  `guestd_binary()` now rejects non-ELF candidates); copy driver uses
   `clonefile(2)` on APFS. macOS limits: no userns/chown fidelity, storage
   = copy (wiped per start), no tap profile.
 
@@ -296,7 +296,7 @@ prebuilt images.
   concurrent sandboxes both have working forwards.
 - **`mvm run -it`** — was frozen: `io::copy` into `stdout`'s LineWriter held
   prompts and raw-mode echo until a newline; `krun_set_exec` argv repeated
-  the agent path, so a second agent instance ate the `MVM_*` vars and no
+  the guestd path, so a second guestd instance ate the `MVM_*` vars and no
   workload pty was ever allocated; and three stacked line disciplines
   double-echoed and buffered keystrokes. Now: flush per chunk, argv without
   the exec path, raw shim pty + raw bridged console + explicit interactive
@@ -315,20 +315,20 @@ prebuilt images.
   upper layer persists across stop/start; probe with labeled fallback.
 - **Network isolation + modes** — `none` now really is isolated (dead
   unixgram NIC disables libkrun's default TSI); `tsi` exposed as an
-  explicit zero-setup outbound mode (agent writes public resolvers);
+  explicit zero-setup outbound mode (guestd writes public resolvers);
   `gvproxy[:<socket>]` fixed to the vfkit datagram protocol with
-  agent-side static IP/route/DNS bootstrap (ioctls, no guest binaries).
+  guestd-side static IP/route/DNS bootstrap (ioctls, no guest binaries).
 - **Exec**: binary-safe base64 streams; `-it` with real pty (openpty,
   devpts, Resize protocol + endpoint, raw-mode CLI); kill-on-disconnect
   guard on the API stream.
 - **Interactive `mvm run -i/-t`** — console stdin attach over
   `POST /sandboxes/{id}/stdin`, VEOF on EOF, local raw mode with `-t`.
-- **Deterministic lifecycle** — `start` waits for the agent channel
+- **Deterministic lifecycle** — `start` waits for the guestd channel
   (exec also tolerates a concurrent start); log broadcast closes on shim
   exit so `run` streams to EOF and `logs -f` terminates.
 - **Image store** — up-to-date digest short-circuit, atomic staged
   pulls, per-key pull locking, `rmi` in-use refusal.
 - **Layer replacement unpacking** — later OCI hard-link entries replace an
   existing destination before unpacking, matching Docker layer semantics.
-- **Guardrails** — dynamically-linked agent rejected (PT_INTERP check);
+- **Guardrails** — dynamically-linked guestd rejected (PT_INTERP check);
   mvm flags after the image rejected with a hint.

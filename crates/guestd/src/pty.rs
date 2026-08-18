@@ -36,7 +36,7 @@ pub(super) fn spawn_tty_workload(
     };
     if rc != 0 {
         eprintln!(
-            "mvm-agent: openpty failed: {}",
+            "mvm-guestd: openpty failed: {}",
             std::io::Error::last_os_error()
         );
         return None;
@@ -69,7 +69,7 @@ pub(super) fn spawn_tty_workload(
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
+            eprintln!("mvm-guestd: failed to spawn {:?}: {e}", workload_argv[0]);
             return None;
         }
     };

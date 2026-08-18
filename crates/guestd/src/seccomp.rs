@@ -1,17 +1,17 @@
-//! seccomp-bpf policy for the guest agent.
+//! seccomp-bpf policy for the guestd.
 //!
-//! A seccomp filter installed by the agent is inherited by every process it
+//! A seccomp filter installed by the guestd is inherited by every process it
 //! spawns, so this one filter hardens the whole guest: nothing under the
-//! agent — the workload, exec sessions, or any of their children — may create
+//! guestd — the workload, exec sessions, or any of their children — may create
 //! a raw packet or raw IP socket. Raw sockets are the classic privilege-
 //! escalation surface when images or workloads are not fully trusted.
 //!
 //! The always-on filter is deliberately narrow: it inspects only `socket(2)`
 //! and denies raw packet/IP sockets. Strict mode adds workload-scoped denies
 //! for kernel-control and namespace-management syscalls while leaving the
-//! agent unrestricted.
+//! guestd unrestricted.
 //!
-//! It is installed with `SECCOMP_MODE_FILTER`. The agent is guest PID 1 and
+//! It is installed with `SECCOMP_MODE_FILTER`. The guestd is guest PID 1 and
 //! never execs a setuid binary, so it needs no `no_new_privs`; not setting it
 //! leaves the workload free to keep setuid bits in its rootfs. An unexpected
 //! arch (syscall-number mismatch would be misinterpreted otherwise) is killed
@@ -32,7 +32,7 @@ const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 const EPERM: u32 = 1;
 
 // The arch a seccomp_data.arch must carry. Guests are same-arch as the host,
-// so the agent never runs on more than one.
+// so the guestd never runs on more than one.
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
@@ -282,8 +282,8 @@ pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
 /// silent pass), and kills on an unexpected arch like the raw-socket filter.
 ///
 /// Unlike the always-on raw-socket filter, this one is *workload-scoped*:
-/// the agent installs it in the workload's `pre_exec` (see
-/// `apply_strict_seccomp` in linux.rs), so the agent itself keeps the full
+/// the guestd installs it in the workload's `pre_exec` (see
+/// `apply_strict_seccomp` in linux.rs), so the guestd itself keeps the full
 /// syscall surface it needs for exec/pty plumbing while the workload and
 /// everything it spawns lose the high-risk kernel interfaces.
 fn build_strict() -> Vec<libc::sock_filter> {
@@ -453,7 +453,7 @@ mod tests {
         let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, AF_INET, 2);
         assert_eq!(got, SECCOMP_RET_ALLOW);
         // netlink (16) with a raw *type* (SOCK_RAW | CLOEXEC) → allow (the
-        // filter keys on the domain first; agent network bootstrap uses it).
+        // filter keys on the domain first; guestd network bootstrap uses it).
         let got = run(&prog, AUDIT_ARCH, SYS_SOCKET, 16, SOCK_RAW | 0x8000);
         assert_eq!(got, SECCOMP_RET_ALLOW);
         // A non-socket syscall → allow.

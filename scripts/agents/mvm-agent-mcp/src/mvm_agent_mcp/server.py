@@ -13,7 +13,7 @@ Configuration:
 
     MVM_AGENT_CID=2
     MVM_AGENT_PORT=24643
-    MVM_AGENT_TOKEN=<vm-scoped-token>
+    MVM_GUEST_TOKEN=<vm-scoped-token>
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from fastmcp import FastMCP
 
 AGENT_CID = int(os.environ.get("MVM_AGENT_CID", "2"))
 AGENT_PORT = int(os.environ.get("MVM_AGENT_PORT", "24643"))
-TOKEN = os.environ.get("MVM_AGENT_TOKEN", "")
+TOKEN = os.environ.get("MVM_GUEST_TOKEN", "")
 
 MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 
@@ -174,7 +174,7 @@ class AgentClient:
     ) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError(
-                "MVM_AGENT_TOKEN is not set"
+                "MVM_GUEST_TOKEN is not set"
             )
 
         request = {
@@ -280,7 +280,7 @@ def delegate(timeout: int, command: list[str]) -> dict:
 def main() -> None:
     if not TOKEN:
         raise SystemExit(
-            "mvm-agent-mcp: MVM_AGENT_TOKEN is not set"
+            "mvm-agent-mcp: MVM_GUEST_TOKEN is not set"
         )
 
     mcp.run()

@@ -1065,14 +1065,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-agent"
-version = "0.1.0"
-dependencies = [
- "libc",
- "mvm-common",
-]
-
-[[package]]
 name = "mvm-api"
 version = "0.1.0"
 dependencies = [
@@ -1120,6 +1112,14 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mvm-guestd"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mvm-common",
 ]
 
 [[package]]

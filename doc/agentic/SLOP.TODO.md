@@ -66,7 +66,7 @@ Reject oversized payloads before encoding and add a boundary test.
 
 ### Severity 3 — Requested virtiofs mounts fail silently
 
-`crates/agent/src/linux.rs` mount handling ignores directory creation and
+`crates/guestd/src/linux.rs` mount handling ignores directory creation and
 `mount()` results. A workload can start without a requested mount and receive
 no structured diagnostic.
 
@@ -75,17 +75,17 @@ available.
 
 ### Severity 3 — Agent protocol sends discard encoding and write failures
 
-`crates/agent/src/linux.rs:319-325` ignores both frame-encoding failures and
-vsock flush errors. The agent can continue after failing to report readiness,
+`crates/guestd/src/linux.rs:319-325` ignores both frame-encoding failures and
+vsock flush errors. The guestd can continue after failing to report readiness,
 stdout, stderr, or exit events, leaving the host with an incomplete protocol
 stream and no explicit failure.
 
-Return the error from `send`/`flush_out` or transition the agent connection to
+Return the error from `send`/`flush_out` or transition the guestd connection to
 a failed state when an event cannot be delivered.
 
 ### Severity 3 — Exec PTY duplicates are passed to raw-FD ownership APIs unchecked
 
-`crates/agent/src/linux.rs:757-771` calls `dup(fd)` inside
+`crates/guestd/src/linux.rs:757-771` calls `dup(fd)` inside
 `Stdio::from_raw_fd` without checking for `-1`. A descriptor exhaustion error
 can therefore create invalid child stdio setup and obscure the real failure.
 
@@ -94,7 +94,7 @@ exec error.
 
 ### Severity 3 — Exec PTY session setup ignores terminal errors
 
-`crates/agent/src/linux.rs:779-785` ignores failures from `setsid()` and
+`crates/guestd/src/linux.rs:779-785` ignores failures from `setsid()` and
 `TIOCSCTTY`. An exec session may then run without a session leader or
 controlling terminal despite requesting `-t`.
 
@@ -103,7 +103,7 @@ fails.
 
 ### Severity 2 — TSI DNS setup suppresses filesystem failures
 
-`crates/agent/src/linux.rs:112-117` ignores failures creating `/etc` and
+`crates/guestd/src/linux.rs:112-117` ignores failures creating `/etc` and
 writing `resolv.conf`. TSI networking can then start without DNS configuration
 and without a diagnostic.
 
@@ -166,7 +166,7 @@ fails.
 
 ### Resolved — Exec output was silently discarded under backpressure
 
-`attach_agent` now awaits bounded channel sends instead of using `try_send`, so
+`attach_guestd` now awaits bounded channel sends instead of using `try_send`, so
 slow clients apply backpressure rather than losing stdout/stderr frames.
 
 ### Resolved — Corrupt registry data was treated as an empty registry

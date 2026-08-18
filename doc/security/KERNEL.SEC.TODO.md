@@ -67,12 +67,12 @@ bumped — the two drift.
 
 ## Strict-mode seccomp (implemented)
 
-`mvm run --security=strict` makes the guest agent install a second, workload-
+`mvm run --security=strict` makes the guestd install a second, workload-
 scoped seccomp filter in the spawn path (`apply_strict_seccomp` in
-`crates/agent/src/linux.rs`, `build_strict` in `crates/agent/src/seccomp.rs`).
+`crates/guestd/src/linux.rs`, `build_strict` in `crates/guestd/src/seccomp.rs`).
 It denies `bpf`, `keyctl`, `perf_event_open`, `userfaultfd`, the `io_uring_*`
 trio, `ptrace`, namespace changes, mount/pivot-root, module loading, and kexec
-with `EPERM`, while the agent itself keeps the full syscall surface. This is
+with `EPERM`, while the guestd itself keeps the full syscall surface. This is
 the "seccomp as the syscall baseline" half of the recommended design,
 delivered with zero new dependencies. Namespace-creation flags passed to
 `clone`/`clone3` and capability dropping remain separate compatibility
@@ -182,7 +182,7 @@ The kernel capability gate is now open, but policy enforcement is not yet
 implemented. The next change must define an explicit egress policy in the
 sandbox specification before adding a loader. That implementation needs to:
 
-1. pass the policy to the trusted guest agent without exposing mutable policy
+1. pass the policy to the trusted guestd without exposing mutable policy
    state to the workload;
 2. mount or reuse cgroup2 and load/attach the cgroup_skb program before the
    workload starts;

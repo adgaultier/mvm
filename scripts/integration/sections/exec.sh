@@ -3,8 +3,8 @@ set -euo pipefail
 echo "== exec =="
 "$MVM" run --name itest alpine sleep 60 >/dev/null 2>&1 &
 RUN_PID=$!
-# Wait for the guest agent to come up ("running" state precedes the
-# agent's vsock connection by a moment).
+# Wait for the guestd to come up ("running" state precedes the
+# guestd.s vsock connection by a moment).
 for _ in $(seq 1 100); do
     "$MVM" exec itest true >/dev/null 2>&1 && break
     sleep 0.2

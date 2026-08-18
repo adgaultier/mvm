@@ -75,7 +75,7 @@ pub enum SecurityProfile {
     /// surface (the always-on raw-socket ban still applies).
     #[default]
     Default,
-    /// Hostile-workload hardening: the guest agent installs an additional
+    /// Hostile-workload hardening: the guestd installs an additional
     /// seccomp filter in the workload's spawn path denying the high-risk
     /// syscalls (`bpf`, `keyctl`, `perf_event_open`, `userfaultfd`,
     /// `io_uring`). Fail-closed by design — this is for untrusted code.
@@ -111,7 +111,7 @@ pub struct SandboxSpec {
     pub name: Option<String>,
     /// Image reference (as pulled, e.g. "alpine:latest").
     pub image: String,
-    /// Command + args to run as the workload (PID 1 child of the agent).
+    /// Command + args to run as the workload (PID 1 child of the guestd).
     /// If empty, the image's Entrypoint/Cmd is used.
     #[serde(default)]
     pub command: Vec<String>,
@@ -278,11 +278,11 @@ pub struct Sandbox {
     /// the shim's process environment and in the guest). Regenerated on every
     /// start; cleared the moment the sandbox stops or exits.
     #[serde(skip)]
-    pub agent_token_hash: Option<String>,
+    pub guest_token_hash: Option<String>,
     /// When the current token was minted (its start time). Manager-internal
     /// bookkeeping, like the hash it accompanies — never serialized.
     #[serde(skip)]
-    pub agent_token_created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub guest_token_created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Sandbox {
@@ -299,8 +299,8 @@ impl Sandbox {
             finished_at: None,
             console_size: None,
             lifecycle: Vec::new(),
-            agent_token_hash: None,
-            agent_token_created_at: None,
+            guest_token_hash: None,
+            guest_token_created_at: None,
         }
     }
 

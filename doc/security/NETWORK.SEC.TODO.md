@@ -454,7 +454,7 @@ It must not derive VM identity from:
 
 # 9. Guest Agent Token
 
-MVM's existing `MVM_AGENT_TOKEN` remains an authentication mechanism for
+MVM's existing `MVM_GUEST_TOKEN` remains an authentication mechanism for
 guest-initiated host services.
 
 It is not the proxy's identity mechanism.

@@ -23,7 +23,7 @@ pub struct ShimHandle {
 /// Write the shim config and spawn the shim with a pty-backed console. The
 /// guest workload must see a terminal even when the client is not attached.
 ///
-/// `agent_token` is the VM's plaintext bearer token. It is passed to the shim
+/// `guest_token` is the VM's plaintext bearer token. It is passed to the shim
 /// as a process environment variable (so the shim can forward it into the
 /// guest over the `MVM_*` channel) and deliberately NOT written to shim.json —
 /// the host must only ever persist its hash.
@@ -31,15 +31,15 @@ pub fn spawn_shim(
     config: &ShimConfig,
     sandbox_dir: &Path,
     attach_stdin: bool,
-    agent_token: Option<&str>,
+    guest_token: Option<&str>,
 ) -> Result<ShimHandle> {
     let config_path = sandbox_dir.join("shim.json");
     config.save(&config_path)?;
 
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
-    if let Some(token) = agent_token {
-        cmd.env("MVM_AGENT_TOKEN", token);
+    if let Some(token) = guest_token {
+        cmd.env("MVM_GUEST_TOKEN", token);
     }
     let (master, slave) = openpty()?;
     // This pty is plumbing, not a terminal anyone types on: it exists so the
@@ -53,7 +53,7 @@ pub fn spawn_shim(
     // stderr joins the console instead of going somewhere only the daemon's
     // debug log could see. libkrun maps the guest's fd 2 to the shim's, so
     // piping it away silently discarded *all* guest stderr — a workload's
-    // error output and the agent's own startup diagnostics both vanished,
+    // error output and the guestd.s own startup diagnostics both vanished,
     // leaving a bare exit code. Docker interleaves the two streams too.
     let stderr_fd = dup_fd(slave)?;
     unsafe { libc::close(slave) };

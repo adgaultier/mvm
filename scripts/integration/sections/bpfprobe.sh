@@ -5,7 +5,7 @@ echo "== guest kernel eBPF probe (bpfprobe) =="
 # libkrunfw guest kernel can load and attach eBPF programs at all. The probe
 # runs as guest root (the threat model's hostile-root assumption), so bpf()
 # and the cgroup2/bpffs mounts it attempts are exactly what the trusted
-# agent-init would do. Not a hard pass/fail on any value — it records the
+# guestd-init would do. Not a hard pass/fail on any value — it records the
 # kernel's capabilities — but it must *run* and produce the full key set.
 PROBE_DIR=$(mktemp -d /tmp/mvm-itest-bpf.XXXXXX)
 if build_probe "$PROBES_DIR/bpfprobe.c" "$PROBE_DIR" bpfprobe; then

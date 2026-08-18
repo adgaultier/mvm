@@ -11,11 +11,11 @@ changing the code.
 ## Build & test
 
 ```sh
-cargo build --workspace          # host binaries (mvm, mvm-tui, gnu mvm-agent)
+cargo build --workspace          # host binaries (mvm, mvm-tui, gnu mvm-guestd)
 cargo test --workspace           # unit tests, no KVM needed
-cargo build -p mvm-agent --target x86_64-unknown-linux-musl --release
-                                 # the REAL guest agent (static). The gnu-linked
-                                 # target/debug/mvm-agent will NOT run in guests
+cargo build -p mvm-guestd --target x86_64-unknown-linux-musl --release
+                                 # the REAL guestd (static). The gnu-linked
+                                 # target/debug/mvm-guestd will NOT run in guests
                                  # (and the daemon refuses to inject it).
 scripts/build.sh                 # all of the above, release, into dist/
 just -f scripts/integration/Justfile all   # boots real VMs; needs /dev/kvm
@@ -26,14 +26,14 @@ just -f scripts/integration/Justfile all   # boots real VMs; needs /dev/kvm
 Hosts: Linux x86_64 (KVM) and macOS Apple Silicon (Hypervisor.framework),
 using Homebrew libkrun. `scripts/install-darwin.sh` installs libkrun, Zig, and
 cargo-zigbuild.
-Guests are same-arch as the host, so the agent's musl target follows the
+Guests are same-arch as the host, so the guestd's musl target follows the
 host arch; on macOS the cross-link goes through `cargo zigbuild` and the
 `mvm` binary must carry the hypervisor entitlement (build.sh codesigns
 dist/; a bare `cargo build` binary needs it too — see Sharp edges).
 
-The guest agent is musl-only because `-C target-feature=+crt-static` on the
-gnu target breaks proc-macro crates (`serde_derive`). `agent_binary()`
-resolution: `MVM_AGENT_PATH` → next to the executable → the dev tree's
+The guestd is musl-only because `-C target-feature=+crt-static` on the
+gnu target breaks proc-macro crates (`serde_derive`). `guestd_binary()`
+resolution: `MVM_GUESTD_PATH` → next to the executable → the dev tree's
 `target/<host-arch>-unknown-linux-musl/release/` → `PATH`, skipping any
 candidate that is dynamically linked or not a Linux ELF at all.
 
@@ -46,12 +46,12 @@ candidate that is dynamically linked or not a Linux ELF at all.
   (detached session leader; its stdout/stderr *is* the guest console).
   With `attach_stdin` sandboxes the shim's stdin is a pipe feeding the
   console.
-- **Guest agent as the guest's init** (`/.mvm/agent`, injected at start,
+- **Guestd as the guest's init** (`/.mvm/guestd`, injected at start,
   exec'd by libkrun's `/init.krun` which is PID 1): spawns the workload,
   reaps zombies, serves exec (pipes or pty) over **vsock port 1024** →
-  `<sandbox>/agent.sock` host-side. Wire protocol: u32-BE length + JSON
+  `<sandbox>/guestd.sock` host-side. Wire protocol: u32-BE length + JSON
   frames, byte payloads base64-encoded (`common::protocol`). With `-t` the
-  workload gets its own guest pty and the agent bridges it to the console.
+  workload gets its own guest pty and the guestd bridges it to the console.
 - **Rootless userns mode (Linux-only).** `serve` re-execs into a user namespace
   (0 → user, 1.. → /etc/subuid) so the in-process virtiofs server can
   chown to mapped uids. Two-stage SIGSTOP handshake in
@@ -63,7 +63,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   (fallback, wiped each start). Both are served to the guest over virtiofs.
 - **Networking** (`--net`): `none` = dead unixgram NIC (disables libkrun's
   default TSI!), `tsi` = transparent host-serviced sockets, `gvproxy` =
-  vfkit-mode datagram socket + agent-side static IP bootstrap (the daemon
+  vfkit-mode datagram socket + guestd-side static IP bootstrap (the daemon
   runs one gvproxy *per sandbox*; `gvproxy:<socket>` attaches to yours),
   `tap:<dev>` = pre-provisioned TAP.
 - **No CPU/RAM hot-plug.** `mvm resize` / the TUI's `r` form rewrite the
@@ -86,7 +86,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
     ├── console.log         # guest console (appended by log pump)
     ├── krun.log            # libkrun's own diagnostics, kept off the console
     ├── rootfs|upper|work/  # per-driver filesystem state
-    └── agent.sock          # agent control channel (unix listener)
+    └── guestd.sock        # guestd control channel (unix listener)
 ```
 
 ## Crate map
@@ -99,8 +99,8 @@ candidate that is dynamically linked or not a Linux ELF at all.
 | `image` | registry client (blocking reqwest), layer unpack + ownership manifest, `ImageStore` |
 | `storage` | `overlay` / `copy` drivers, overlay probe |
 | `network` | profile validation, port-map parsing |
-| `manager` | sandbox registry + lifecycle; owns agent vsock channels + console stdin |
-| `agent` | guest PID 1; std+libc only, poll(2) event loop, must stay static-friendly |
+| `manager` | sandbox registry + lifecycle; owns guestd vsock channels + console stdin |
+| `guestd` | guest PID 1; std+libc only, poll(2) event loop, must stay static-friendly |
 | `api` | axum routes; streams = `Body::from_stream`; exec has a kill-on-drop guard |
 | `cli` | `mvm` binary incl. hidden `__vm-shim` subcommand + userns re-exec |
 | `tui` | ratatui dashboard; modal forms own the keyboard while open (`r` resize, `d` delete confirmation) |
@@ -129,21 +129,21 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `unsupported 'unixgram' scheme`. The external form uses
   `MVM_GVPROXY_CONTROL` for the HTTP control socket; the managed form creates
   the control and vfkit sockets under the sandbox data directory.
-- The agent runs as **the guest's init**: it must reap zombies and only use
-  std + libc (keep dependencies out of `crates/agent`). Pty sessions share
+- The guestd runs as **the guest's init**: it must reap zombies and only use
+  std + libc (keep dependencies out of `crates/guestd`). Pty sessions share
   one fd for stdin/stdout — mind the close-once logic. libkrun's own
-  `/init.krun` is literally PID 1 and execs the agent as its child.
+  `/init.krun` is literally PID 1 and execs the guestd as its child.
 - **`krun_set_exec` argv must NOT repeat the exec path** — `init.krun`
-  prepends it as `argv[0]` itself. Passing it again made the agent treat
-  `/.mvm/agent` as its own workload and run a *second* agent: the outer
+  prepends it as `argv[0]` itself. Passing it again made the guestd treat
+  `/.mvm/guestd` as its own workload and run a *second* guestd: the outer
   instance consumed every `MVM_*` var (and `remove_var`'d it) before the
   inner one — the instance that actually spawns the workload and serves
   exec — ever saw it, so `MVM_CONSOLE_TTY` silently did nothing. The tell is
-  two `/.mvm/agent` entries in the guest's `ps`.
+  two `/.mvm/guestd` entries in the guest's `ps`.
 - **The `MVM_*` env channel rides the kernel cmdline.** libkrun serialises
   envp into the guest cmdline (visible in `/proc/cmdline`, quoted, before
   `--`); the kernel hands `KEY=VALUE` params to init, which passes them on.
-  When a var "disappears", compare `/proc/1/environ` with the agent's own
+  When a var "disappears", compare `/proc/1/environ` with the guestd's own
   env before suspecting the transport.
 - **A guest pty needs its termios spelled out.** This kernel's fresh pty
   slaves come up with `ONLCR` clear, so a workload pty built with
@@ -182,7 +182,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   zombie holding host ports.
 - **Sandbox starts are serialized per sandbox.** `Manager::start` acquires a
   per-id async lock before checking state or preparing storage, preventing two
-  concurrent callers from launching duplicate shims. Agent exec output uses
+  concurrent callers from launching duplicate shims. Guestd exec output uses
   awaited bounded-channel sends, so slow clients apply backpressure instead of
   silently losing stdout/stderr frames.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
@@ -229,7 +229,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   on stderr. Style must be `NEVER` — the fd is a file, not a terminal.
 - **The guest resolves the guest's users.** `USER` / `-u` is passed through
   as `MVM_USER` and looked up against the *rootfs's* `/etc/passwd` by the
-  agent, never against the host's user database — the same name means
+  guestd, never against the host's user database — the same name means
   different uids in different images. The drop order in `apply_user` is
   setgroups → setgid → setuid (dropping the uid first forfeits the privilege
   needed for the other two), and it is registered *after* the pty
@@ -239,7 +239,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   extend those rather than testing via pulls. Later OCI layers may replace an
   existing path with a hard link; remove the destination before
   `tar::Entry::unpack_in` or the unpack fails with `EEXIST`.
-- **Raw sockets are banned guest-wide, always.** The agent installs a
+- **Raw sockets are banned guest-wide, always.** The guestd installs a
   seccomp filter at the top of `real_main` (before mounts/network; a failed
   install is fatal) that denies `socket(2)` for `AF_PACKET` (any type) and
   `AF_INET`/`AF_INET6` with `(type & 0xf) == SOCK_RAW`. The check keys on the
@@ -249,39 +249,39 @@ candidate that is dynamically linked or not a Linux ELF at all.
   workload cannot weaken it, and it kills on an unexpected arch (a wrong
   syscall number would otherwise be interpreted against the wrong table).
    This breaks `tcpdump`, `arping`, old `ping`, and AF_PACKET DHCP clients
-   (`udhcpc`); the planned `--net passt` agent-side bootstrap must NOT rely on
+   (`udhcpc`); the planned `--net passt` guestd-side bootstrap must NOT rely on
    DHCP — it needs the gvproxy-style static-IP bootstrap instead.    Always-on
    by design: there is no opt-out. Filter shape is probed in-VM by
    `scripts/integration/probes/rawprobe.c` through `just raw-seccomp` (as
    workload *and* exec session).
 - **`--security=strict` is a workload-scoped *second* seccomp filter.** The
-  raw-socket ban above is installed on the agent (PID 1) at boot and inherited
+  raw-socket ban above is installed on the guestd (PID 1) at boot and inherited
   by everything. The strict filter is different: it is installed in the
   workload's `pre_exec` (`apply_strict_seccomp` in `linux.rs`, *before*
   `apply_user`'s privilege drop), so only the workload — and exec sessions —
   lose `bpf`/`keyctl`/`perf_event_open`/`userfaultfd`/`io_uring_*`, `ptrace`,
   namespace changes, mount/pivot-root, module loading, and kexec, while the
-  agent keeps the full syscall surface it needs for exec/pty plumbing. The
+  guestd keeps the full syscall surface it needs for exec/pty plumbing. The
   strict set is exercised by `scripts/integration/probes/strictprobe.c` via
   `just raw-seccomp`. The var rides the `MVM_*` channel as
   `MVM_SECURITY_STRICT` and is scrubbed like the other plumbing vars. This
-  matters for the cgroup-BPF plan: the agent can still load trusted eBPF
+  matters for the cgroup-BPF plan: the guestd can still load trusted eBPF
   programs itself even in strict mode — the workload cannot. TSI is excluded
   from guest network policy because its sockets are host-serviced. Plumbed:
   `--security` on `create`/`run`/`clone` → `SandboxSpec` → `ShimConfig` → shim
-  env → agent. Probe the guest kernel's BPF capability with
+  env → guestd. Probe the guest kernel's BPF capability with
   `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict)
   before assuming CO-RE/BPF-LSM support; cgroup-BPF does not require BTF.
   Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec; capability
   dropping remains a separate compatibility task.
  - **VM token: never persisted, never exposed — not even its hash.** The Agent
-  API token is minted in `Manager::start` and held as `agent_token_hash`
+  API token is minted in `Manager::start` and held as `guest_token_hash`
   (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so
   it is neither serialized into API responses nor written to `sandboxes.json`:
   it lives only in the manager's memory for the VM's lifetime and is cleared
   the moment the sandbox stops or exits (not merely gated on state). The
   plaintext token is passed to the shim as a *process env var*
-  (`MVM_AGENT_TOKEN`) — never through `ShimConfig`, so `shim.json` stays
+  (`MVM_GUEST_TOKEN`) — never through `ShimConfig`, so `shim.json` stays
   token-free — and the shim forwards it into the guest via the `MVM_*` env
   channel, where it is deliberately **not scrubbed**: it must reach the
   workload's environment (and every exec session, via `baseline_env`) so the
@@ -307,7 +307,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   `/home/agent` ends up owned by the host uid and a non-root workload can't
   write its own home (`PermissionDenied` on opencode's log). The shim sets
   `MVM_HOST_OS=macos` (host-gated via `#[cfg(target_os = "macos")]`), and the
-  agent — before spawning a non-root workload whose home is owned by someone
+  guestd — before spawning a non-root workload whose home is owned by someone
   else — recursively `lchown`s the home to the workload's uid/gid. macOS
   virtiofs `LinuxComplete` semantics turns that chown into a
   `user.containers.override_stat` xattr, so it sticks for the boot; it's a
@@ -327,16 +327,16 @@ candidate that is dynamically linked or not a Linux ELF at all.
 ## Runtime env vars
 
 `MVM_HOST` (client → daemon addr), `MVM_DATA_DIR` (state root),
-`MVM_AGENT_PATH` (guest agent binary), `MVM_STORAGE_DRIVER`
+`MVM_GUESTD_PATH` (guestd binary), `MVM_STORAGE_DRIVER`
 (`overlay`/`copy`), `MVM_USERNS=0` (disable userns mode), `MVM_GVPROXY_BIN`
 (gvproxy binary for managed `--net gvproxy`), `MVM_GVPROXY_CONTROL`
 (control socket of a gvproxy *you* run, for `--net gvproxy:<socket>` port
 maps).
 
-Daemon → guest agent (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
+Daemon → guestd (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
 `MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
-`MVM_HOST_OS` — scrubbed by the agent before it spawns the workload — plus
-`MVM_AGENT_TOKEN`, which is deliberately *not* scrubbed so the workload's
+`MVM_HOST_OS` — scrubbed by the guestd before it spawns the workload — plus
+`MVM_GUEST_TOKEN`, which is deliberately *not* scrubbed so the workload's
 tooling (the `mvm-agent-mcp` bridge) can authenticate over the Agent API's
 vsock channel.
 
