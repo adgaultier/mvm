@@ -1,11 +1,11 @@
 [package]
-name = "mvm-agent"
+name = "mvm-guestd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "mvm-agent"
+name = "mvm-guestd"
 path = "src/main.rs"
 
 [dependencies]

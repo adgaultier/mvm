@@ -1,27 +1,27 @@
-//! Host-side write path to a connected guest agent.
+//! Host-side write path to a connected guestd.
 //!
-//! Reads are handled in `Manager::attach_agent`; writes go through an
+//! Reads are handled in `Manager::attach_guestd`; writes go through an
 //! unbounded channel consumed by a dedicated writer task.
 
-use mvm_common::protocol::{encode_frame, AgentRequest};
+use mvm_common::protocol::{encode_frame, GuestdRequest};
 use tokio::io::{AsyncWriteExt, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-pub struct AgentConn {
-    tx: mpsc::UnboundedSender<AgentRequest>,
+pub struct GuestdConn {
+    tx: mpsc::UnboundedSender<GuestdRequest>,
 }
 
-impl AgentConn {
+impl GuestdConn {
     /// Spawn the writer task draining requests into the socket.
     pub fn spawn(mut writer: WriteHalf<UnixStream>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<AgentRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<GuestdRequest>();
         tokio::spawn(async move {
             while let Some(req) = rx.recv().await {
                 let frame = match encode_frame(&req) {
                     Ok(f) => f,
                     Err(e) => {
-                        tracing::warn!("failed to encode agent request: {e}");
+                        tracing::warn!("failed to encode guestd request: {e}");
                         continue;
                     }
                 };
@@ -34,7 +34,7 @@ impl AgentConn {
         Self { tx }
     }
 
-    pub fn sender(&self) -> mpsc::UnboundedSender<AgentRequest> {
+    pub fn sender(&self) -> mpsc::UnboundedSender<GuestdRequest> {
         self.tx.clone()
     }
 }

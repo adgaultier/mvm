@@ -1,10 +1,10 @@
 //! Sandbox lifecycle manager: create/start/exec/stop/rm, log streaming,
-//! persistence, and the host side of the guest-agent control channel and
+//! persistence, and the host side of the guestd control channel and
 //! Agent API (both vsock).
 
 #[cfg(feature = "agent-api")]
 mod agent_api;
-mod agent_conn;
+mod guestd_conn;
 pub mod console_filter;
 mod gvproxy;
 
@@ -30,7 +30,7 @@ use mvm_runtime::{spawn_shim, ShimConfig};
 use mvm_storage::{default_driver, StorageDriver};
 use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 
-use agent_conn::AgentConn;
+use guestd_conn::GuestdConn;
 
 const LOG_BROADCAST_CAP: usize = 256;
 const REGISTRY_FILE: &str = "sandboxes.json";
@@ -39,13 +39,13 @@ const MAX_LIFECYCLE_OPS: usize = 16;
 
 /// A live exec session inside one sandbox.
 struct ExecSession {
-    tx: mpsc::Sender<protocol::AgentEvent>,
+    tx: mpsc::Sender<protocol::GuestdEvent>,
 }
 
 struct SandboxEntry {
     info: Sandbox,
     log_tx: broadcast::Sender<Bytes>,
-    agent: Option<AgentConn>,
+    guestd: Option<GuestdConn>,
     exec_sessions: HashMap<u32, ExecSession>,
     /// Write end of the guest console (attach_stdin sandboxes only).
     /// Shared so writes happen outside the registry lock.
@@ -66,7 +66,7 @@ impl SandboxEntry {
         Self {
             info,
             log_tx,
-            agent: None,
+            guestd: None,
             exec_sessions: HashMap::new(),
             console_stdin: None,
             gvproxy: None,
@@ -100,9 +100,9 @@ impl Manager {
         let images = ImageStore::new(data_dir.clone())?;
         let storage = default_driver(data_dir.clone());
         tracing::info!("storage driver: {}", storage.name());
-        match mvm_common::agent_binary() {
-            Some(path) => tracing::debug!(agent = %path.display(), "guest agent binary"),
-            None => tracing::warn!("guest agent binary not found; exec will be unavailable"),
+        match mvm_common::guestd_binary() {
+            Some(path) => tracing::debug!(guestd = %path.display(), "guestd binary"),
+            None => tracing::warn!("guestd binary not found; exec will be unavailable"),
         }
 
         let mut sandboxes = HashMap::new();
@@ -256,7 +256,7 @@ impl Manager {
         Ok(())
     }
 
-    /// Start a created/stopped sandbox: prepare rootfs, inject the agent,
+    /// Start a created/stopped sandbox: prepare rootfs, inject the guestd,
     /// spawn the VM shim, wire logs + control channel.
     pub async fn start(&self, id_or_name: &str) -> Result<Sandbox> {
         let id = self.resolve(id_or_name)?;
@@ -310,30 +310,30 @@ impl Manager {
             "rootfs prepared"
         );
 
-        // 2. Inject the guest agent (enables exec). Not fatal if missing.
-        let injected = self.inject_agent(&prepared.rootfs);
+        // 2. Inject the guestd (enables exec). Not fatal if missing.
+        let injected = self.inject_guestd(&prepared.rootfs);
         match &injected {
-            Ok(()) => tracing::debug!(sandbox = %id, "guest agent injected"),
-            Err(e) => tracing::warn!(sandbox = %id, "agent not injected — exec disabled: {e}"),
+            Ok(()) => tracing::debug!(sandbox = %id, "guestd injected"),
+            Err(e) => tracing::warn!(sandbox = %id, "guestd not injected — exec disabled: {e}"),
         }
-        let agent_socket = injected.ok().map(|_| {
-            let sock = sb_dir.join("agent.sock");
+        let guestd_socket = injected.ok().map(|_| {
+            let sock = sb_dir.join("guestd.sock");
             let _ = std::fs::remove_file(&sock);
             sock
         });
-        timings.mark("agent");
+        timings.mark("guestd");
 
         // 3. Open the control-channel listener before the guest boots.
-        let agent_listener = match &agent_socket {
+        let guestd_listener = match &guestd_socket {
             Some(path) => Some(tokio::net::UnixListener::bind(path)?),
             None => None,
         };
 
         // 3b. Agent API listener (vsock bridge for the guest's
         // `mvm-agent-mcp`): same gate as the control channel — both ride the
-        // injected exec-agent's boot path.
+        // injected guestd.s boot path.
         #[cfg(feature = "agent-api")]
-        let agent_api_socket = agent_socket.as_ref().map(|_| {
+        let agent_api_socket = guestd_socket.as_ref().map(|_| {
             let sock = sb_dir.join("agent-api.sock");
             let _ = std::fs::remove_file(&sock);
             sock
@@ -389,10 +389,10 @@ impl Manager {
         // kept host-side (in memory, never exposed or persisted); the
         // plaintext goes straight into the guest over the `MVM_*` env channel
         // (never into shim.json).
-        let agent_token = agent_socket.as_ref().map(|_| generate_token());
-        let agent_token_hash = agent_token.as_deref().map(hash_token);
-        if agent_token.is_some() {
-            tracing::debug!(sandbox = %id, "agent token minted");
+        let guest_token = guestd_socket.as_ref().map(|_| generate_token());
+        let guest_token_hash = guest_token.as_deref().map(hash_token);
+        if guest_token.is_some() {
+            tracing::debug!(sandbox = %id, "guest token minted");
         }
         let config = ShimConfig {
             sandbox_id: id.clone(),
@@ -405,7 +405,7 @@ impl Manager {
             network,
             ports: spec.ports.clone(),
             mounts: spec.mounts.clone(),
-            agent_socket: agent_socket.clone(),
+            guestd_socket: guestd_socket.clone(),
             agent_api_socket: agent_api_socket.clone(),
             console_tty: spec.tty,
             console_size: spec.tty_size,
@@ -430,7 +430,7 @@ impl Manager {
         timings.mark("ports");
 
         // 7. Spawn the shim.
-        let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin, agent_token.as_deref()) {
+        let handle = match spawn_shim(&config, &sb_dir, spec.attach_stdin, guest_token.as_deref()) {
             Ok(handle) => handle,
             Err(error) => {
                 self.remove_gvproxy_ports(gvproxy_ports, gvproxy_control.as_deref())
@@ -493,23 +493,23 @@ impl Manager {
             entry.console_stdin = console_stdin;
             entry.gvproxy = gvproxy;
             entry.stop_requested = false;
-            entry.info.agent_token_hash = agent_token_hash;
-            entry.info.agent_token_created_at = agent_token.map(|_| chrono::Utc::now());
+            entry.info.guest_token_hash = guest_token_hash;
+            entry.info.guest_token_created_at = guest_token.map(|_| chrono::Utc::now());
         }
         self.persist()?;
         timings.mark("persist");
 
-        // 9. Agent control channel accept task.
-        if let Some(listener) = agent_listener {
+        // 9. Guestd control channel accept task.
+        if let Some(listener) = guestd_listener {
             let mgr = self.clone();
             let cid = id.clone();
             tokio::spawn(async move {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        tracing::info!(sandbox = %cid, "guest agent connected");
-                        mgr.attach_agent(&cid, stream).await;
+                        tracing::info!(sandbox = %cid, "guestd connected");
+                        mgr.attach_guestd(&cid, stream).await;
                     }
-                    Err(e) => tracing::warn!("agent accept failed: {e}"),
+                    Err(e) => tracing::warn!("guestd accept failed: {e}"),
                 }
             });
         }
@@ -547,24 +547,24 @@ impl Manager {
         }
 
         // 11. Exec-readiness barrier: don't return "running" until the guest
-        // agent has connected (or the sandbox died / never had an agent).
+        // guestd has connected (or the sandbox died / never had a guestd).
         // Callers that exec immediately after start would otherwise race the
-        // agent's vsock connection.
-        if agent_socket.is_some() {
+        // guestd.s vsock connection.
+        if guestd_socket.is_some() {
             const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
             let deadline = std::time::Instant::now() + AGENT_WAIT;
             loop {
                 {
                     let sandboxes = self.inner.sandboxes.read().unwrap();
                     match sandboxes.get(&id) {
-                        Some(e) if e.agent.is_some() => break,
+                        Some(e) if e.guestd.is_some() => break,
                         Some(e) if !e.info.state.is_alive() => break,
                         None => break,
                         _ => {}
                     }
                 }
                 if std::time::Instant::now() >= deadline {
-                    tracing::warn!(sandbox = %id, waited_ms = AGENT_WAIT.as_millis() as u64, "agent did not connect within {AGENT_WAIT:?}");
+                    tracing::warn!(sandbox = %id, waited_ms = AGENT_WAIT.as_millis() as u64, "guestd did not connect within {AGENT_WAIT:?}");
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -585,7 +585,7 @@ impl Manager {
             network = %spec.network,
             tty = spec.tty,
             attach_stdin = spec.attach_stdin,
-            has_agent = agent_socket.is_some(),
+            has_agent = guestd_socket.is_some(),
             total_ms,
             boot_ms,
             "sandbox started"
@@ -615,8 +615,8 @@ impl Manager {
             // Revoke the token immediately rather than waiting for the shim to
             // actually die: a stop request is enough to invalidate it, even
             // while the state still reads `running` for a moment.
-            entry.info.agent_token_hash = None;
-            entry.info.agent_token_created_at = None;
+            entry.info.guest_token_hash = None;
+            entry.info.guest_token_created_at = None;
             entry.info.pid
         };
 
@@ -788,7 +788,7 @@ impl Manager {
         Ok((tail_lines(backlog, tail), rx))
     }
 
-    /// Run a command inside a running sandbox via the guest agent.
+    /// Run a command inside a running sandbox via the guestd.
     /// Returns the session id (for stdin routing) and a stream of events
     /// (stdout/stderr/exit).
     #[allow(clippy::too_many_arguments)]
@@ -802,13 +802,13 @@ impl Manager {
         cols: u16,
         rows: u16,
         user: Option<String>,
-    ) -> Result<(u32, mpsc::Receiver<protocol::AgentEvent>)> {
+    ) -> Result<(u32, mpsc::Receiver<protocol::GuestdEvent>)> {
         let id = self.resolve(id_or_name)?;
         let (tx, rx) = mpsc::channel(64);
         let session_id = self.inner.session_counter.fetch_add(1, Ordering::SeqCst);
 
         // A concurrent `start` may have flipped the state to Running before
-        // the agent's vsock channel is up; give it a moment rather than 500.
+        // the guestd.s vsock channel is up; give it a moment rather than 500.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let sender = loop {
             {
@@ -819,14 +819,14 @@ impl Manager {
                 if !entry.info.state.is_alive() {
                     return Err(Error::InvalidState("sandbox is not running".into()));
                 }
-                if let Some(agent) = entry.agent.as_ref() {
-                    let sender = agent.sender();
+                if let Some(guestd) = entry.guestd.as_ref() {
+                    let sender = guestd.sender();
                     entry.exec_sessions.insert(session_id, ExecSession { tx });
                     break sender;
                 }
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::Runtime(
-                        "sandbox has no agent connection (was it started with exec support?)"
+                        "sandbox has no guestd connection (was it started with exec support?)"
                             .into(),
                     ));
                 }
@@ -835,7 +835,7 @@ impl Manager {
         };
 
         sender
-            .send(protocol::AgentRequest::Exec {
+            .send(protocol::GuestdRequest::Exec {
                 id: session_id,
                 argv,
                 env,
@@ -845,7 +845,7 @@ impl Manager {
                 rows,
                 user,
             })
-            .map_err(|_| Error::Runtime("agent channel closed".into()))?;
+            .map_err(|_| Error::Runtime("guestd channel closed".into()))?;
         tracing::debug!(sandbox = %id, session = session_id, "exec dispatched");
         Ok((session_id, rx))
     }
@@ -910,14 +910,14 @@ impl Manager {
 
     /// Kill a live exec session (SIGKILL in the guest).
     pub fn exec_kill(&self, id_or_name: &str, session: u32) -> Result<()> {
-        self.send_to_agent(id_or_name, protocol::AgentRequest::Kill { id: session })
+        self.send_to_guestd(id_or_name, protocol::GuestdRequest::Kill { id: session })
     }
 
     /// Resize a live tty exec session.
     pub fn exec_resize(&self, id_or_name: &str, session: u32, cols: u16, rows: u16) -> Result<()> {
-        self.send_to_agent(
+        self.send_to_guestd(
             id_or_name,
-            protocol::AgentRequest::Resize {
+            protocol::GuestdRequest::Resize {
                 id: session,
                 cols,
                 rows,
@@ -927,7 +927,7 @@ impl Manager {
 
     /// Resize the console workload's pty (sandbox-keyed, no session id).
     pub fn console_resize(&self, id_or_name: &str, cols: u16, rows: u16) -> Result<()> {
-        self.send_to_agent(id_or_name, protocol::AgentRequest::ConsoleResize { cols, rows })?;
+        self.send_to_guestd(id_or_name, protocol::GuestdRequest::ConsoleResize { cols, rows })?;
         // Record the live geometry for `mvm inspect` (spec.tty_size stays the
         // create-time initial). Only updated when a resize actually arrived.
         let id = self.resolve(id_or_name)?;
@@ -940,41 +940,41 @@ impl Manager {
         self.persist()
     }
 
-    fn send_to_agent(&self, id_or_name: &str, req: protocol::AgentRequest) -> Result<()> {
+    fn send_to_guestd(&self, id_or_name: &str, req: protocol::GuestdRequest) -> Result<()> {
         let id = self.resolve(id_or_name)?;
         let sandboxes = self.inner.sandboxes.read().unwrap();
         let entry = sandboxes
             .get(&id)
             .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
-        let agent = entry
-            .agent
+        let guestd = entry
+            .guestd
             .as_ref()
-            .ok_or_else(|| Error::Runtime("sandbox has no agent connection".into()))?;
-        agent
+            .ok_or_else(|| Error::Runtime("sandbox has no guestd connection".into()))?;
+        guestd
             .sender()
             .send(req)
-            .map_err(|_| Error::Runtime("agent channel closed".into()))
+            .map_err(|_| Error::Runtime("guestd channel closed".into()))
     }
 
     /// Feed stdin data into a live exec session; `None` closes stdin (EOF).
     pub fn exec_stdin(&self, id_or_name: &str, session: u32, data: Option<Vec<u8>>) -> Result<()> {
         tracing::trace!(sandbox = %id_or_name, session, bytes = data.as_ref().map_or(0, |d| d.len()), eof = data.is_none(), "exec stdin");
         let req = match data {
-            Some(data) => protocol::AgentRequest::Stdin { id: session, data },
-            None => protocol::AgentRequest::StdinEof { id: session },
+            Some(data) => protocol::GuestdRequest::Stdin { id: session, data },
+            None => protocol::GuestdRequest::StdinEof { id: session },
         };
-        self.send_to_agent(id_or_name, req)
+        self.send_to_guestd(id_or_name, req)
     }
 
     // ---- internals -------------------------------------------------------
 
-    fn inject_agent(&self, rootfs: &std::path::Path) -> Result<()> {
-        let agent = mvm_common::agent_binary()
-            .ok_or_else(|| Error::Runtime("mvm-agent binary not found".into()))?;
+    fn inject_guestd(&self, rootfs: &std::path::Path) -> Result<()> {
+        let guestd = mvm_common::guestd_binary()
+            .ok_or_else(|| Error::Runtime("mvm-guestd binary not found".into()))?;
         let dest_dir = rootfs.join(".mvm");
         std::fs::create_dir_all(&dest_dir)?;
-        let dest = dest_dir.join("agent");
-        std::fs::copy(&agent, &dest)?;
+        let dest = dest_dir.join("guestd");
+        std::fs::copy(&guestd, &dest)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
         Ok(())
@@ -1007,14 +1007,14 @@ impl Manager {
             entry.info.pid = None;
             entry.info.finished_at = Some(chrono::Utc::now());
             entry.info.exit_code = code;
-            entry.agent = None;
+            entry.guestd = None;
             entry.exec_sessions.clear();
             entry.console_stdin = None;
             if let Some(task) = entry.agent_api_task.take() {
                 task.abort();
             }
-            entry.info.agent_token_hash = None;
-            entry.info.agent_token_created_at = None;
+            entry.info.guest_token_hash = None;
+            entry.info.guest_token_created_at = None;
             entry.info.state = if entry.stop_requested {
                 SandboxState::Stopped
             } else if status.is_none() {
@@ -1027,8 +1027,8 @@ impl Manager {
             // only other sender and drains the console pipe to EOF) exits.
             let (log_tx, _) = broadcast::channel(LOG_BROADCAST_CAP);
             entry.log_tx = log_tx;
-            if entry.info.agent_token_hash.is_some() {
-                tracing::debug!(sandbox = %id, "agent token revoked");
+            if entry.info.guest_token_hash.is_some() {
+                tracing::debug!(sandbox = %id, "guest token revoked");
             }
             match entry.info.state {
                 SandboxState::Failed => tracing::warn!(
@@ -1103,17 +1103,17 @@ impl Manager {
         let _ = tokio::task::spawn_blocking(move || gvproxy::unexpose(&control, &ports)).await;
     }
 
-    /// Attach a freshly connected guest agent stream.
-    async fn attach_agent(&self, id: &str, stream: tokio::net::UnixStream) {
+    /// Attach a freshly connected guestd stream.
+    async fn attach_guestd(&self, id: &str, stream: tokio::net::UnixStream) {
         use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
 
         let (mut reader, writer): (ReadHalf<_>, WriteHalf<_>) = tokio::io::split(stream);
-        let conn = AgentConn::spawn(writer);
+        let conn = GuestdConn::spawn(writer);
 
         {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if let Some(entry) = sandboxes.get_mut(id) {
-                entry.agent = Some(conn);
+                entry.guestd = Some(conn);
             } else {
                 return;
             }
@@ -1127,31 +1127,31 @@ impl Manager {
                 Ok(n) => n,
                 Err(_) => break,
             };
-            let events: Vec<protocol::AgentEvent> = match decoder.feed(&buf[..n]) {
+            let events: Vec<protocol::GuestdEvent> = match decoder.feed(&buf[..n]) {
                 Ok(e) => e,
                 Err(e) => {
-                    tracing::warn!("bad agent frame: {e}");
+                    tracing::warn!("bad guestd frame: {e}");
                     break;
                 }
             };
             for event in events {
-                self.dispatch_agent_event(id, event).await;
+                self.dispatch_guestd_event(id, event).await;
             }
         }
 
-        // Agent disconnected: clear it so exec fails fast.
+        // Guestd disconnected: clear it so exec fails fast.
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
         if let Some(entry) = sandboxes.get_mut(id) {
-            entry.agent = None;
+            entry.guestd = None;
         }
-        tracing::debug!(sandbox = %id, "guest agent disconnected");
+        tracing::debug!(sandbox = %id, "guestd disconnected");
     }
 
-    async fn dispatch_agent_event(&self, id: &str, event: protocol::AgentEvent) {
-        use protocol::AgentEvent::*;
+    async fn dispatch_guestd_event(&self, id: &str, event: protocol::GuestdEvent) {
+        use protocol::GuestdEvent::*;
         match event {
             Stdout { id: sid, data } => {
-                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stdout");
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "guestd stdout");
                 let tx = self
                     .inner
                     .sandboxes
@@ -1162,7 +1162,7 @@ impl Manager {
                     .map(|session| session.tx.clone());
                 if let Some(tx) = tx {
                     if tx
-                        .send(protocol::AgentEvent::Stdout { id: sid, data })
+                        .send(protocol::GuestdEvent::Stdout { id: sid, data })
                         .await
                         .is_err()
                     {
@@ -1171,7 +1171,7 @@ impl Manager {
                 }
             }
             Stderr { id: sid, data } => {
-                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "agent stderr");
+                tracing::trace!(sandbox = %id, session = sid, bytes = data.len(), "guestd stderr");
                 let tx = self
                     .inner
                     .sandboxes
@@ -1182,7 +1182,7 @@ impl Manager {
                     .map(|session| session.tx.clone());
                 if let Some(tx) = tx {
                     if tx
-                        .send(protocol::AgentEvent::Stderr { id: sid, data })
+                        .send(protocol::GuestdEvent::Stderr { id: sid, data })
                         .await
                         .is_err()
                     {
@@ -1204,14 +1204,14 @@ impl Manager {
                 }
             }
             Ready { workload_pid } => {
-                tracing::info!(sandbox = %id, workload_pid, "agent ready");
+                tracing::info!(sandbox = %id, workload_pid, "guestd ready");
             }
             WorkloadExit { code } => {
                 tracing::info!(sandbox = %id, code, "workload exited");
             }
             Pong => {}
             Error { message } => {
-                tracing::warn!(sandbox = %id, "agent error: {message}");
+                tracing::warn!(sandbox = %id, "guestd error: {message}");
             }
         }
     }
@@ -1249,7 +1249,7 @@ impl Manager {
         let hash = hash.as_bytes();
         let sandboxes = self.inner.sandboxes.read().unwrap();
         for entry in sandboxes.values() {
-            let Some(stored) = entry.info.agent_token_hash.as_deref() else {
+            let Some(stored) = entry.info.guest_token_hash.as_deref() else {
                 continue;
             };
             if constant_time_eq(hash, stored.as_bytes()) && entry.info.state.is_alive() {
@@ -1487,7 +1487,7 @@ mod tests {
         let token = "deadbeef".to_string();
         let mut sb = Sandbox::new(SandboxSpec::default());
         sb.state = SandboxState::Running;
-        sb.agent_token_hash = Some(hash_token(&token));
+        sb.guest_token_hash = Some(hash_token(&token));
         let id = sb.id.clone();
         mgr.inner
             .sandboxes
@@ -1525,8 +1525,8 @@ mod tests {
         let mut sandboxes = mgr.inner.sandboxes.write().unwrap();
         let entry = sandboxes.get_mut(id.as_str()).unwrap();
         entry.info.state = SandboxState::Running;
-        entry.info.agent_token_hash = None;
-        entry.info.agent_token_created_at = None;
+        entry.info.guest_token_hash = None;
+        entry.info.guest_token_created_at = None;
         drop(sandboxes);
         assert!(mgr.authenticate_vm(&token).is_none());
 

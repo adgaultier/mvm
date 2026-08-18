@@ -559,7 +559,7 @@ fn phase_color(name: &str) -> Color {
         "register" => Color::LightCyan,
         "disk" => Color::Blue,
         "rootfs" => Color::Yellow,
-        "agent" => Color::Magenta,
+        "guestd" => Color::Magenta,
         "gvproxy" => Color::LightMagenta,
         "ports" => Color::LightBlue,
         "shim" => Color::Green,
@@ -828,7 +828,7 @@ mod tests {
         // Different names differ (hand-picked palette), and a name's color
         // never depends on how many phases precede it in a given op.
         assert_eq!(phase_color("rootfs"), Color::Yellow);
-        assert_eq!(phase_color("agent"), Color::Magenta);
+        assert_eq!(phase_color("guestd"), Color::Magenta);
         assert_eq!(phase_color("boot"), Color::Red);
         assert_eq!(phase_color("terminate"), Color::LightRed);
         // Unknown names hash to a stable palette color.

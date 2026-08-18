@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the macOS dependencies used by mvm:
 #   - libkrun (+ libkrunfw) from the libkrun/krun tap
-#   - zig + cargo-zigbuild for the static guest-agent cross-build
+#   - zig + cargo-zigbuild for the static guestd cross-build
 set -euo pipefail
 
 fail() { echo "error: $*" >&2; exit 1; }

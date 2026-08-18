@@ -6,7 +6,7 @@ pub(super) fn configure_network() {
     let (ip, prefix, gw) = match parse_net_config(&spec) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("mvm-agent: bad MVM_NET_CONFIG '{spec}': {error}");
+            eprintln!("mvm-guestd: bad MVM_NET_CONFIG '{spec}': {error}");
             return;
         }
     };
@@ -32,7 +32,7 @@ pub(super) fn configure_network() {
         let mut req = ifreq("eth0");
         put_sockaddr_in(&mut req.ifr_ifru.ifru_addr, ip);
         if libc::ioctl(sock, libc::SIOCSIFADDR as _, &req) != 0 {
-            eprintln!("mvm-agent: SIOCSIFADDR: {}", std::io::Error::last_os_error());
+            eprintln!("mvm-guestd: SIOCSIFADDR: {}", std::io::Error::last_os_error());
             libc::close(sock);
             return;
         }
@@ -48,7 +48,7 @@ pub(super) fn configure_network() {
         put_sockaddr_in_raw(&mut route.rt_gateway, gw);
         route.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
         if libc::ioctl(sock, libc::SIOCADDRT as _, &route) != 0 {
-            eprintln!("mvm-agent: SIOCADDRT: {}", std::io::Error::last_os_error());
+            eprintln!("mvm-guestd: SIOCADDRT: {}", std::io::Error::last_os_error());
         }
         libc::close(sock);
     }

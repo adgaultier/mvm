@@ -47,7 +47,7 @@ cleanup() {
     rm -rf "${MVM_DATA_DIR:-}" "$RUNTIME"
 }
 
-# Ensure a named sandbox exists and its guest agent is reachable. Used by
+# Ensure a named sandbox exists and its guestd is reachable. Used by
 # sections that reuse a sandbox another section creates (exec's `itest`):
 # make it self-sufficient so the section also runs standalone.
 ensure_sandbox() { # ensure_sandbox <name> <image> <cmd...>
@@ -100,7 +100,7 @@ run_pty() {
 # Build a static Linux probe binary for the guest. The probe runs *inside*
 # the VM (a Linux guest with no compiler), so the binary must be a static
 # Linux ELF. On a Linux host plain `cc -static` works; anywhere else (macOS)
-# we cross-compile with zig, which the agent cross-build already requires.
+# we cross-compile with zig, which the guestd cross-build already requires.
 # Prints nothing; returns 0 on success.
 build_probe() { # build_probe <src.c> <outdir> <name>
     local src=$1 outdir=$2 name=$3 zt

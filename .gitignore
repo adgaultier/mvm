@@ -10,7 +10,7 @@
 .vscode
 .mcp.json
 
-# Python (mvm-agent-mcp bridge)
+
 __pycache__/
 *.pyc
 .venv/

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "== raw socket ban (seccomp) =="
-# The agent installs a seccomp filter that forbids raw packet/IP sockets for
+# The guestd installs a seccomp filter that forbids raw packet/IP sockets for
 # the whole guest. Probed twice inside one VM: as the workload (a child of the
-# agent) and via an exec session, so inheritance through both spawn paths is
+# guestd) and via an exec session, so inheritance through both spawn paths is
 # covered. The static probe is built with `build_probe` (cc -static on Linux,
 # zig cross-compile elsewhere — see the helper above).
 PROBE_DIR=$(mktemp -d /tmp/mvm-itest-probe.XXXXXX)

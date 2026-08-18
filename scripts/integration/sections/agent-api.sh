@@ -3,9 +3,9 @@ set -euo pipefail
 echo "== agent API (VM-scoped bearer token, vsock transport) =="
 if [ "$AGENT_API" = 1 ]; then
 
-agent_token_of() { # agent_token_of <name> -> token (read from the guest /proc/cmdline)
+guest_token_of() { # guest_token_of <name> -> token (read from the guest /proc/cmdline)
     "$MVM" exec "$1" sh -c 'cat /proc/cmdline' \
-        | grep -o 'MVM_AGENT_TOKEN=[^ ]*' | head -n1 | cut -d= -f2- | tr -d '"\r'
+        | grep -o 'MVM_GUEST_TOKEN=[^ ]*' | head -n1 | cut -d= -f2- | tr -d '"\r'
 }
 
 wait_agent() { # wait_agent <name>
@@ -38,10 +38,10 @@ wait_agent agent-b
 # MVM_* env channel and is deliberately not scrubbed, so workload tooling like
 # the mvm-agent-mcp bridge can present it). Only a hash of it lives host-side.
 check "agent token present in guest env" "1" \
-    "$("$MVM" exec agent-a sh -c 'env | grep -c MVM_AGENT_TOKEN' || true)"
+    "$("$MVM" exec agent-a sh -c 'env | grep -c MVM_GUEST_TOKEN' || true)"
 
-TOKEN_A=$(agent_token_of agent-a)
-TOKEN_B=$(agent_token_of agent-b)
+TOKEN_A=$(guest_token_of agent-a)
+TOKEN_B=$(guest_token_of agent-b)
 check "agent token provisioned (64 hex chars)" "1" "$(test "${#TOKEN_A}" -eq 64 && echo 1)"
 check "tokens are VM-specific" "1" "$([ "$TOKEN_A" != "$TOKEN_B" ] && echo 1)"
 
@@ -54,7 +54,7 @@ check "host-side Agent API socket exists (B)" "1" \
 
 # The token hash is manager-internal: it must never surface in an API response.
 check "control plane hides the token hash" "0" \
-    "$("$MVM" inspect agent-a | grep -c 'agent_token_hash')"
+    "$("$MVM" inspect agent-a | grep -c 'guest_token_hash')"
 
 if [ "$HAVE_PROBE" = 1 ]; then
     check "agent API inspect self (A)" "1" \
@@ -70,14 +70,14 @@ fi
 # Stopping a VM revokes its token...
 "$MVM" stop agent-a >/dev/null 2>&1
 for _ in $(seq 1 100); do "$MVM" ps | grep -q agent-a || break; sleep 0.1; done
-check "agent token revoked after stop" "1" \
+check "guest token revoked after stop" "1" \
     "$("$MVM" inspect agent-a | grep -c '"state": *"stopped"')"
 
 # ...and restarting a VM invalidates the previous token: the old one is dead
 # while the boot mints a fresh one.
 "$MVM" start agent-a >/dev/null 2>&1
 wait_agent agent-a
-TOKEN_A2=$(agent_token_of agent-a)
+TOKEN_A2=$(guest_token_of agent-a)
 check "restart mints a fresh token" "1" "$([ "$TOKEN_A2" != "$TOKEN_A" ] && echo 1)"
 if [ "$HAVE_PROBE" = 1 ]; then
     check "fresh token works after restart" "1" \

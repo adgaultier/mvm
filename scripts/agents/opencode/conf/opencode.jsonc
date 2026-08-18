@@ -8,7 +8,7 @@
       "enabled": true,
       "environment": {
         "MVM_AGENT_ADDR": "http://127.0.0.1:24643",
-        "MVM_AGENT_TOKEN": "{env:MVM_AGENT_TOKEN}"
+        "MVM_GUEST_TOKEN": "{env:MVM_GUEST_TOKEN}"
       }
     }
   }

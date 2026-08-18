@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use mvm_common::{protocol::AgentEvent, protocol::FrameDecoder, Sandbox};
+use mvm_common::{protocol::GuestdEvent, protocol::FrameDecoder, Sandbox};
 
 use crate::client::Client;
 use crate::BoxArgs;
@@ -622,21 +622,21 @@ pub fn exec(
             // Stream ended without an Exit frame.
             return Ok(1);
         }
-        let events: Vec<AgentEvent> = decoder.feed(&buf[..n]).map_err(|e| e.to_string())?;
+        let events: Vec<GuestdEvent> = decoder.feed(&buf[..n]).map_err(|e| e.to_string())?;
         for event in events {
             match event {
-                AgentEvent::Stdout { data, .. } => {
+                GuestdEvent::Stdout { data, .. } => {
                     let mut out = std::io::stdout();
                     let _ = out.write_all(&data);
                     let _ = out.flush();
                 }
-                AgentEvent::Stderr { data, .. } => {
+                GuestdEvent::Stderr { data, .. } => {
                     let mut err = std::io::stderr();
                     let _ = err.write_all(&data);
                     let _ = err.flush();
                 }
-                AgentEvent::Exit { code, .. } => return Ok(code),
-                AgentEvent::Error { message } => return Err(message),
+                GuestdEvent::Exit { code, .. } => return Ok(code),
+                GuestdEvent::Error { message } => return Err(message),
                 _ => {}
             }
         }

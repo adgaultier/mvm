@@ -723,9 +723,9 @@ Test:
 * invalid commands
 * invalid arguments
 * unexpected lifecycle state
-* guest agent restart
-* guest agent crash
-* guest agent replacement
+* guestd restart
+* guestd crash
+* guestd replacement
 * connection teardown races
 
 Verify that guest-controlled vsock traffic cannot:
@@ -1246,7 +1246,7 @@ Add fuzzing beyond known exploit workloads.
 Targets should include:
 
 * vsock protocol parsing
-* guest-agent commands
+* guestd commands
 * device configuration
 * virtio inputs
 * lifecycle state transitions

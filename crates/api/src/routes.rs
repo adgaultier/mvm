@@ -10,7 +10,7 @@ use mvm_common::api::{
     CloneRequest, ExecRequest, InfoResponse, LoadQuery, LogsQuery, PullRequest, ResizeRequest,
     SandboxResizeRequest, StdinQuery,
 };
-use mvm_common::protocol::{encode_frame, AgentEvent};
+use mvm_common::protocol::{encode_frame, GuestdEvent};
 use mvm_common::{ImageInfo, Sandbox, SandboxSpec};
 use mvm_manager::console_filter::QueryFilter;
 use std::convert::Infallible;
@@ -89,7 +89,7 @@ async fn start_sandbox(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Sandbox>, ApiError> {
-    // Run detached from the request: on large images (e.g. opencode-agent)
+    // Run detached from the request: on large images
     // the rootfs copy can take seconds, and a client that gives up and drops
     // the connection must not cancel the boot mid-flight — the sandbox keeps
     // starting and its lifecycle op still gets recorded.
@@ -232,7 +232,7 @@ async fn exec(
         let (mut rx, mut guard) = state?;
         match rx.recv().await {
             Some(event) => {
-                let done = matches!(event, AgentEvent::Exit { .. });
+                let done = matches!(event, GuestdEvent::Exit { .. });
                 if done {
                     guard.armed = false;
                 }
@@ -241,7 +241,7 @@ async fn exec(
                 Some((Ok::<Bytes, Infallible>(Bytes::from(frame)), next))
             }
             None => {
-                // Agent gone (VM died): nothing left to kill.
+                // Guestd gone (VM died): nothing left to kill.
                 guard.armed = false;
                 None
             }

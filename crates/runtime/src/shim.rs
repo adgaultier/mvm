@@ -24,13 +24,13 @@ pub struct ShimConfig {
     pub network: NetworkMode,
     pub ports: Vec<String>,
     pub mounts: Vec<Mount>,
-    /// Host unix socket for the guest agent control channel. When set,
-    /// the guest is booted with the agent as PID 1 and the workload as its
+    /// Host unix socket for the guestd control channel. When set,
+    /// the guest is booted with the guestd as PID 1 and the workload as its
     /// child (enables `exec`).
-    pub agent_socket: Option<PathBuf>,
+    pub guestd_socket: Option<PathBuf>,
     /// Host unix socket for the guest's Agent API bridge (`mvm-agent-mcp`):
     /// the guest dials out over vsock, one connection per request. Mapped
-    /// only alongside `agent_socket` (both ride the injected exec-agent's
+    /// only alongside `guestd_socket` (both ride the injected guestd.s
     /// boot path).
     #[serde(default)]
     pub agent_api_socket: Option<PathBuf>,
@@ -49,7 +49,7 @@ pub struct ShimConfig {
     /// as if the workload had printed it.
     #[serde(default)]
     pub krun_log: Option<PathBuf>,
-    /// Security profile; strict makes the agent install an additional
+    /// Security profile; strict makes the guestd install an additional
     /// workload-scoped seccomp filter denying high-risk syscalls.
     #[serde(default)]
     pub security: SecurityProfile,
@@ -100,7 +100,7 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
     ctx.set_root(&config.rootfs)?;
 
     // Extra virtio-fs bind mounts. Tags must be unique; the guest mounts
-    // them via the agent (or they are simply visible under the tag).
+    // them via the guestd (or they are simply visible under the tag).
     for (i, m) in config.mounts.iter().enumerate() {
         ctx.add_virtiofs(&format!("mvmfs{i}"), &m.host, m.read_only)?;
     }
@@ -145,9 +145,9 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         ctx.set_workdir(workdir)?;
     }
 
-    if let Some(agent_sock) = &config.agent_socket {
-        // Host listens on the unix socket; the guest agent connects out.
-        ctx.add_vsock_port(protocol::AGENT_VSOCK_PORT, agent_sock, false)?;
+    if let Some(guestd_sock) = &config.guestd_socket {
+        // Host listens on the unix socket; the guestd connects out.
+        ctx.add_vsock_port(protocol::GUESTD_VSOCK_PORT, guestd_sock, false)?;
         if let Some(api_sock) = &config.agent_api_socket {
             // Same direction as the control channel: the guest's Agent API
             // bridge dials out, one vsock connection per request.
@@ -155,16 +155,16 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         }
         // libkrun's init execs KRUN_INIT with the exec path already prepended
         // as argv[0], so argv here is *just* the workload command. Repeating
-        // the agent path would make the agent run itself as its own workload:
+        // the guestd path would make the guestd run itself as its own workload:
         // the outer instance consumed every MVM_* var (and scrubbed it from
         // the environment) before the inner one, the one that actually spawns
         // the workload and serves exec, ever saw it.
         let argv: Vec<String> = config.exec.clone();
-        // Tell the agent which virtiofs tags to mount where.
+        // Tell the guestd which virtiofs tags to mount where.
         let mut env = config.env.clone();
-        // The agent always runs inside a Linux guest, so it can't know the
+        // The guestd always runs inside a Linux guest, so it can't know the
         // host OS on its own; this is how macOS-specific behavior in the
-        // agent (home-ownership repair) is gated. Linux needs no signal.
+        // guestd (home-ownership repair) is gated. Linux needs no signal.
         #[cfg(target_os = "macos")]
         env.push("MVM_HOST_OS=macos".to_string());
         if config.console_tty {
@@ -175,13 +175,13 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         }
         match config.network {
             NetworkMode::Gvproxy { .. } => {
-                // gvproxy's vfkit-mode defaults; the agent applies them if
+                // gvproxy's vfkit-mode defaults; the guestd applies them if
                 // nothing else configured the interface.
                 env.push("MVM_NET_CONFIG=192.168.127.2/24,192.168.127.1".to_string());
             }
             NetworkMode::Tsi => {
                 // TSI needs no interface config, but images ship an empty
-                // resolv.conf; the agent fills in public resolvers.
+                // resolv.conf; the guestd fills in public resolvers.
                 env.push("MVM_NET_TSI=1".to_string());
             }
             _ => {}
@@ -209,8 +209,8 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
             env.push(format!("MVM_USER={user}"));
         }
         // Security profile. Strict installs an additional seccomp filter in
-        // the agent's workload spawn path (denies bpf/keyctl/perf_event_open/
-        // userfaultfd/io_uring); the agent scrubs the var before execing.
+        // the guestd.s workload spawn path (denies bpf/keyctl/perf_event_open/
+        // userfaultfd/io_uring); the guestd scrubs the var before execing.
         if config.security == SecurityProfile::Strict {
             env.push("MVM_SECURITY_STRICT=1".to_string());
         }
@@ -220,10 +220,10 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         // into the guest. Deliberately not scrubbed there: the workload's own
         // tooling (the mvm-agent-mcp bridge) presents it over the Agent API
         // vsock channel.
-        if let Ok(token) = std::env::var("MVM_AGENT_TOKEN") {
-            env.push(format!("MVM_AGENT_TOKEN={token}"));
+        if let Ok(token) = std::env::var("MVM_GUEST_TOKEN") {
+            env.push(format!("MVM_GUEST_TOKEN={token}"));
         }
-        ctx.set_exec(protocol::GUEST_AGENT_PATH, &argv, &env)?;
+        ctx.set_exec(protocol::GUESTD_PATH, &argv, &env)?;
     } else {
         let exec = config
             .exec

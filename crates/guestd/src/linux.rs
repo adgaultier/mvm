@@ -1,4 +1,4 @@
-//! mvm-agent: PID 1 inside the guest microVM.
+//! mvm-guestd: PID 1 inside the guest microVM.
 //!
 //! Boots the workload, connects to the host over vsock (port 1024), and
 //! serves exec requests. Single-threaded poll() event loop; reaps zombies
@@ -11,7 +11,7 @@ use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use mvm_common::protocol::{self, encode_frame, AgentEvent, AgentRequest, FrameDecoder};
+use mvm_common::protocol::{self, encode_frame, GuestdEvent, GuestdRequest, FrameDecoder};
 
 use crate::identity::{apply_user, resolve_user, GuestUser};
 use crate::network;
@@ -51,7 +51,7 @@ impl Session {
     }
 }
 
-struct Agent {
+struct Guestd {
     vsock: RawFd,
     out_queue: VecDeque<u8>,
     decoder: FrameDecoder,
@@ -61,24 +61,24 @@ struct Agent {
     /// Identity the workload runs as; exec sessions default to it.
     workload_user: GuestUser,
     /// Bridges the workload's guest pty to the console (`-t` only). Joined
-    /// once the workload exits, before the agent reports it: the workload
+    /// once the workload exits, before the guestd reports it: the workload
     /// closing its pty slave doesn't mean this thread has finished draining
     /// buffered pty output to the console yet, and `process::exit` doesn't
     /// wait for other threads — without the join, a short-lived `-t`
     /// workload can race its own exit against its last bytes ever reaching
     /// the host.
     console_output: Option<std::thread::JoinHandle<()>>,
-    /// Agent-owned dup of the workload pty master (the bridge owns the
+    /// Guestd-owned dup of the workload pty master (the bridge owns the
     /// original; the input bridge its clone). Kept so the host can resize
-    /// the console (`AgentRequest::ConsoleResize`) without coupling to the
-    /// bridge threads' lifetimes. Closed exactly once when the agent drops.
+    /// the console (`GuestdRequest::ConsoleResize`) without coupling to the
+    /// bridge threads' lifetimes. Closed exactly once when the guestd drops.
     console_pty: Option<OwnedFd>,
     /// VM-scoped bearer token for the host's Agent API (vsock, see
     /// `mvm_common::protocol::AGENT_API_VSOCK_PORT`). Not yet used here, but
     /// captured and held so the mvm-agent-mcp bridge can present it.
     /// Scrubbed from the workload environment before it spawns.
     #[allow(dead_code)]
-    agent_token: Option<String>,
+    guest_token: Option<String>,
     /// Strict security profile: exec sessions install the high-risk-syscall
     /// seccomp filter in their pre_exec, like the workload itself.
     strict: bool,
@@ -97,7 +97,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // hostile workload cannot have prepared an environment that sidesteps it.
     // Failure to install is fatal — a guest that can't be sandboxed won't.
     if let Err(e) = crate::seccomp::install_raw_socket_filter() {
-        eprintln!("mvm-agent: seccomp: {e}");
+        eprintln!("mvm-guestd: seccomp: {e}");
         return 125;
     }
 
@@ -126,13 +126,13 @@ fn real_main(workload_argv: &[String]) -> i32 {
     let user_spec = std::env::var("MVM_USER").ok();
 
     // Which OS the *host* runs; only "macos" is ever set (Linux needs no
-    // signal). The agent itself always runs in a Linux guest.
+    // signal). The guestd itself always runs in a Linux guest.
     let host_os = std::env::var("MVM_HOST_OS").unwrap_or_default();
 
     // VM-scoped bearer token for the host's Agent API. Deliberately NOT
     // scrubbed: it must reach the workload's environment so the tools it
     // spawns (the mvm-agent-mcp bridge) can authenticate over vsock.
-    let agent_token = std::env::var("MVM_AGENT_TOKEN").ok();
+    let guest_token = std::env::var("MVM_GUEST_TOKEN").ok();
 
     // Strict security profile: the workload (and everything it spawns) gets
     // an extra seccomp filter denying high-risk syscalls. Read before the
@@ -176,7 +176,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         Some(spec) => match resolve_user(spec) {
             Ok(user) => user,
             Err(e) => {
-                eprintln!("mvm-agent: {e}");
+                eprintln!("mvm-guestd: {e}");
                 return 125;
             }
         },
@@ -227,7 +227,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         match cmd.spawn() {
             Ok(child) => Some(child),
             Err(e) => {
-                eprintln!("mvm-agent: failed to spawn {:?}: {e}", workload_argv[0]);
+                eprintln!("mvm-guestd: failed to spawn {:?}: {e}", workload_argv[0]);
                 return 127;
             }
         }
@@ -247,7 +247,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     install_handlers();
 
     // 5. Connect to the host over vsock (retry while host listener comes up).
-    let vsock = match connect_vsock_retry(HOST_CID, protocol::AGENT_VSOCK_PORT, 100) {
+    let vsock = match connect_vsock_retry(HOST_CID, protocol::GUESTD_VSOCK_PORT, 100) {
         Some(fd) => fd,
         None => {
             // No control channel: still run the workload to completion.
@@ -262,7 +262,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         }
     };
 
-    let mut agent = Agent {
+    let mut guestd = Guestd {
         vsock,
         out_queue: VecDeque::new(),
         decoder: FrameDecoder::default(),
@@ -272,14 +272,14 @@ fn real_main(workload_argv: &[String]) -> i32 {
         workload_user: user,
         console_output,
         console_pty,
-        agent_token,
+        guest_token,
         strict,
     };
-    agent.send(&AgentEvent::Ready {
+    guestd.send(&GuestdEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
     });
 
-    agent.run(selfpipe_r)
+    guestd.run(selfpipe_r)
 }
 
 /// Apply no-new-privileges in a child before exec. Registered *before*
@@ -316,8 +316,8 @@ fn set_no_new_privs() -> std::io::Result<()> {
     Ok(())
 }
 
-impl Agent {
-    fn send(&mut self, event: &AgentEvent) {
+impl Guestd {
+    fn send(&mut self, event: &GuestdEvent) {
         if let Ok(frame) = encode_frame(event) {
             self.out_queue.extend(frame);
             let _ = self.flush_out();
@@ -432,14 +432,14 @@ impl Agent {
                     self.kill_all();
                     return self.workload_code.unwrap_or(1);
                 }
-                match self.decoder.feed::<AgentRequest>(&read_buf[..n as usize]) {
+                match self.decoder.feed::<GuestdRequest>(&read_buf[..n as usize]) {
                     Ok(requests) => {
                         for req in requests {
                             self.handle_request(req);
                         }
                     }
                     Err(_) => {
-                        self.send(&AgentEvent::Error {
+                        self.send(&GuestdEvent::Error {
                             message: "corrupt frame from host".into(),
                         });
                     }
@@ -483,7 +483,7 @@ impl Agent {
                 if let Some(fd) = s.stdin_fd {
                     unsafe { libc::close(fd) };
                 }
-                self.send(&AgentEvent::Exit {
+                self.send(&GuestdEvent::Exit {
                     id: sid,
                     code: s.exit_code.unwrap_or(-1),
                 });
@@ -497,7 +497,7 @@ impl Agent {
                 if let Some(handle) = self.console_output.take() {
                     let _ = handle.join();
                 }
-                self.send(&AgentEvent::WorkloadExit { code });
+                self.send(&GuestdEvent::WorkloadExit { code });
                 let _ = self.flush_out();
                 self.kill_all_sessions();
                 return code;
@@ -574,9 +574,9 @@ impl Agent {
         if n > 0 {
             let data = buf[..n as usize].to_vec();
             let event = if is_stdout {
-                AgentEvent::Stdout { id: sid_key, data }
+                GuestdEvent::Stdout { id: sid_key, data }
             } else {
-                AgentEvent::Stderr { id: sid_key, data }
+                GuestdEvent::Stderr { id: sid_key, data }
             };
             self.send(&event);
         } else if n == 0 || (revents & (libc::POLLHUP | libc::POLLERR) != 0) {
@@ -615,10 +615,10 @@ impl Agent {
         }
     }
 
-    fn handle_request(&mut self, req: AgentRequest) {
+    fn handle_request(&mut self, req: GuestdRequest) {
         match req {
-            AgentRequest::Ping => self.send(&AgentEvent::Pong),
-            AgentRequest::Exec {
+            GuestdRequest::Ping => self.send(&GuestdEvent::Pong),
+            GuestdRequest::Exec {
                 id,
                 argv,
                 env,
@@ -628,13 +628,13 @@ impl Agent {
                 rows,
                 user,
             } => self.spawn_exec(id, argv, env, workdir, tty, cols, rows, user),
-            AgentRequest::Stdin { id, data } => {
+            GuestdRequest::Stdin { id, data } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.stdin_buf.extend(data);
                     self.flush_session_stdin(id);
                 }
             }
-            AgentRequest::StdinEof { id } => {
+            GuestdRequest::StdinEof { id } => {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     if s.tty {
                         // A pty can't be half-closed; signal EOF the tty way.
@@ -645,7 +645,7 @@ impl Agent {
                     }
                 }
             }
-            AgentRequest::Resize { id, cols, rows } => {
+            GuestdRequest::Resize { id, cols, rows } => {
                 if let Some(s) = self.sessions.get(&id) {
                     if let (true, Some(fd)) = (s.tty, s.stdout_fd) {
                         let ws = libc::winsize {
@@ -658,7 +658,7 @@ impl Agent {
                     }
                 }
             }
-            AgentRequest::ConsoleResize { cols, rows } => {
+            GuestdRequest::ConsoleResize { cols, rows } => {
                 if let Some(pty) = &self.console_pty {
                     let ws = libc::winsize {
                         ws_row: rows,
@@ -670,7 +670,7 @@ impl Agent {
                     // teardown); log, don't tear down the console.
                     if unsafe { libc::ioctl(pty.as_raw_fd(), libc::TIOCSWINSZ, &ws) } < 0 {
                         eprintln!(
-                            "mvm-agent: console resize {}x{} failed: {}",
+                            "mvm-guestd: console resize {}x{} failed: {}",
                             cols,
                             rows,
                             std::io::Error::last_os_error()
@@ -678,7 +678,7 @@ impl Agent {
                     }
                 }
             }
-            AgentRequest::Kill { id } => {
+            GuestdRequest::Kill { id } => {
                 if let Some(s) = self.sessions.get(&id) {
                     unsafe { libc::kill(s.pid, libc::SIGKILL) };
                 }
@@ -699,7 +699,7 @@ impl Agent {
         user: Option<String>,
     ) {
         if argv.is_empty() {
-            self.send(&AgentEvent::Exit { id, code: 126 });
+            self.send(&GuestdEvent::Exit { id, code: 126 });
             return;
         }
 
@@ -710,8 +710,8 @@ impl Agent {
             Some(spec) => match resolve_user(spec) {
                 Ok(user) => user,
                 Err(e) => {
-                    self.send(&AgentEvent::Error { message: e });
-                    self.send(&AgentEvent::Exit { id, code: 126 });
+                    self.send(&GuestdEvent::Error { message: e });
+                    self.send(&GuestdEvent::Exit { id, code: 126 });
                     return;
                 }
             },
@@ -743,15 +743,15 @@ impl Agent {
                 )
             };
             if rc != 0 {
-                self.send(&AgentEvent::Stderr {
+                self.send(&GuestdEvent::Stderr {
                     id,
                     data: format!(
-                        "mvm-agent: openpty failed: {}\n",
+                        "mvm-guestd: openpty failed: {}\n",
                         std::io::Error::last_os_error()
                     )
                     .into_bytes(),
                 });
-                self.send(&AgentEvent::Exit { id, code: 126 });
+                self.send(&GuestdEvent::Exit { id, code: 126 });
                 return;
             }
             unsafe {
@@ -844,11 +844,11 @@ impl Agent {
                 if tty {
                     unsafe { libc::close(master) };
                 }
-                self.send(&AgentEvent::Stderr {
+                self.send(&GuestdEvent::Stderr {
                     id,
-                    data: format!("mvm-agent: exec {:?} failed: {e}\n", argv[0]).into_bytes(),
+                    data: format!("mvm-guestd: exec {:?} failed: {e}\n", argv[0]).into_bytes(),
                 });
-                self.send(&AgentEvent::Exit { id, code: 127 });
+                self.send(&GuestdEvent::Exit { id, code: 127 });
             }
         }
     }

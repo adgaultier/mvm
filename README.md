@@ -11,7 +11,7 @@ It provides a familiar container workflow -  pull, run, exec, logs, stop, rm -  
 
 Each sandbox is a separate VM, treated as a hostile guest. The host exposes only explicitly controlled interfaces: virtiofs storage, requested mounts, vsock, and the selected network backend.
 
-A small static musl guest agent acts as init and provides process control over vsock, so basic sandbox control does not depend on guest networking
+A small static musl guestd acts as init and provides process control over vsock, so basic sandbox control does not depend on guest networking
 
 mvm is designed for workloads that may be untrusted or generated dynamically:
 from AI agents and the code they run to developer tools, automation, builds,
@@ -83,7 +83,7 @@ $ mvm attach box                          # …and comes back to it
               │  microVM  │
               │           │
               │  kernel   │
-              │  agent    │
+              │  guestd  │
               │ workload  │
               └───────────┘
                     │
@@ -97,7 +97,7 @@ $ mvm attach box                          # …and comes back to it
 networking, storage, and image-backed root filesystems. Each sandbox gets
 its own VM shim and microVM
 
-- **Guest agent**.  A small static musl binary acts as the guest's init,
+- **Guestd**.  A small static musl binary acts as the guest's init,
 spawning the workload and providing process execution, stdin/stdout,
 PTY, and lifecycle control over vsock. Guest networking is not required
 for sandbox control.
@@ -113,26 +113,26 @@ for sandbox control.
 |---|---|
 | Host | **Linux x86_64** with KVM (`/dev/kvm` read-write for your user), or **macOS on Apple Silicon** (macOS 14+, Hypervisor.framework) |
 | Hypervisor | **libkrun** + **libkrunfw** (`libkrun.so.1` / `libkrun.dylib`, plus headers to build) |
-| Toolchain | Rust, plus the musl target matching your host arch (`x86_64-` or `aarch64-unknown-linux-musl`) for the guest agent |
+| Toolchain | Rust, plus the musl target matching your host arch (`x86_64-` or `aarch64-unknown-linux-musl`) for the guestd |
 | Optional | [gvproxy](https://github.com/containers/gvisor-tap-vsock) ≥ v0.8.9 for userspace NAT / port forwarding |
 
 
 
 - On linux run `scripts/instal-linux.sh` to install likbrun dependencies
-- On macOS run `scripts/install-darwin.sh` to install libkrun/libkrunfw from the libkrun/krun Homebrew tap plus Zig and cargo-zigbuild for the static guest agent
+- On macOS run `scripts/install-darwin.sh` to install libkrun/libkrunfw from the libkrun/krun Homebrew tap plus Zig and cargo-zigbuild for the static guestd
 - gvproxy is optional and can be installed or selected separately with
 `MVM_GVPROXY_BIN`.
 
 ### Build
 
 ```console
-$ scripts/build.sh        # release binaries + static agent → dist/
+$ scripts/build.sh        # release binaries + static guestd → dist/
 $ cargo test --workspace  # unit tests, no KVM needed
 $ just -f scripts/integration/Justfile all  # boots real VMs (needs KVM/libkrun + network)
 ```
 
-`mvm` looks for `mvm-agent` next to its own binary, or at `MVM_AGENT_PATH`. The
-agent **must** be the static musl build; it runs inside guests whose libc you
+`mvm` looks for `mvm-guestd` next to its own binary, or at `MVM_GUESTD_PATH`. The
+guestd **must** be the static musl build; it runs inside guests whose libc you
 don't control, and the daemon refuses a dynamically linked one.
 
 ## CLI
@@ -294,7 +294,7 @@ State layout under the `MVM_DATA_DIR` data dir:
     ├── console.log         # guest console
     ├── krun.log            # libkrun's own diagnostics
     ├── rootfs|upper|work/  # per-driver filesystem state
-    └── agent.sock          # agent control channel
+    └── guestd.sock        # guestd control channel
 ```
 
 
@@ -310,7 +310,7 @@ This requires `/etc/subuid` + `/etc/subgid` entries and `newuidmap`/`newgidmap`,
 and degrades gracefully (with a warning) when they are missing. Opt out with
 `MVM_USERNS=0`. On macOS there is no userns; the daemon runs with host
 credentials, so guest `chown` and image ownership are **not** preserved -  the
-`copy` driver writes the rootfs as the host user. To compensate, the agent
+`copy` driver writes the rootfs as the host user. To compensate, the guestd
 repairs the workload's home directory ownership before spawning (gated by
 `MVM_HOST_OS=macos`), so a non-root workload can still write to its own home.
 
@@ -342,7 +342,7 @@ Each sandbox runs in an isolated microVM with its own kernel. Host/guest
 interaction is limited to explicitly configured interfaces such as virtiofs,
 vsock, and the selected network backend.
 
-The guest agent installs an always-on seccomp-BPF filter before starting the
+The guestd installs an always-on seccomp-BPF filter before starting the
 workload. It blocks `AF_PACKET` and raw `AF_INET`/`AF_INET6` sockets across
 the workload and all exec sessions. `AF_NETLINK` raw-type sockets remain
 allowed for network bootstrap, so tools such as `tcpdump`, `arping`,
@@ -351,7 +351,7 @@ old-style `ping`, and `udhcpc` are unavailable.
 With `--security=strict`, workloads additionally receive a
 workload-scoped seccomp profile and `PR_SET_NO_NEW_PRIVS`. This denies BPF,
 `ptrace`, namespace and mount changes, kernel module loading, kexec, keyctl,
-perf events, userfaultfd, and io_uring syscalls. The trusted guest agent
+perf events, userfaultfd, and io_uring syscalls. The trusted guestd
 retains the broader syscall surface required for VM and exec management.
 
 Strict mode does not yet drop all Linux capabilities. The libkrunfw guest
@@ -446,7 +446,7 @@ this protocol.
 |---|---|
 | `MVM_HOST` | Daemon address for clients (default `http://127.0.0.1:24642`) |
 | `MVM_DATA_DIR` | State root defaults to `~/.local/share/mvm` or  `/var/lib/mvm` for root users |
-| `MVM_AGENT_PATH` | Path to the guest agent binary |
+| `MVM_GUESTD_PATH` | Path to the guestd binary |
 | `MVM_STORAGE_DRIVER` | Force `overlay` or `copy` |
 | `MVM_USERNS=0` | Disable rootless user namespaces on Linux |
 | `MVM_GVPROXY_BIN` | Path to `gvproxy` |

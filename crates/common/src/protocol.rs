@@ -1,4 +1,4 @@
-//! Wire protocol between the host (manager) and the in-guest agent,
+//! Wire protocol between the host (manager) and the in-guestd,
 //! multiplexed over a single vsock-backed stream.
 //!
 //! Framing: [u32 big-endian length][JSON payload].
@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Vsock port the guest agent connects to for the control channel.
-pub const AGENT_VSOCK_PORT: u32 = 1024;
+/// Vsock port the guestd connects to for the control channel.
+pub const GUESTD_VSOCK_PORT: u32 = 1024;
 
 /// Vsock port the guest's Agent API bridge (`mvm-agent-mcp`) dials to reach
 /// the host's per-sandbox Agent API listener. Mapped alongside the control
@@ -15,16 +15,16 @@ pub const AGENT_VSOCK_PORT: u32 = 1024;
 /// direction: the guest connects out, one connection per request).
 pub const AGENT_API_VSOCK_PORT: u32 = 24643;
 
-/// Path of the agent inside the guest rootfs.
-pub const GUEST_AGENT_PATH: &str = "/.mvm/agent";
+/// Path of the guestd inside the guest rootfs.
+pub const GUESTD_PATH: &str = "/.mvm/guestd";
 
 /// Maximum frame size (1 MiB) — guards against corrupt streams.
 pub const MAX_FRAME: u32 = 1 << 20;
 
-/// Host -> Agent messages.
+/// Host -> Guestd messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum AgentRequest {
+pub enum GuestdRequest {
     /// Spawn a process inside the sandbox. With `tty`, the process runs on
     /// a pseudo-terminal (`cols`/`rows` set the initial size when nonzero)
     /// and its output arrives merged on the Stdout stream.
@@ -63,11 +63,11 @@ pub enum AgentRequest {
     Ping,
 }
 
-/// Agent -> Host messages.
+/// Guestd -> Host messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum AgentEvent {
-    /// Agent is up; carries the workload PID.
+pub enum GuestdEvent {
+    /// Guestd is up; carries the workload PID.
     Ready { workload_pid: u32 },
     /// stdout data (base64 over the wire: binary-safe).
     Stdout {
@@ -83,11 +83,11 @@ pub enum AgentEvent {
     },
     /// An exec session finished.
     Exit { id: u32, code: i32 },
-    /// The main workload finished; agent will exit (VM shutdown follows).
+    /// The main workload finished; guestd will exit (VM shutdown follows).
     WorkloadExit { code: i32 },
     /// Pong reply.
     Pong,
-    /// Fatal error from the agent.
+    /// Fatal error from the guestd.
     Error { message: String },
 }
 
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn roundtrip_frame() {
-        let req = AgentRequest::Exec {
+        let req = GuestdRequest::Exec {
             id: 7,
             argv: vec!["echo".into(), "hi".into()],
             env: vec![],
@@ -182,11 +182,11 @@ mod tests {
         let mut dec = FrameDecoder::default();
         // Feed in two chunks to test incremental decoding.
         let (a, b) = frame.split_at(3);
-        assert!(dec.feed::<AgentRequest>(a).unwrap().is_empty());
-        let msgs = dec.feed::<AgentRequest>(b).unwrap();
+        assert!(dec.feed::<GuestdRequest>(a).unwrap().is_empty());
+        let msgs = dec.feed::<GuestdRequest>(b).unwrap();
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
-            AgentRequest::Exec { id, argv, .. } => {
+            GuestdRequest::Exec { id, argv, .. } => {
                 assert_eq!(*id, 7);
                 assert_eq!(argv[1], "hi");
             }
@@ -198,7 +198,7 @@ mod tests {
     fn rejects_oversized_frame() {
         let mut dec = FrameDecoder::default();
         let len = (MAX_FRAME + 1).to_be_bytes();
-        let r = dec.feed::<AgentRequest>(&len);
+        let r = dec.feed::<GuestdRequest>(&len);
         assert!(r.is_err());
     }
 
@@ -222,15 +222,15 @@ mod tests {
     #[test]
     fn stdout_frame_is_binary_safe() {
         let payload = vec![0u8, 159, 146, 150, 255]; // invalid UTF-8
-        let event = AgentEvent::Stdout {
+        let event = GuestdEvent::Stdout {
             id: 1,
             data: payload.clone(),
         };
         let frame = encode_frame(&event).unwrap();
         let mut dec = FrameDecoder::default();
-        let events: Vec<AgentEvent> = dec.feed(&frame).unwrap();
+        let events: Vec<GuestdEvent> = dec.feed(&frame).unwrap();
         match &events[0] {
-            AgentEvent::Stdout { data, .. } => assert_eq!(*data, payload),
+            GuestdEvent::Stdout { data, .. } => assert_eq!(*data, payload),
             _ => panic!("wrong variant"),
         }
     }

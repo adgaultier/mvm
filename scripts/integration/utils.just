@@ -8,13 +8,13 @@ _serve:
     set -euo pipefail
     source "{{LIB}}"
     # Resolve the fixed, per-run environment. Overridable via MVM_BIN /
-    # MVM_AGENT_BIN (bare MVM/AGENT collide with unrelated env vars).
+    # MVM_GUESTD_BIN (bare MVM/AGENT collide with unrelated env vars).
     case "$(uname -m)" in
         arm64|aarch64) MUSL_TARGET=aarch64-unknown-linux-musl ;;
         *) MUSL_TARGET=x86_64-unknown-linux-musl ;;
     esac
     MVM=${MVM_BIN:-{{justfile_directory()}}/../../target/release/mvm}
-    AGENT=${MVM_AGENT_BIN:-{{justfile_directory()}}/../../target/$MUSL_TARGET/release/mvm-agent}
+    GUESTD=${MVM_GUESTD_BIN:-{{justfile_directory()}}/../../target/$MUSL_TARGET/release/mvm-guestd}
     PORT=24699
     MVM_HOST="http://127.0.0.1:$PORT"
     # Keep the data dir SHORT: gvproxy binds unix sockets under
@@ -22,7 +22,7 @@ _serve:
     # 104 bytes. A repo-relative .runtime/data/... path runs past that and
     # gvproxy fails with "bind: invalid argument" (EINVAL).
     MVM_DATA_DIR="/tmp/mvm-itest-$$"
-    MVM_AGENT_PATH="$(cd {{justfile_directory()}}/../.. && pwd)/$AGENT"
+    MVM_GUESTD_PATH="$(cd {{justfile_directory()}}/../.. && pwd)/$GUESTD"
     MVM_GVPROXY_CONTROL="$MVM_DATA_DIR/gvproxy-control.sock"
     # The Agent API is a per-sandbox vsock channel now (no host-wide address
     # or CLI flag to probe); it is on by default (`agent-api` feature) and
@@ -39,7 +39,7 @@ _serve:
         [ -e /dev/kvm ] || { echo "SKIP: /dev/kvm not available"; exit 0; }
     fi
     [ -x "$MVM" ] || { echo "FAIL: $MVM not built (run scripts/build.sh or cargo build)"; exit 1; }
-    [ -f "$AGENT" ] || { echo "FAIL: static agent $AGENT not built"; exit 1; }
+    [ -f "$GUESTD" ] || { echo "FAIL: static guestd $GUESTD not built"; exit 1; }
 
     # GNU/BSD portability shims. timeout(1) must be a real command — it runs
     # inside script(1)'s pty, which execs it — so shim it on PATH if missing.
@@ -62,11 +62,11 @@ _serve:
     printf '%s\n' \
         "export MUSL_TARGET=\"$MUSL_TARGET\"" \
         "export MVM=\"$MVM\"" \
-        "export AGENT=\"$AGENT\"" \
+        "export GUESTD=\"$GUESTD\"" \
         "export PORT=$PORT" \
         "export MVM_HOST=\"$MVM_HOST\"" \
         "export MVM_DATA_DIR=\"$MVM_DATA_DIR\"" \
-        "export MVM_AGENT_PATH=\"$MVM_AGENT_PATH\"" \
+        "export MVM_GUESTD_PATH=\"$MVM_GUESTD_PATH\"" \
         "export MVM_GVPROXY_CONTROL=\"$MVM_GVPROXY_CONTROL\"" \
         "export AGENT_API=$AGENT_API" \
         > "{{RUNTIME}}/env.sh"

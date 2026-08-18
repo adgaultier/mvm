@@ -32,7 +32,7 @@ Ensure an authenticated API client cannot control another user's sandbox unless 
 > `Authorization: Bearer <token>`, resolved to `Principal::Vm(vm_id)` — the
 > routes carry no `{id}`, so a VM can only act on itself (`inspect`/`stop`/
 > `delegate`, the last still a stub). Token mechanics: 32 random bytes minted
-> in `Manager::start`; only `agent_token_hash` (SHA-256) is kept in the
+> in `Manager::start`; only `guest_token_hash` (SHA-256) is kept in the
 > manager's memory (`#[serde(skip)]`: not in API responses, not persisted),
 > cleared on stop/exit. The plaintext is passed to the shim as a process env
 > var and rides the `MVM_*` channel into the guest (readable via
@@ -105,13 +105,13 @@ Defend against:
 Strip credentials on unauthorized redirects.
 Audit credential use by sandbox identity and destination.
 
-## P1 — Authenticate the guest-agent control channel
+## P1 — Authenticate the guestd control channel
 Do not trust a connection merely because it arrived on the expected vsock CID/port.
 Generate a cryptographically random per-sandbox secret/capability during VM creation.
-Establish an authenticated handshake between guest agent and host.
+Establish an authenticated handshake between guestd and host.
 Bind authentication to sandbox identity and protocol version.
 Accept only the first authenticated agent connection; reject unauthenticated or duplicate connections.
-Add adversarial integration tests where the guest workload attempts to impersonate the agent.
+Add adversarial integration tests where the guest workload attempts to impersonate the guestd.
 ### P1 — Harden host filesystem access
 Treat host bind mounts as privileged capabilities.
 Add configurable allowlisted host mount roots.
@@ -146,7 +146,7 @@ In strict mode:
 - require resource limits
 - restrict host mounts to explicit allowlists
 - default to --net=none
-- require authenticated guest-agent communication
+- require authenticated guestd communication
 - enable the strongest available seccomp policy
 
 Keep a compatibility profile for ordinary container workloads that need root/setuid semantics.
@@ -203,7 +203,7 @@ Evaluate additional restrictions for:
 
 > **PARTIALLY DONE (2026-08-16):** `--security=strict` (`mvm run --security=strict`,
 > also on `create`/`clone`) installs a workload-scoped second seccomp filter
-> (`build_strict` in `crates/agent/src/seccomp.rs`) denying `bpf`, `keyctl`,
+> (`build_strict` in `crates/guestd/src/seccomp.rs`) denying `bpf`, `keyctl`,
 > `perf_event_open`, `userfaultfd`, the `io_uring_*` trio, `ptrace`, namespace
 > changes, mount/pivot-root, module loading, and kexec with `EPERM`,
 > gated per-sandbox via `SandboxSpec.security` → `ShimConfig.security` →
@@ -259,7 +259,7 @@ VM escape attempts
 
 
 Run these tests against all supported Linux/macOS configurations and supported libkrun versions.
-Add fuzzing targets for OCI extraction, protocol framing, API input/specification parsing, and guest-agent communication.
+Add fuzzing targets for OCI extraction, protocol framing, API input/specification parsing, and guestd communication.
 
 
 ### Security documentation
