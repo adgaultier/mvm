@@ -1,0 +1,24 @@
+here := justfile_directory()
+oci_registry := justfile_directory() + '/oci'
+mvm :=  justfile_directory() + '/../../target/release/mvm'
+
+_default:
+    @just --list
+
+build agent_name:
+    @echo "> build {{agent_name}} image with podman..."
+    @podman build --no-cache -t {{agent_name}}-agent  -f {{here}}/{{agent_name}}/Dockerfile . 1>/dev/null
+    @echo "> save image as oci..."
+    @podman save --format oci-archive -o {{oci_registry}}/{{agent_name}}-agent.oci {{agent_name}}-agent
+    @echo "> agent oci saved!\n  use 'mvm load {{oci_registry}}/{{agent_name}}-agent.oci ...' to import image in mvm "
+
+create agent_name sbx_name:  
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "> creating {{agent_name}}"
+
+    if !  {{mvm}} images 1>/dev/null 2>&1;then
+        echo "mvm daemon isnt running,run with mvm serve" && exit 1
+    fi
+    {{here}}/{{agent_name}}/create-agent.sh {{sbx_name}}
+

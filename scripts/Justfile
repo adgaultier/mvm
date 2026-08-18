@@ -1,0 +1,21 @@
+
+_default:
+    @echo "╔══════════════════════════════════╗"
+    @echo "║        integration tests         ║"
+    @echo "╠══════════════════════════════════╣"
+    @echo "║  Usage: just test <recipe>       ║"
+    @echo "╚══════════════════════════════════╝"
+    @just  --justfile integration/Justfile --list 
+    @echo ""
+    @echo "╔══════════════════════════════════╗"
+    @echo "║           agent build            ║"
+    @echo "╠══════════════════════════════════╣"
+    @echo "║  Usage: just agent <recipe>      ║"
+    @echo "╚══════════════════════════════════╝"
+    @just  --justfile agents/Justfile --list 
+
+test recipe:
+    @just --justfile integration/Justfile {{recipe}}
+
+agent +ARGS:
+    @just --justfile agents/Justfile {{ARGS}}

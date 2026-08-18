@@ -12,7 +12,7 @@ mod routes;
 
 use axum::Router;
 use mvm_manager::Manager;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use tower_http::trace::TraceLayer;
 
 pub use error::ApiError;
@@ -102,38 +102,12 @@ pub fn router(manager: Manager) -> Router {
     .with_state(state)
 }
 
-/// Serve the control plane until interrupted.
-pub async fn serve(control_addr: SocketAddr, manager: Manager) -> std::io::Result<()> {
-    validate_control_addr(control_addr)?;
+/// Serve the control plane until interrupted. Always binds loopback — the
+/// control plane is unauthenticated, so `port` is the only configurable
+/// part of the listen address.
+pub async fn serve(port: u16, manager: Manager) -> std::io::Result<()> {
+    let control_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
     tracing::info!("mvm daemon listening on http://{control_addr}");
     axum::serve(control_listener, router(manager)).await
-}
-
-fn validate_control_addr(addr: SocketAddr) -> std::io::Result<()> {
-    if !addr.ip().is_loopback() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("unauthenticated control API must remain on loopback: {addr}"),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_control_addr;
-    use std::net::SocketAddr;
-
-    #[test]
-    fn control_api_rejects_non_loopback_addresses() {
-        assert!(validate_control_addr("0.0.0.0:24642".parse::<SocketAddr>().unwrap()).is_err());
-        assert!(validate_control_addr("192.0.2.10:24642".parse::<SocketAddr>().unwrap()).is_err());
-    }
-
-    #[test]
-    fn control_api_allows_loopback_addresses() {
-        assert!(validate_control_addr("127.0.0.1:24642".parse::<SocketAddr>().unwrap()).is_ok());
-        assert!(validate_control_addr("[::1]:24642".parse::<SocketAddr>().unwrap()).is_ok());
-    }
 }

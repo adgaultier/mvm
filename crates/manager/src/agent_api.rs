@@ -36,7 +36,18 @@ pub(crate) fn spawn_accept_loop(
                     let sandbox_id = sandbox_id.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_conn(&manager, &sandbox_id, stream).await {
-                            tracing::warn!(sandbox = %sandbox_id, "agent API request failed: {e}");
+                            if is_benign_disconnect(&e) {
+                                // Expected for e.g. "stop": the ack is written
+                                // after the VM (and its vsock device) is
+                                // already gone, so there's no client left to
+                                // read it. The request itself still ran.
+                                tracing::debug!(
+                                    sandbox = %sandbox_id,
+                                    "agent API connection closed before the response could be sent: {e}"
+                                );
+                            } else {
+                                tracing::warn!(sandbox = %sandbox_id, "agent API request failed: {e}");
+                            }
                         }
                     });
                 }
@@ -47,6 +58,18 @@ pub(crate) fn spawn_accept_loop(
             }
         }
     })
+}
+
+/// Whether `e` just means "the other end is gone" — normal after a
+/// self-`stop`, since the guest's vsock device dies with the VM before the
+/// ack can be written.
+fn is_benign_disconnect(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    )
 }
 
 async fn handle_conn(

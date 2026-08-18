@@ -8,7 +8,6 @@ mod userns;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use client::Client;
 use mvm_common::{DataDir, Mount, NetworkMode, Sandbox, SandboxSpec};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -33,10 +32,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the daemon (HTTP API).
+    /// Run the daemon (HTTP API). Always binds loopback (127.0.0.1).
     Serve {
-        #[arg(long, default_value = "127.0.0.1:24642")]
-        addr: SocketAddr,
+        #[arg(long, default_value_t = 24642)]
+        port: u16,
     },
     /// Pull an OCI image.
     Pull { image: String },
@@ -265,15 +264,15 @@ fn main() {
         .init();
 
     let code = match cli.command {
-        Command::Serve { addr } => {
+        Command::Serve { port } => {
             // `--host` is the client-side daemon address (MVM_HOST), not a
             // listen option — silently accepting it here used to make
             // `serve --host 0.0.0.0` look like it had any effect.
             if host_on_cli {
                 eprintln!(
                     "error: `serve` does not accept --host (it sets the client-side daemon \
-                     address, MVM_HOST); use --addr <IP:PORT> for the listen address \
-                     (the control plane is loopback-only)"
+                     address, MVM_HOST); use --port <PORT> for the listen port \
+                     (the control plane always binds 127.0.0.1)"
                 );
                 std::process::exit(1);
             }
@@ -281,7 +280,7 @@ fn main() {
             // requirement of unshare) — may re-exec and never return.
             #[cfg(target_os = "linux")]
             userns::maybe_enter_userns();
-            serve(addr)
+            serve(port)
         }
         Command::VmShim { config } => vm_shim(&config),
         other => {
@@ -624,7 +623,7 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
     })
 }
 
-fn serve(addr: SocketAddr) -> i32 {
+fn serve(port: u16) -> i32 {
     let data_dir = match DataDir::resolve() {
         Ok(d) => d,
         Err(e) => {
@@ -652,7 +651,7 @@ fn serve(addr: SocketAddr) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = runtime.block_on(mvm_api::serve(addr, manager)) {
+    if let Err(e) = runtime.block_on(mvm_api::serve(port, manager)) {
         eprintln!("error: server: {e}");
         return 1;
     }

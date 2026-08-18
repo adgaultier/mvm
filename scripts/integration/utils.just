@@ -83,7 +83,7 @@ _serve:
     rm -rf "$MVM_DATA_DIR"
     mkdir -p "$MVM_DATA_DIR"
 
-    "$MVM" serve --addr "127.0.0.1:$PORT" >/dev/null 2>&1 &
+    "$MVM" serve --port "$PORT" >/dev/null 2>&1 &
     echo $! > "{{RUNTIME}}/daemon.pid"
     for _ in $(seq 1 50); do
         curl -sf "$MVM_HOST/health" >/dev/null 2>&1 && break

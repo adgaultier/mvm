@@ -20,7 +20,7 @@ _default:
 # Run every section against ONE shared daemon: `_serve` boots it once, the
 # loop sources each section script in this shell, and `trap cleanup EXIT`
 # tears it down at the end. Individual section recipes below boot their own
-# daemon for standalone `just <name>` runs.
+# run all test suite
 all: _serve
     #!/usr/bin/env bash
     set -euo pipefail

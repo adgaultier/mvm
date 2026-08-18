@@ -16,7 +16,12 @@ Assume API clients may be malicious or compromised.
 Add authentication and authorization to the HTTP API.
 Prefer a Unix-domain socket with appropriate filesystem permissions for local operation.
 Require authentication when binding TCP beyond loopback.
-Reject or warn on --addr 0.0.0.0 / non-loopback listeners without an explicit authentication mechanism.
+
+> **MOOT (2026-08-18).** `mvm serve --port <PORT>` always binds `127.0.0.1`
+> (only the port is configurable), so a non-loopback control plane isn't a
+> config a user can reach for in the first place, not just one that's
+> rejected at startup.
+
 Introduce sandbox ownership/tenant identity and enforce authorization on every sandbox operation.
 Define capabilities such as inspect, exec, start, stop, delete, mount, and network.
 Ensure an authenticated API client cannot control another user's sandbox unless explicitly authorized.
