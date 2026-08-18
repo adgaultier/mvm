@@ -14,6 +14,11 @@ Configuration:
     MVM_AGENT_CID=2
     MVM_AGENT_PORT=24643
     MVM_GUEST_TOKEN=<vm-scoped-token>
+    NOTIFICATION_CMD=<shell command template, `$MSG` = notification JSON>
+
+At boot, `NOTIFICATION_CMD` is registered with the control plane over the
+Agent API (`set_notification_command`) so the host can deliver async
+notifications later. If it is unset or empty, nothing is registered.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import json
 import os
 import socket
 import struct
+import sys
 from typing import Any
 
 from fastmcp import FastMCP
@@ -30,6 +36,7 @@ from fastmcp import FastMCP
 AGENT_CID = int(os.environ.get("MVM_AGENT_CID", "2"))
 AGENT_PORT = int(os.environ.get("MVM_AGENT_PORT", "24643"))
 TOKEN = os.environ.get("MVM_GUEST_TOKEN", "")
+NOTIFICATION_CMD = os.environ.get("NOTIFICATION_CMD", "")
 
 MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 
@@ -234,9 +241,12 @@ class AgentClient:
 
         result = response.get("result")
 
-        if not isinstance(result, dict):
+        # The result is a JSON value, not necessarily an object: `inspect` and
+        # `stop` return the sandbox record, but `test_notification` returns an
+        # array of per-kind delivery reports.
+        if not isinstance(result, (dict, list)):
             raise AgentProtocolError(
-                "Agent response result must be an object"
+                "Agent response result must be a JSON object or array"
             )
 
         return result
@@ -277,11 +287,49 @@ def delegate(timeout: int, command: list[str]) -> dict:
     )
 
 
+@mcp.tool()
+def test_notification() -> dict:
+    """Ask the control plane to fire one mock notification of every kind at
+    this agent, through the real delivery path (its registered
+    NOTIFICATION_CMD, `$MSG` substituted). Returns a per-kind report
+    (kind/ok/exit_code/output/error) — a good end-to-end check of a fresh
+    agent's notification wiring."""
+    return client.request("test_notification")
+
+
+def register_notification_command() -> None:
+    """Register the `NOTIFICATION_CMD` template with the control plane so it
+    can deliver async notifications to this agent (`$MSG` is substituted with
+    the serialized notification JSON at delivery time). Best-effort: an unset
+    or empty variable is a no-op, and a registration failure only warns —
+    the MCP server still boots."""
+    if not NOTIFICATION_CMD:
+        return
+
+    try:
+        client.request(
+            "set_notification_command",
+            params={
+                "command": NOTIFICATION_CMD,
+            },
+        )
+        print(
+            "mvm-agent-mcp: registered notification command with control plane"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"mvm-agent-mcp: failed to register notification command: {exc}",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     if not TOKEN:
         raise SystemExit(
             "mvm-agent-mcp: MVM_GUEST_TOKEN is not set"
         )
+
+    register_notification_command()
 
     mcp.run()
 

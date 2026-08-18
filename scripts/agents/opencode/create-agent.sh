@@ -12,7 +12,7 @@ SDBX_NAME=$1
   -v "$(pwd)/conf:/home/agent/opencode:rw" \
   -e OPENCODE_CONFIG_DIR=/home/agent/opencode \
   -e OPENCODE_DB=/home/agent/opencode/sessions.db \
-  agent:latest opencode -c
+  opencode-agent:latest opencode -c --port 4096
 
 echo "$SDBX_NAME sdbx spawend with opencode agent"
 

@@ -1,7 +1,7 @@
 //! Host side of the vsock-based Agent API: one accept loop per sandbox,
 //! serving the guest's `mvm-agent-mcp` bridge. Each guest connection carries
 //! exactly one request and one response, length-prefixed JSON
-//! (`protocol::encode_frame`) — see `mvm_common::api::{AgentApiRequest,
+//! (`protocol::encode_frame`) — see `mvm_common::agent_api::{AgentApiRequest,
 //! AgentApiResponse}`.
 //!
 //! Unlike the old HTTP surface, identity here comes from two independent
@@ -15,7 +15,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
-use mvm_common::api::{AgentApiRequest, AgentApiResponse, DelegateRequest};
+use mvm_common::agent_api::{
+    AgentApiRequest, AgentApiResponse, DelegateRequest, SetNotificationCommandParams,
+};
 use mvm_common::protocol::{encode_frame, MAX_FRAME};
 use mvm_common::Principal;
 
@@ -120,6 +122,19 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
         "delegate" => match serde_json::from_value::<DelegateRequest>(request.params.clone()) {
             Ok(_) => AgentApiResponse::err("delegate is not yet implemented"),
             Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
+        },
+        "set_notification_command" => {
+            match serde_json::from_value::<SetNotificationCommandParams>(request.params.clone()) {
+                Ok(params) => match manager.set_notification_command(vm_id.as_str(), params.command) {
+                    Ok(sandbox) => to_response(&sandbox),
+                    Err(e) => AgentApiResponse::err(e.to_string()),
+                },
+                Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
+            }
+        }
+        "test_notification" => match manager.test_notification(vm_id.as_str()).await {
+            Ok(deliveries) => to_response(&deliveries),
+            Err(e) => AgentApiResponse::err(e.to_string()),
         },
         other => AgentApiResponse::err(format!("unknown method '{other}'")),
     }

@@ -85,6 +85,25 @@ prebuilt images.
 
 ## Done
 
+- **Async notifications: wire types, registration, control-plane delivery**
+  (2026-08-18) — `Notification` + `NotificationFrom`/`NotificationKind`/
+  `TerminationReason` (`from`/`type` kebab-case wire shape per
+  `doc/agentic/notes.md`) live in the feature-gated `mvm_common::agent_api`
+  module. Each sandbox records an `async_cmd` template
+  (`Sandbox.notification_command`, `$MSG` = the serialized notification);
+  the agent registers it over the Agent API
+  (`set_notification_command`), and the guest-side bridge does so at boot by
+  reading `NOTIFICATION_CMD` (unset/empty = no-op; see `server.py`). The
+  control plane delivers by running the template as `sh -c` through `mvm
+  exec` (`Manager::deliver_notification` in the feature-gated
+  `manager/src/notifications.rs`), waiting for the Exit frame. `test_notification`
+  (Agent API method + `mvm-agent-mcp` tool) fires one mock notification of
+  every kind through the real delivery path — `agent-api.sh` now exercises
+  the full loop: agent calls `test_notification` over vsock, control plane
+  runs the registered command, all six kinds land in the guest. Still open:
+  a real dispatcher for actual lifecycle events (child TTL expiry, idle
+  restarts, parent input), the notification queue, and TTL/idle timeouts.
+
 - **Agent API: vsock transport, no more HTTP** (2026-08-18) — replaced the
   shared `--agent-addr` HTTP listener (below) with a per-sandbox vsock
   channel: the guest dials out to CID 2, port 24643
