@@ -22,8 +22,8 @@ use bytes::Bytes;
 use mvm_common::auth::constant_time_eq;
 use mvm_common::auth::{generate_token, hash_token};
 use mvm_common::{
-    protocol, DataDir, Error, LifecycleOp, Mount, Result, Sandbox, SandboxId, SandboxSpec,
-    SandboxState,
+    protocol, DataDir, Error, Mount, Result, Sandbox, SandboxId, SandboxSpec, SandboxState,
+    TimelineEvent,
 };
 #[cfg(feature = "agent-api")]
 use mvm_common::Principal;
@@ -36,8 +36,9 @@ use guestd_conn::GuestdConn;
 
 const LOG_BROADCAST_CAP: usize = 256;
 const REGISTRY_FILE: &str = "sandboxes.json";
-/// How many lifecycle latency records to keep per sandbox (newest wins).
-const MAX_LIFECYCLE_OPS: usize = 16;
+/// How many lifecycles to keep per sandbox (newest wins). Each lifecycle is
+/// one Vec of events (create/start/stop + their phases + point events).
+const MAX_LIFECYCLES: usize = 16;
 
 /// A live exec session inside one sandbox.
 struct ExecSession {
@@ -161,10 +162,8 @@ impl Manager {
 
     /// Create a sandbox (does not start it).
     pub fn create(&self, spec: SandboxSpec) -> Result<Sandbox> {
-        let mut timings = OpTimings::begin("create");
         self.validate(&spec)?;
-        timings.mark("validate");
-        let mut sandbox = {
+        let sandbox = {
             // Generate + insert under the write lock so two concurrent
             // unnamed creates can't both pick the same generated name.
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
@@ -182,12 +181,7 @@ impl Manager {
             sandboxes.insert(sandbox.id.to_string(), SandboxEntry::new(sandbox.clone()));
             sandbox
         };
-        timings.mark("register");
         self.persist()?;
-        timings.mark("persist");
-        let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(sandbox.id.as_str(), op.clone());
-        sandbox.lifecycle.push(op);
         tracing::info!(sandbox = %sandbox.id, image = %sandbox.spec.image, name = %sandbox.name(), "sandbox created");
         Ok(sandbox)
     }
@@ -576,8 +570,8 @@ impl Manager {
 
         let total_ms = timings.total_ms();
         let boot_ms = timings.phase_ms("boot");
-        let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(&id, op);
+        let events = timings.finish();
+        self.push_lifecycle(&id, events);
         let sb = self.get(&id)?;
         tracing::info!(
             sandbox = %id,
@@ -604,7 +598,6 @@ impl Manager {
     }
 
     async fn stop_locked(&self, id: &str, id_or_name: &str) -> Result<Sandbox> {
-        let mut timings = OpTimings::begin("stop");
         let pid = {
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             let entry = sandboxes
@@ -619,6 +612,10 @@ impl Manager {
             // while the state still reads `running` for a moment.
             entry.info.guest_token_hash = None;
             entry.info.guest_token_created_at = None;
+            // Boot/readiness signals are lifecycle-scoped: a stopped VM must
+            // re-declare them on its next boot.
+            entry.info.booted_at = None;
+            entry.info.ready_at = None;
             entry.info.pid
         };
 
@@ -626,12 +623,15 @@ impl Manager {
         if let Some(pid) = pid {
             terminate(pid, true).await;
         }
-        timings.mark("terminate");
 
         self.persist()?;
-        timings.mark("persist");
-        let op = timings.finish(chrono::Utc::now());
-        self.push_lifecycle(id, op);
+        self.push_timeline_event(
+            id,
+            TimelineEvent {
+                event: "stop".to_string(),
+                at: chrono::Utc::now(),
+            },
+        );
         self.get(id)
     }
 
@@ -707,7 +707,40 @@ impl Manager {
             entry.info.clone()
         };
         self.persist()?;
-        tracing::info!(sandbox = %id, "notification delivery command registered");
+        Ok(info)
+    }
+
+    /// Mark a sandbox as having reached steady state (workload boot and
+    /// runtime init complete). Called by the agent itself over the Agent
+    /// API `ready` method. Idempotency: a sandbox already marked ready is
+    /// rejected, and readiness is rejected if the sandbox is no longer
+    /// running (or has never booted). Cleared on stop/exit so a restarted
+    /// VM must re-declare.
+    #[cfg(feature = "agent-api")]
+    pub async fn mark_ready(&self, id_or_name: &str) -> Result<Sandbox> {
+        let id = self.resolve(id_or_name)?;
+        let info = {
+            let mut sandboxes = self.inner.sandboxes.write().unwrap();
+            let entry = sandboxes
+                .get_mut(&id)
+                .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
+            if !entry.info.state.is_alive() {
+                return Err(Error::InvalidState("sandbox is not running".into()));
+            }
+            if entry.info.ready_at.is_some() {
+                return Err(Error::InvalidState("sandbox already marked ready".into()));
+            }
+            entry.info.ready_at = Some(chrono::Utc::now());
+            entry.info.clone()
+        };
+        self.persist()?;
+        self.push_timeline_event(
+            &id,
+            TimelineEvent {
+                event: "agent_ready".to_string(),
+                at: chrono::Utc::now(),
+            },
+        );
         Ok(info)
     }
 
@@ -1037,6 +1070,10 @@ impl Manager {
             }
             entry.info.guest_token_hash = None;
             entry.info.guest_token_created_at = None;
+            // Boot/readiness signals are lifecycle-scoped: cleared on exit so a
+            // restarted VM starts with a clean readiness state.
+            entry.info.booted_at = None;
+            entry.info.ready_at = None;
             entry.info.state = if entry.stop_requested {
                 SandboxState::Stopped
             } else if status.is_none() {
@@ -1227,6 +1264,12 @@ impl Manager {
             }
             Ready { workload_pid } => {
                 tracing::info!(sandbox = %id, workload_pid, "guestd ready");
+                // Infrastructure boot is complete (seccomp, mounts, network,
+                // workload spawned, vsock control channel up). Applies to
+                // every sandbox, not just agent-backed ones.
+                if let Some(entry) = self.inner.sandboxes.write().unwrap().get_mut(id) {
+                    entry.info.booted_at = Some(chrono::Utc::now());
+                }
             }
             WorkloadExit { code } => {
                 tracing::info!(sandbox = %id, code, "workload exited");
@@ -1306,15 +1349,28 @@ impl Manager {
         Ok(())
     }
 
-    /// Record a finished lifecycle operation on a sandbox, keeping the history
-    /// bounded (oldest entries are dropped).
-    fn push_lifecycle(&self, id: &str, op: LifecycleOp) {
+    /// Record a completed lifecycle op's events as a new timeline entry,
+    /// keeping the history bounded (oldest entries are dropped).
+    fn push_lifecycle(&self, id: &str, events: Vec<TimelineEvent>) {
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
         if let Some(entry) = sandboxes.get_mut(id) {
-            entry.info.lifecycle.push(op);
-            let n = entry.info.lifecycle.len();
-            if n > MAX_LIFECYCLE_OPS {
-                entry.info.lifecycle.drain(0..n - MAX_LIFECYCLE_OPS);
+            entry.info.timeline.push(events);
+            let n = entry.info.timeline.len();
+            if n > MAX_LIFECYCLES {
+                entry.info.timeline.drain(0..n - MAX_LIFECYCLES);
+            }
+        }
+    }
+
+    /// Append a point-in-time event (agent_ready, stop) to the sandbox's
+    /// most recent lifecycle entry. If there is no lifecycle yet (shouldn't
+    /// happen — these signals come during/after a start), the event is
+    /// dropped silently.
+    fn push_timeline_event(&self, id: &str, event: TimelineEvent) {
+        let mut sandboxes = self.inner.sandboxes.write().unwrap();
+        if let Some(entry) = sandboxes.get_mut(id) {
+            if let Some(last) = entry.info.timeline.last_mut() {
+                last.push(event);
             }
         }
     }
@@ -1327,48 +1383,87 @@ impl SandboxEntry {
 }
 
 /// Accumulates wall-time phases of one lifecycle operation, for the TUI's
-/// latency flamegraph. `begin` stamps the operation start; each `mark` closes
-/// the previous phase and opens the next; `finish` produces the record.
+/// unified timeline. `begin` stamps the operation start; each `mark` records
+/// the absolute timestamp of the phase boundary; `finish` produces the list of
+/// `TimelineEvent`s (the op start, each `<phase>_start`/`<phase>_stop` pair,
+/// and the op stop). Events are already in chronological order.
 struct OpTimings {
     op: &'static str,
-    started: std::time::Instant,
-    last: std::time::Instant,
-    phases: Vec<(String, u64)>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    /// (phase_name, start_ts, stop_ts), in execution order.
+    phases: Vec<(&'static str, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    last_phase: Option<(&'static str, chrono::DateTime<chrono::Utc>)>,
 }
 
 impl OpTimings {
     fn begin(op: &'static str) -> Self {
-        let now = std::time::Instant::now();
         Self {
             op,
-            started: now,
-            last: now,
+            started_at: chrono::Utc::now(),
             phases: Vec::new(),
+            last_phase: None,
         }
     }
 
     fn mark(&mut self, name: &'static str) {
-        let now = std::time::Instant::now();
-        let ms = now.saturating_duration_since(self.last).as_millis() as u64;
-        self.phases.push((name.to_string(), ms));
-        self.last = now;
+        let now = chrono::Utc::now();
+        if let Some((prev_name, prev_start)) = self.last_phase.take() {
+            self.phases.push((prev_name, prev_start, now));
+        }
+        self.last_phase = Some((name, now));
     }
 
     fn total_ms(&self) -> u64 {
-        self.started.elapsed().as_millis() as u64
+        chrono::Utc::now()
+            .signed_duration_since(self.started_at)
+            .num_milliseconds()
+            .max(0) as u64
     }
 
     fn phase_ms(&self, name: &str) -> Option<u64> {
-        self.phases.iter().find(|(n, _)| n == name).map(|(_, ms)| *ms)
+        // Check completed phases first.
+        if let Some((_, start, end)) = self.phases.iter().find(|(n, _, _)| *n == name) {
+            return Some(end.signed_duration_since(*start).num_milliseconds().max(0) as u64);
+        }
+        // Check the currently-open phase (marked but not yet closed).
+        if let Some((n, start)) = &self.last_phase {
+            if *n == name {
+                return Some(
+                    chrono::Utc::now()
+                        .signed_duration_since(*start)
+                        .num_milliseconds()
+                        .max(0) as u64,
+                );
+            }
+        }
+        None
     }
 
-    fn finish(self, at: chrono::DateTime<chrono::Utc>) -> LifecycleOp {
-        LifecycleOp {
-            op: self.op.to_string(),
-            at,
-            total_ms: self.started.elapsed().as_millis() as u64,
-            phases: self.phases,
+    fn finish(mut self) -> Vec<TimelineEvent> {
+        // Close the currently-open phase, if any.
+        if let Some((name, start)) = self.last_phase.take() {
+            self.phases.push((name, start, chrono::Utc::now()));
         }
+
+        let mut events = vec![TimelineEvent {
+            event: format!("{}_start", self.op),
+            at: self.started_at,
+        }];
+        for (name, start, end) in &self.phases {
+            events.push(TimelineEvent {
+                event: format!("{name}_start"),
+                at: *start,
+            });
+            events.push(TimelineEvent {
+                event: format!("{name}_stop"),
+                at: *end,
+            });
+        }
+        events.push(TimelineEvent {
+            event: format!("{}_stop", self.op),
+            at: chrono::Utc::now(),
+        });
+        events
     }
 }
 
@@ -1477,26 +1572,41 @@ mod tests {
     }
 
     #[test]
-    fn op_timings_record_phases_and_total() {
+    fn op_timings_record_phases_and_events() {
         let mut t = OpTimings::begin("create");
         std::thread::sleep(std::time::Duration::from_millis(5));
         t.mark("validate");
         std::thread::sleep(std::time::Duration::from_millis(5));
         t.mark("persist");
-        assert_eq!(t.phase_ms("validate"), Some(t.phases[0].1));
+        assert!(t.phase_ms("validate").is_some());
         assert!(t.phase_ms("persist").is_some());
         assert!(t.phase_ms("nope").is_none());
 
-        let op = t.finish(chrono::Utc::now());
-        assert_eq!(op.op, "create");
-        assert!(op.total_ms >= 10, "total={}", op.total_ms);
-        assert_eq!(op.phases.len(), 2);
-        assert_eq!(op.phases[0].0, "validate");
-        assert_eq!(op.phases[1].0, "persist");
-        // The recorded phases are sequential slices; their sum must not
-        // exceed the total (there is at most an untimed tail).
-        let sum: u64 = op.phases.iter().map(|(_, ms)| *ms).sum();
-        assert!(sum <= op.total_ms + 2, "sum={sum} total={}", op.total_ms);
+        let total_ms = t.total_ms();
+        assert!(total_ms >= 10, "total={total_ms}");
+
+        let events = t.finish();
+        // create_start, validate_start, validate_stop, persist_start,
+        // persist_stop, create_stop = 6 events.
+        assert_eq!(events.len(), 6);
+        assert_eq!(events[0].event, "create_start");
+        assert_eq!(events[1].event, "validate_start");
+        assert_eq!(events[2].event, "validate_stop");
+        assert_eq!(events[3].event, "persist_start");
+        assert_eq!(events[4].event, "persist_stop");
+        assert_eq!(events[5].event, "create_stop");
+
+        // Events are in chronological order.
+        for w in events.windows(2) {
+            assert!(w[0].at <= w[1].at, "out of order: {} then {}", w[0].event, w[1].event);
+        }
+
+        // Phase duration: validate_stop - validate_start >= 5ms.
+        let validate_dur = events[2]
+            .at
+            .signed_duration_since(events[1].at)
+            .num_milliseconds();
+        assert!(validate_dur >= 5, "validate_dur={validate_dur}");
     }
 
     #[test]

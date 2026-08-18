@@ -126,12 +126,22 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
         "set_notification_command" => {
             match serde_json::from_value::<SetNotificationCommandParams>(request.params.clone()) {
                 Ok(params) => match manager.set_notification_command(vm_id.as_str(), params.command) {
-                    Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
+                    Ok(sandbox) => {
+                        tracing::info!(agent = %vm_id, "notification delivery command registered");
+                        to_response(&AgentInfo::from(&sandbox))
+                    }
                     Err(e) => AgentApiResponse::err(e.to_string()),
                 },
                 Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
             }
         }
+        "ready" => match manager.mark_ready(vm_id.as_str()).await {
+            Ok(sandbox) => {
+                tracing::info!(agent = %vm_id, "agent marked ready");
+                to_response(&AgentInfo::from(&sandbox))
+            }
+            Err(e) => AgentApiResponse::err(e.to_string()),
+        },
         "test_notification" => match manager.test_notification(vm_id.as_str()).await {
             Ok(deliveries) => to_response(&deliveries),
             Err(e) => AgentApiResponse::err(e.to_string()),

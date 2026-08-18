@@ -1,4 +1,4 @@
-here := justfile_directory()
+agent_repo := justfile_directory() + '/repo'
 oci_registry := justfile_directory() + '/oci'
 mvm :=  justfile_directory() + '/../../target/release/mvm'
 
@@ -7,10 +7,29 @@ _default:
 
 build agent_name:
     @echo "> build {{agent_name}} image with podman..."
-    @podman build --no-cache -t {{agent_name}}-agent  -f {{here}}/{{agent_name}}/Dockerfile . 1>/dev/null
+    @podman build --no-cache -t {{agent_name}}-agent  -f {{agent_repo}}/{{agent_name}}/Dockerfile . 1>/dev/null
     @echo "> save image as oci..."
     @podman save --format oci-archive -o {{oci_registry}}/{{agent_name}}-agent.oci {{agent_name}}-agent
     @echo "> agent oci saved!\n  use 'mvm load {{oci_registry}}/{{agent_name}}-agent.oci ...' to import image in mvm "
+
+load_img agent_name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "> load into {{agent_name}}-agent:latest"
+
+    if {{mvm}} images | grep -q "{{agent_name}}-agent:latest"; then
+        echo "image {{agent_name}}-agent:latest exists. Removing dependant sandboxes"
+        for id in $({{mvm}} ps -a | grep "{{agent_name}}-agent:latest" | awk '{print $1}'); do
+            {{mvm}} rm "$id"
+        done
+        echo "removing {{agent_name}}-agent:latest"
+        {{mvm}} rmi "{{agent_name}}-agent:latest"
+    fi
+    echo "registering {{agent_name}}-agent:latest"
+    {{mvm}} load \
+        --name "{{agent_name}}-agent" \
+        "{{oci_registry}}/{{agent_name}}-agent.oci"
 
 create agent_name sbx_name:  
     #!/usr/bin/env bash
@@ -20,5 +39,10 @@ create agent_name sbx_name:
     if !  {{mvm}} images 1>/dev/null 2>&1;then
         echo "mvm daemon isnt running,run with mvm serve" && exit 1
     fi
-    {{here}}/{{agent_name}}/create-agent.sh {{sbx_name}}
+    {{agent_repo}}/{{agent_name}}/create-agent.sh {{sbx_name}}
+
+recreate agent_name sbx_name:
+    @just build {{agent_name}} 
+    @just load_img {{agent_name}}
+    @just create {{agent_name}} {{sbx_name}}
 

@@ -235,6 +235,16 @@ pub struct AgentInfo {
     pub name: Option<String>,
     /// Lifecycle status (created/running/stopped/exited/failed).
     pub state: SandboxState,
+    /// When infrastructure boot completed (guestd `Ready`: seccomp, mounts,
+    /// network, workload spawned, vsock control channel up). `None` until
+    /// the guestd signals readiness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the workload declared itself ready (steady state: boot and
+    /// runtime init complete). `None` until the agent calls the Agent API
+    /// `ready` method — stays `None` for sandboxes that never call it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
     /// vCPUs allocated to the sandbox.
     pub vcpus: u8,
     /// RAM in MiB allocated to the sandbox.
@@ -258,6 +268,8 @@ impl From<&Sandbox> for AgentInfo {
             id: sandbox.id.clone(),
             name: sandbox.spec.name.clone(),
             state: sandbox.state,
+            booted_at: sandbox.booted_at,
+            ready_at: sandbox.ready_at,
             vcpus: sandbox.spec.vcpus,
             ram_mib: sandbox.spec.ram_mib,
             parent: None,
@@ -326,7 +338,7 @@ mod tests {
     fn agent_info_redacts_control_plane_fields() {
         use std::collections::BTreeMap;
 
-        use crate::spec::{LifecycleOp, Mount, NetworkMode, Sandbox, SandboxSpec, SecurityProfile};
+        use crate::spec::{Mount, NetworkMode, Sandbox, SandboxSpec, SecurityProfile, TimelineEvent};
 
         let spec = SandboxSpec {
             name: Some("agent-1".to_string()),
@@ -352,14 +364,14 @@ mod tests {
         };
         let mut sandbox = Sandbox::new(spec);
         sandbox.state = SandboxState::Running;
+        sandbox.booted_at = Some(chrono::Utc::now());
+        sandbox.ready_at = Some(chrono::Utc::now());
         sandbox.pid = Some(1234);
         sandbox.gvproxy_pid = Some(5678);
-        sandbox.lifecycle.push(LifecycleOp {
-            op: "start".to_string(),
+        sandbox.timeline.push(vec![TimelineEvent {
+            event: "start_start".to_string(),
             at: chrono::Utc::now(),
-            total_ms: 10,
-            phases: vec![],
-        });
+        }]);
         sandbox.guest_token_hash = Some("deadbeef".to_string());
 
         let json = serde_json::to_value(AgentInfo::from(&sandbox)).unwrap();
@@ -367,14 +379,16 @@ mod tests {
         for key in obj.keys() {
             assert!(
                 [
-                    "id", "name", "state", "vcpus", "ram_mib", "parent", "children",
-                    "capabilities", "budget",
+                    "id", "name", "state", "booted_at", "ready_at", "vcpus", "ram_mib",
+                    "parent", "children", "capabilities", "budget",
                 ]
                 .contains(&key.as_str()),
                 "unexpected field in AgentInfo: {key}"
             );
         }
         assert_eq!(json["state"], serde_json::json!("running"));
+        assert!(json["booted_at"].is_string());
+        assert!(json["ready_at"].is_string());
         assert_eq!(json["vcpus"], 2);
         assert_eq!(json["ram_mib"], 1024);
         assert_eq!(json["name"], serde_json::json!("agent-1"));

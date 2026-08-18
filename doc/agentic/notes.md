@@ -20,14 +20,39 @@ notifications:
 ```
 all notification are passed asyncronously to running agents via via `mvm exec <async_cmd>`
 
-c
+
  > curl http://localhost:`<local-agent-server-port>`/`<agent_async_notif_endpoint>`/`<msg>`
 and msg is serialized notification 
 for opencode:
 ```
 SID=$(curl -s localhost:4096/session | jq -r 'sort_by(.time.updated) | reverse | map(select(.parentID == null)) | .[0].id'); curl -sS -X POST "localhost:4096/session/$SID/prompt_async" -H 'Content-Type: application/json' -d "$(jq -n --arg text "$MSG" '{parts:[{type:"text",text:$text}]}')"
 ```
-
+````
+                    Message
+                       │
+            ┌──────────┴──────────┐
+            │                     │
+        lifecycle               task
+            │                     │
+      ┌─────┴──────┐        ┌─────┴─────┐
+      │            │        │           │
+    ttl          restart   input      result
+    terminated             request     completed
+┌─────────────────────────────┐
+│ Agent Data Plane            │
+│                             │
+│ A2A                         │
+│   ├── task                  │
+│   ├── task update           │
+│   ├── input-required        │
+│   └── artifact/result       │
+│                             │
+│ Platform Events             │
+│   ├── ttl-warning           │
+│   ├── restarted             │
+│   └── terminated            │
+└─────────────────────────────┘
+```
 ## IDLE AGENTS
 if an agent is idle, then :
 - incoming notifications are put into a queue
@@ -51,3 +76,24 @@ if an agent is idle, then :
 - agent AND children are (SIGKILLED BY  CONTROL PLANE) `mvm stop && mvm rm`
 
 
+
+## RUNTIME 
+### vercel FX
+➜  dist git:(feat/mcp-inspect-agent-limitation) ✗ time fx ask "Reply with exactly: FX  TEST OK"
+𝒇x v0.0.3 · Run /help for commands
+
+┃ Reply with exactly: FX  TEST OK
+
+  FX  TEST OK
+fx ask "Reply with exactly: FX  TEST OK"  
+>> 0,04s user 0,06s system 1% cpu 5,886 total
+
+###
+➜  dist git:(feat/mcp-inspect-agent-limitation) ✗ time opencode run  "Reply with exactly: opencode TEST OK"
+
+> build · deepseek-v4-flash-free
+
+opencode TEST OK
+
+opencode run "Reply with exactly: opencode TEST OK" 
+>>  2,61s user 0,69s system 65% cpu 5,019 total
