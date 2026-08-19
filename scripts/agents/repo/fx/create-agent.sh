@@ -5,7 +5,8 @@ cd "$(dirname "$0")"
 MVM="$(pwd)/../../../../target/release/mvm"
 SDBX_NAME=$1
 
-
+source .env
+: "${AI_GATEWAY_API_KEY:?AI_GATEWAY_API_KEY is not set in .env}"
 "$MVM" create -it --net gvproxy \
   --name "$SDBX_NAME" \
   --cpus 2  -m 2048 \
@@ -13,6 +14,5 @@ SDBX_NAME=$1
   -e AI_GATEWAY_API_KEY=$AI_GATEWAY_API_KEY \
   fx-agent:latest bash -c "fx ask 'register yourself' && fx -c"
 
-echo "$SDBX_NAME sdbx spawned with fx agent"
-
+echo "$SDBX_NAME sdbx created with fx agent"
 

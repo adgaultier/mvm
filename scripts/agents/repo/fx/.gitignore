@@ -5,3 +5,5 @@ history*
 usage*
 settings.lock
 usage.lock
+memories.json
+.env

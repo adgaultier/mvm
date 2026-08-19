@@ -14,5 +14,5 @@ SDBX_NAME=$1
   -e OPENCODE_DB=/home/agent/opencode/sessions.db \
   opencode-agent:latest bash -c "opencode run 'register yourself' && opencode -c --port 4096"
 
-echo "$SDBX_NAME sdbx spawned with opencode agent"
+echo "$SDBX_NAME sdbx created with opencode agent"
 
