@@ -24,13 +24,13 @@ notifications later. If it is unset or empty, nothing is registered.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import struct
-import sys
 from typing import Any
 
-from fastmcp import FastMCP
+from mcp.server import MCPServer
 
 
 AGENT_CID = int(os.environ.get("MVM_AGENT_CID", "2"))
@@ -43,8 +43,9 @@ MAX_MESSAGE_SIZE = 4 * 1024 * 1024
 CONNECT_TIMEOUT = 5.0
 IO_TIMEOUT = 30.0
 
+logger = logging.getLogger("mvm-agent-mcp")
 
-mcp = FastMCP("mvm-agent")
+mcp = MCPServer("mvm-agent")
 
 
 class AgentTransportError(RuntimeError):
@@ -264,19 +265,19 @@ client = AgentClient(
 
 
 @mcp.tool()
-def inspect() -> dict:
+def inspect() -> dict[str, Any]:
     """Inspect the calling sandbox: its own mvm record."""
     return client.request("inspect")
 
 
 @mcp.tool()
-def stop() -> dict:
+def stop() -> dict[str, Any]:
     """Stop the calling sandbox's VM."""
     return client.request("stop")
 
 
 @mcp.tool()
-def delegate(timeout: int, command: list[str]) -> dict:
+def delegate(timeout: int, command: list[str]) -> dict[str, Any]:
     """Launch a child clone of this sandbox."""
     return client.request(
         "delegate",
@@ -288,7 +289,7 @@ def delegate(timeout: int, command: list[str]) -> dict:
 
 
 @mcp.tool()
-def test_notification() -> dict:
+def test_notification() -> dict[str, Any]:
     """Ask the control plane to fire one mock notification of every kind at
     this agent, through the real delivery path (its registered
     NOTIFICATION_CMD, `$MSG` substituted). Returns a per-kind report
@@ -297,7 +298,15 @@ def test_notification() -> dict:
     return {"notifications": client.request("test_notification")}
 
 
-def register_notification_command() -> None:
+@mcp.tool()
+def register() -> dict[str, Any]:
+    """Register yourself to the host. You MUST call this once after startup
+    initialization is complete."""
+    _register_notification_command()
+    return client.request("ready")
+
+
+def _register_notification_command() -> None:
     """Register the `NOTIFICATION_CMD` template with the control plane so it
     can deliver async notifications to this agent (`$MSG` is substituted with
     the serialized notification JSON at delivery time). Best-effort: an unset
@@ -313,14 +322,9 @@ def register_notification_command() -> None:
                 "command": NOTIFICATION_CMD,
             },
         )
-        print(
-            "mvm-agent-mcp: registered notification command with control plane"
-        )
+        logger.info("registered notification command with control plane")
     except Exception as exc:  # noqa: BLE001
-        print(
-            f"mvm-agent-mcp: failed to register notification command: {exc}",
-            file=sys.stderr,
-        )
+        logger.error("failed to register notification command: %s", exc)
 
 
 def main() -> None:
@@ -329,7 +333,7 @@ def main() -> None:
             "mvm-agent-mcp: MVM_GUEST_TOKEN is not set"
         )
 
-    register_notification_command()
+    
 
     mcp.run()
 

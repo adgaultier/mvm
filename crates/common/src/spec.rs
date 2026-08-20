@@ -228,21 +228,23 @@ impl std::fmt::Display for SandboxState {
     }
 }
 
-/// One measured lifecycle operation (create / start / stop) with its phase
-/// timings. Recorded by the manager for the TUI's latency flamegraph.
+/// One timestamped event in a sandbox's unified timeline. Everything the TUI
+/// renders — lifecycle ops with their phases, and discrete events (guestd
+/// connecting, agent ready) — is recorded as the same type, sorted by `at`.
+///
+/// Conventions for `event`:
+/// - `create`, `start`, `stop`: lifecycle operation begins.
+/// - `<phase>_start` / `<phase>_stop` (e.g. `rootfs_start`, `rootfs_stop`):
+///   the boundaries of a timed phase within an op. The bar segment between
+///   them is colored by the phase name.
+/// - `agent_ready`, etc.: point-in-time signals with no duration; rendered as
+///   markers on the bar at their timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LifecycleOp {
-    /// Operation name: "create" | "start" | "stop".
-    pub op: String,
-    /// When the operation ran.
+pub struct TimelineEvent {
+    /// What happened (see type-level doc for naming conventions).
+    pub event: String,
+    /// When it happened.
     pub at: chrono::DateTime<chrono::Utc>,
-    /// Wall time of the whole operation, in milliseconds.
-    pub total_ms: u64,
-    /// Phase name -> milliseconds, in execution order. Phases are the
-    /// operation's steps; they may not sum exactly to `total_ms` (a small
-    /// untimed tail), so renderers scale them against `total_ms`.
-    #[serde(default)]
-    pub phases: Vec<(String, u64)>,
 }
 
 /// Full record of a sandbox as tracked by the manager.
@@ -261,16 +263,33 @@ pub struct Sandbox {
     pub gvproxy_pid: Option<u32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the guestd signalled `Ready` (infrastructure boot complete:
+    /// seccomp, mounts, network, workload spawned, vsock control channel
+    /// up). Set from `GuestdEvent::Ready`; cleared on stop/exit. Applies to
+    /// every sandbox, not just agent-backed ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the workload declared itself ready (steady state reached: boot
+    /// and runtime init complete). Set by the Agent API `ready` method,
+    /// called by the guest's `mvm-agent-mcp` bridge; cleared on stop/exit.
+    /// Stays `None` for sandboxes that never call it (the control plane
+    /// can't infer application readiness for an arbitrary workload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Last size the console workload pty was resized to (cols, rows). The
     /// spec's `tty_size` is the create-time initial; this tracks live
     /// `/console/resize` calls and is None until one arrives.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
-    /// Latency breakdowns of recent lifecycle operations, oldest first
-    /// (bounded by the manager). The TUI renders these as flamegraph bars.
+    /// Per-lifecycle timeline of timestamped events. Each inner Vec is one
+    /// lifecycle's events (start, stop) in chronological order — op
+    /// boundaries (`<op>_start`/`<op>_stop`), phase boundaries
+    /// (`<phase>_start`/`<phase>_stop`), and point-in-time signals
+    /// (`agent_ready`). The TUI renders one bar per lifecycle from the
+    /// timestamps directly. Bounded by the manager.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lifecycle: Vec<LifecycleOp>,
+    pub timeline: Vec<Vec<TimelineEvent>>,
     /// Shell command template the control plane runs with `mvm exec` to
     /// deliver async notifications to this agent (the spec's `async_cmd`;
     /// `$MSG` is the placeholder for the serialized `Notification` JSON).
@@ -303,9 +322,11 @@ impl Sandbox {
             gvproxy_pid: None,
             created_at: chrono::Utc::now(),
             started_at: None,
+            booted_at: None,
+            ready_at: None,
             finished_at: None,
             console_size: None,
-            lifecycle: Vec::new(),
+            timeline: Vec::new(),
             #[cfg(feature = "agent-api")]
             notification_command: None,
             guest_token_hash: None,

@@ -1,0 +1,13 @@
+{
+  "mcp": {
+     "mvm-agent": {
+      "type": "local",
+      "command": ["bash", "-c" ,"/home/agent/.local/bin/uvx  mvm-agent-mcp  >> /tmp/mcp.log 2>&1"],
+      "enabled": true,
+      "environment": {
+        "NOTIFICATION_CMD": "",
+        "MVM_GUEST_TOKEN": "{env:MVM_GUEST_TOKEN}"
+      }
+    }
+  }
+}

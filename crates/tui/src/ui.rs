@@ -57,8 +57,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Span::raw(" quit  "),
         Span::styled("tab", Style::default().fg(Color::Yellow)),
         Span::raw(" switch  "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(" move  "),
         Span::styled("s", Style::default().fg(Color::Yellow)),
         Span::raw(" start  "),
         Span::styled("x", Style::default().fg(Color::Yellow)),
@@ -130,6 +128,11 @@ fn draw_confirm_delete(f: &mut Frame, app: &App) {
         Span::raw("  "),
         Span::styled(
             "y",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" / "),
+        Span::styled(
+            "enter",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" delete  "),
@@ -243,7 +246,7 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
     match &ins.sandbox {
         Some(sb) => {
             // Two equal panes: the field table and the lifecycle flamegraph.
-            // `tab` focuses one; j/k scroll it.
+            // `tab` focuses one; ↑/↓ scroll it.
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -305,11 +308,8 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
                     Color::DarkGray
                 }))
                 .title(" lifecycle timings ");
-            let ops = visible_lifecycle(sb);
-            let running = sb.state == mvm_common::SandboxState::Running;
             let lines = flame_lines(
-                &ops,
-                running,
+                &sb.timeline,
                 flame_area.width.saturating_sub(2) as usize,
             );
             let viewport = flame_area.height.saturating_sub(2) as usize;
@@ -324,7 +324,7 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
             let hint = Line::from(vec![
                 Span::styled("tab", Style::default().fg(Color::Yellow)),
                 Span::raw(" pane  "),
-                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
                 Span::raw(" scroll  "),
                 Span::styled("q", Style::default().fg(Color::Yellow)),
                 Span::raw(" close"),
@@ -351,55 +351,66 @@ fn draw_inspect(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Which lifecycle ops to render: the full recorded history, oldest first.
-/// Nothing is hidden — a sandbox that has been started and stopped a few times
-/// shows every op, and the pane scrolls when they don't fit.
-fn visible_lifecycle(sb: &mvm_common::Sandbox) -> Vec<&mvm_common::LifecycleOp> {
-    sb.lifecycle.iter().collect()
-}
-
-/// One `Line` per flamegraph row: a `start` immediately followed by a `stop`
-/// is collapsed onto one line (boot -> teardown side by side); everything
-/// else — `create`, or a `start` with no following `stop` (a cycle that ended
-/// by exit, or the still-running boot) — gets its own line. Each op/cycle
-/// keeps a legend line beneath it.
-fn flame_lines(
-    ops: &[&mvm_common::LifecycleOp],
-    running: bool,
-    bar_w: usize,
-) -> Vec<Line<'static>> {
+/// One `Line` per flamegraph row. Each lifecycle is a `start` boot (the only
+/// thing worth tracing): a bar spanning `start_start` → `start_stop` with its
+/// \>1ms phases laid out sequentially, a legend of those phase timings, and the
+/// point events as timestamped lines below the bar (`agent_ready`, `stop`).
+fn flame_lines(timeline: &[Vec<mvm_common::TimelineEvent>], bar_w: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    if ops.is_empty() {
+    if timeline.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no lifecycle timing recorded yet",
             Style::default().fg(Color::DarkGray),
         )));
         return lines;
     }
-    let mut i = 0;
-    while i < ops.len() {
-        let op = ops[i];
-        if op.op == "start" && ops.get(i + 1).map(|n| n.op.as_str()) == Some("stop") {
-            let stop = ops[i + 1];
-            lines.push(flame_pair_line(op, stop, bar_w));
-            lines.push(flame_pair_legend(op, stop));
-            i += 2;
+
+    for lifecycle in timeline {
+        let is_start = lifecycle
+            .first()
+            .map(|e| e.event == "start_start")
+            .unwrap_or(false);
+        if is_start {
+            lines.push(flame_bar_line(lifecycle, bar_w));
+            lines.push(flame_legend(lifecycle));
+            // Point events (agent_ready, stop) sit after the boot bar, each on
+            // its own timestamped line, in chronological order.
+            let boot_end = lifecycle
+                .iter()
+                .find(|e| e.event == "start_stop")
+                .map(|e| e.at);
+            for e in lifecycle {
+                if is_point_event(&e.event) {
+                    lines.push(point_event_line(e, boot_end));
+                }
+            }
         } else {
-            let live = running && i + 1 == ops.len() && op.op == "start";
-            lines.push(flame_bar_line(op, bar_w, live));
-            lines.push(flame_legend(op));
-            i += 1;
+            for e in lifecycle {
+                lines.push(point_event_line(e, None));
+            }
         }
     }
+
     lines
 }
 
-/// `HH:MM:SS  start  ████…████  1234ms` — timestamp left, total right; `live`
-/// appends a running marker for the current boot that has no `stop` yet.
-fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize, live: bool) -> Line<'static> {
-    let ts = op.at.format("%H:%M:%S").to_string();
-    let label = format!("{:<6}", op.op);
-    let total = format!("{:>6}ms", op.total_ms);
+/// `HH:MM:SS  start  ████████  1234ms` — the boot bar. It spans
+/// `start_start` → `start_stop`; phases that lasted > 1ms are laid out
+/// sequentially (each ≥ 1 column so narrow phases stay visible).
+fn flame_bar_line(events: &[mvm_common::TimelineEvent], width: usize) -> Line<'static> {
+    let start = events.first().expect("lifecycle has events");
+    let ts = start.at.format("%H:%M:%S").to_string();
+    let label = format!("{:<6}", "start");
+
+    let boot_end = events
+        .iter()
+        .find(|e| e.event == "start_stop")
+        .map(|e| e.at)
+        .unwrap_or(start.at);
+    let span_ms = (boot_end.timestamp_millis() - start.at.timestamp_millis()).max(1) as f64;
+    let total_ms = span_ms as u64;
+    let total = format!("{:>6}ms", total_ms);
+
     let bar_w = width.saturating_sub(ts.len() + label.len() + total.len() + 3);
 
     let mut spans = vec![
@@ -407,127 +418,108 @@ fn flame_bar_line(op: &mvm_common::LifecycleOp, width: usize, live: bool) -> Lin
         Span::raw(" "),
         Span::styled(label, Style::default().fg(Color::Gray)),
     ];
-    spans.extend(bar_spans(op, bar_w));
+    spans.extend(bar_segments(events, bar_w));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(total, Style::default().fg(Color::Gray)));
-    if live {
-        spans.push(Span::styled(" ▶ running", Style::default().fg(Color::Green)));
-    }
     Line::from(spans)
 }
 
-/// `HH:MM:SS  start ████…█ 1234ms   stop ████ 300ms` — the boot and teardown
-/// of one lifecycle cycle side by side, each bar scaled to its own total.
-fn flame_pair_line(
-    start: &mvm_common::LifecycleOp,
-    stop: &mvm_common::LifecycleOp,
-    width: usize,
-) -> Line<'static> {
-    let ts = start.at.format("%H:%M:%S").to_string();
-    let start_label = format!("{:<6}", "start");
-    let stop_label = format!("{:<6}", "stop");
-    let start_total = format!("{:>6}ms", start.total_ms);
-    let stop_total = format!("{:>6}ms", stop.total_ms);
-    let fixed = ts.len()
-        + 1
-        + start_label.len()
-        + 1
-        + start_total.len()
-        + 3
-        + stop_label.len()
-        + 1
-        + stop_total.len();
-    let rest = width.saturating_sub(fixed);
-    let start_cols = rest / 2;
-    let stop_cols = rest - start_cols;
-
-    let mut spans = vec![
-        Span::styled(ts, Style::default().fg(Color::DarkGray)),
-        Span::raw(" "),
-        Span::styled(start_label, Style::default().fg(Color::Gray)),
-    ];
-    spans.extend(bar_spans(start, start_cols));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(start_total, Style::default().fg(Color::Gray)));
-    spans.push(Span::raw("   "));
-    spans.push(Span::styled(stop_label, Style::default().fg(Color::Gray)));
-    spans.extend(bar_spans(stop, stop_cols));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(stop_total, Style::default().fg(Color::Gray)));
-    Line::from(spans)
-}
-
-/// The colored phase segments of one bar (scaled to `cols`), plus a faint
-/// `░` tail for whatever the phases don't account for.
-fn bar_spans(op: &mvm_common::LifecycleOp, cols: usize) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
+/// The >1ms phases of one boot bar, laid out sequentially: each phase gets a
+/// segment proportional to its duration relative to the drawn phases (each at
+/// least one column so narrow phases stay visible), and the last phase absorbs
+/// the rounding remainder so the bar always fills exactly `cols`. Phases ≤ 1ms
+/// (absent from the legend) are skipped.
+fn bar_segments(events: &[mvm_common::TimelineEvent], cols: usize) -> Vec<Span<'static>> {
     if cols == 0 {
-        return spans;
+        return Vec::new();
     }
-    let total_ms = op.total_ms.max(1);
-    let mut remaining = cols;
-    if op.phases.is_empty() {
-        spans.push(Span::styled(
-            "█".repeat(cols),
-            Style::default().fg(Color::DarkGray),
-        ));
-        remaining = 0;
-    } else {
-        for (i, (name, ms)) in op.phases.iter().enumerate() {
-            // The last phase absorbs whatever the rounded earlier ones left,
-            // so the bar always sums to the full width.
-            let c = if i + 1 == op.phases.len() {
-                remaining
-            } else {
-                ((*ms as f64 / total_ms as f64) * cols as f64).round() as usize
-            };
-            let c = c.min(remaining);
-            if c > 0 {
-                spans.push(Span::styled(
-                    "█".repeat(c),
-                    Style::default().fg(phase_color(name)),
-                ));
-                remaining -= c;
+
+    // Collect (phase, duration) for every phase that lasted > 1ms, in
+    // chronological order.
+    let mut phase_starts: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
+    let mut phases: Vec<(&str, u64)> = Vec::new();
+    for e in events {
+        let Some(phase) = phase_of(&e.event) else {
+            continue;
+        };
+        if e.event.ends_with("_start") {
+            phase_starts.insert(phase, e.at);
+        } else if let Some(start) = phase_starts.remove(phase) {
+            let us = (e.at - start).num_microseconds().unwrap_or(0).max(0);
+            let ms = (us as f64 / 1000.0).round() as u64;
+            if ms > 1 {
+                phases.push((phase, ms));
             }
         }
     }
-    if remaining > 0 {
-        spans.push(Span::styled(
-            "░".repeat(remaining),
-            Style::default().fg(Color::DarkGray),
-        ));
+
+    let total_ms: u64 = phases.iter().map(|(_, ms)| ms).sum();
+    let mut cells: Vec<Option<Color>> = vec![None; cols];
+    let mut col = 0usize;
+    for (i, (phase, ms)) in phases.iter().enumerate() {
+        if col >= cols {
+            break;
+        }
+        let last = i + 1 == phases.len();
+        let width = if last {
+            cols - col
+        } else {
+            let want = ((*ms as f64 / total_ms as f64) * cols as f64).round() as usize;
+            want.max(1).min(cols - col)
+        };
+        for cell in cells.iter_mut().skip(col).take(width) {
+            *cell = Some(phase_color(phase));
+        }
+        col += width;
+    }
+
+    // Group consecutive blanks and colored runs into spans.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut i = 0;
+    while i < cols {
+        match cells[i] {
+            None => {
+                let mut j = i;
+                while j < cols && cells[j].is_none() {
+                    j += 1;
+                }
+                spans.push(Span::raw(" ".repeat(j - i)));
+                i = j;
+            }
+            Some(color) => {
+                let mut j = i;
+                while j < cols && cells[j] == Some(color) {
+                    j += 1;
+                }
+                spans.push(Span::styled("█".repeat(j - i), Style::default().fg(color)));
+                i = j;
+            }
+        }
     }
     spans
 }
 
-fn flame_pair_legend(
-    start: &mvm_common::LifecycleOp,
-    stop: &mvm_common::LifecycleOp,
-) -> Line<'static> {
+/// One legend line per boot bar: the ms timing of every phase that lasted
+/// > 1ms. Phases that didn't reach 1ms are not worth reporting.
+fn flame_legend(events: &[mvm_common::TimelineEvent]) -> Line<'static> {
     let mut spans = vec![Span::raw("   ")];
-    let start_shown: Vec<_> = start.phases.iter().filter(|(_, ms)| *ms > 0).collect();
-    let stop_shown: Vec<_> = stop.phases.iter().filter(|(_, ms)| *ms > 0).collect();
-    if start_shown.is_empty() && stop_shown.is_empty() {
-        spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
-        return Line::from(spans);
+    let mut phase_starts: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
+    let mut phase_durs: Vec<(&str, u64)> = Vec::new();
+    for e in events {
+        let Some(phase) = phase_of(&e.event) else {
+            continue;
+        };
+        if e.event.ends_with("_start") {
+            phase_starts.insert(phase, e.at);
+        } else if let Some(start) = phase_starts.remove(phase) {
+            let us = (e.at - start).num_microseconds().unwrap_or(0).max(0);
+            let ms = (us as f64 / 1000.0).round() as u64;
+            phase_durs.push((phase, ms));
+        }
     }
-    for (name, ms) in start_shown.iter() {
-        spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
-        spans.push(Span::raw(format!(" {name}={ms}ms  ")));
-    }
-    if !start_shown.is_empty() && !stop_shown.is_empty() {
-        spans.push(Span::raw("│  "));
-    }
-    for (name, ms) in stop_shown.iter() {
-        spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
-        spans.push(Span::raw(format!(" {name}={ms}ms  ")));
-    }
-    Line::from(spans)
-}
-
-fn flame_legend(op: &mvm_common::LifecycleOp) -> Line<'static> {
-    let mut spans = vec![Span::raw("   ")];
-    let shown: Vec<_> = op.phases.iter().filter(|(_, ms)| *ms > 0).collect();
+    let shown: Vec<_> = phase_durs.into_iter().filter(|(_, ms)| *ms > 1).collect();
     if shown.is_empty() {
         spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
     } else {
@@ -537,6 +529,64 @@ fn flame_legend(op: &mvm_common::LifecycleOp) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+/// A timestamped line for a point event (`agent_ready`, `stop`) below the
+/// boot bar. For `agent_ready`, the time elapsed since `start_stop`
+/// (`boot_end`) is shown as `+Nms`.
+fn point_event_line(
+    e: &mvm_common::TimelineEvent,
+    boot_end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Line<'static> {
+    let ts = e.at.format("%H:%M:%S").to_string();
+    let label = match e.event.as_str() {
+        "agent_ready" => "✓ agent_ready".to_string(),
+        other => other.to_string(),
+    };
+    let mut spans = vec![
+        Span::styled(ts, Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(label, Style::default().fg(event_color(&e.event))),
+    ];
+    if e.event == "agent_ready" {
+        if let Some(boot_end) = boot_end {
+            let after_ms = e.at.signed_duration_since(boot_end).num_milliseconds().max(0) as u64;
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("+{after_ms}ms"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Whether an event is a point-in-time signal (`agent_ready`, `stop`) rather
+/// than a phase boundary.
+fn is_point_event(name: &str) -> bool {
+    !name.ends_with("_start") && !name.ends_with("_stop")
+}
+
+/// The phase name of a boundary event (`rootfs_start` → "rootfs"), or `None`
+/// for point-in-time events. The root span (`start`) is excluded: it defines
+/// the bar itself (`start_start` → `start_stop`) and is never drawn as a
+/// segment nor listed in the legend.
+fn phase_of(name: &str) -> Option<&str> {
+    let phase = name
+        .strip_suffix("_start")
+        .or_else(|| name.strip_suffix("_stop"))?;
+    if phase == "start" {
+        return None;
+    }
+    Some(phase)
+}
+
+/// Color for a point event's label.
+fn event_color(name: &str) -> Color {
+    match name {
+        "agent_ready" => Color::Cyan,
+        _ => Color::Gray,
+    }
 }
 
 /// A fixed color per phase *name*, so `rootfs` is always the same color in
@@ -644,6 +694,8 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
         ),
         ("CREATED", ts(Some(sb.created_at))),
         ("STARTED", ts(sb.started_at)),
+        ("BOOTED", ts(sb.booted_at)),
+        ("READY", ts(sb.ready_at)),
         ("FINISHED", ts(sb.finished_at)),
         ("IMAGE", spec.image.clone()),
         ("COMMAND", command),
@@ -785,115 +837,170 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_common::{LifecycleOp, Sandbox, SandboxSpec, SandboxState};
+    use mvm_common::TimelineEvent;
 
-    fn op(name: &str, at_seconds: i64) -> LifecycleOp {
-        LifecycleOp {
-            op: name.to_string(),
-            at: chrono::DateTime::from_timestamp(at_seconds, 0).unwrap(),
-            total_ms: 1000,
-            phases: vec![("a".to_string(), 400), ("b".to_string(), 600)],
+    fn ts(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(seconds, 0).unwrap()
+    }
+
+    fn ev(event: &str, at_seconds: i64) -> TimelineEvent {
+        TimelineEvent {
+            event: event.to_string(),
+            at: ts(at_seconds),
         }
     }
 
-    fn sandbox() -> Sandbox {
-        Sandbox::new(SandboxSpec {
-            name: Some("web".into()),
-            image: "alpine".into(),
-            ..Default::default()
-        })
-    }
-
-    #[test]
-    fn shows_all_recorded_ops_in_order_even_while_running() {
-        let mut sb = sandbox();
-        sb.lifecycle = vec![
-            op("create", 100),
-            op("start", 200),
-            op("stop", 300),
-            op("start", 400),
-        ];
-        sb.state = SandboxState::Running;
-        let seen = visible_lifecycle(&sb);
-        let ops: Vec<&str> = seen.iter().map(|o| o.op.as_str()).collect();
-        // Nothing is hidden between start/stop cycles: the whole history stays.
-        assert_eq!(ops, vec!["create", "start", "stop", "start"]);
-    }
-
-    #[test]
-    fn phase_color_is_fixed_per_name_not_rank() {
-        // The same name gets the same color no matter its position.
-        assert_eq!(phase_color("boot"), phase_color("boot"));
-        assert_eq!(phase_color("persist"), phase_color("persist"));
-        // Different names differ (hand-picked palette), and a name's color
-        // never depends on how many phases precede it in a given op.
-        assert_eq!(phase_color("rootfs"), Color::Yellow);
-        assert_eq!(phase_color("guestd"), Color::Magenta);
-        assert_eq!(phase_color("boot"), Color::Red);
-        assert_eq!(phase_color("terminate"), Color::LightRed);
-        // Unknown names hash to a stable palette color.
-        assert_eq!(phase_color("future-phase"), phase_color("future-phase"));
-    }
-
-    #[test]
-    fn empty_history_renders_nothing() {
-        assert!(visible_lifecycle(&sandbox()).is_empty());
+    fn ev_ms(event: &str, at_seconds: i64, millis: i64) -> TimelineEvent {
+        TimelineEvent {
+            event: event.to_string(),
+            at: ts(at_seconds) + chrono::Duration::milliseconds(millis),
+        }
     }
 
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    #[test]
-    fn start_stop_cycle_pairs_on_one_line() {
-        let mut sb = sandbox();
-        sb.lifecycle = vec![
-            op("create", 100),
-            op("start", 200),
-            op("stop", 300),
-            op("start", 400),
-        ];
-        let ops = visible_lifecycle(&sb);
-        let lines = flame_lines(&ops, true, 60);
-        // create (bar+legend), start+stop pair (bar+legend), live start (bar+legend)
-        assert_eq!(lines.len(), 6);
+    fn bar_colors(line: &Line) -> Vec<Color> {
+        line.spans.iter().filter_map(|s| s.style.fg).collect()
+    }
 
-        // The paired row carries both labels and both totals.
-        let pair = line_text(&lines[2]);
-        assert!(pair.contains("start"), "pair row: {pair}");
-        assert!(pair.contains("stop"), "pair row: {pair}");
-        assert!(pair.contains("1000ms"), "pair row: {pair}");
-
-        // The live (still running) start gets the running marker.
-        let live = line_text(&lines[4]);
-        assert!(live.contains("▶"), "live row: {live}");
+    /// A realistic start lifecycle: start_start, rootfs (1s) and boot (2s)
+    /// phases, start_stop, then the point events (agent_ready, stop) appended
+    /// by the manager.
+    fn start_lifecycle(start_t: i64) -> Vec<TimelineEvent> {
+        vec![
+            ev("start_start", start_t),
+            ev("rootfs_start", start_t),
+            ev("rootfs_stop", start_t + 1), // +1s
+            ev("boot_start", start_t + 1),
+            ev("boot_stop", start_t + 3), // +3s
+            ev("start_stop", start_t + 3),
+        ]
     }
 
     #[test]
-    fn legend_skips_zero_ms_phases() {
-        let op = LifecycleOp {
-            op: "start".into(),
-            at: chrono::DateTime::from_timestamp(100, 0).unwrap(),
-            total_ms: 1000,
-            phases: vec![
-                ("rootfs".to_string(), 800),
-                ("gvproxy".to_string(), 0), // not on gvproxy net: 0ms, hide it
-                ("boot".to_string(), 200),
-            ],
-        };
-        let legend = line_text(&flame_legend(&op));
-        assert!(legend.contains("rootfs=800ms"), "legend: {legend}");
-        assert!(legend.contains("boot=200ms"), "legend: {legend}");
-        assert!(!legend.contains("gvproxy"), "0ms phase leaked: {legend}");
+    fn empty_timeline_renders_nothing() {
+        let lines = flame_lines(&[], 80);
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains("no lifecycle"));
+    }
 
-        let stop = LifecycleOp {
-            op: "stop".into(),
-            at: chrono::DateTime::from_timestamp(200, 0).unwrap(),
-            total_ms: 1,
-            phases: vec![("terminate".to_string(), 1), ("persist".to_string(), 0)],
-        };
-        let pair = line_text(&flame_pair_legend(&op, &stop));
-        assert!(pair.contains("terminate=1ms"), "pair: {pair}");
-        assert!(!pair.contains("persist"), "0ms phase leaked in pair: {pair}");
+    #[test]
+    fn bar_spans_start_to_start_stop_ignoring_point_events() {
+        // agent_ready and stop sit after start_stop: they must not move the
+        // bar's total (regression: the total used to equal the agent_ready
+        // offset).
+        let mut lifecycle = start_lifecycle(100);
+        lifecycle.push(ev("agent_ready", 110)); // +10s after boot start
+        lifecycle.push(ev("stop", 120));
+        let bar = line_text(&flame_bar_line(&lifecycle, 80));
+        assert!(bar.contains("3000ms"), "bar: {bar}");
+        assert!(!bar.contains("10000ms"), "total leaked agent_ready: {bar}");
+    }
+
+    #[test]
+    fn legend_lists_only_phases_over_1ms() {
+        // rootfs: 1s, guestd: 0ms (below the floor), boot: 2s.
+        let lifecycle = vec![
+            ev("start_start", 200),
+            ev("rootfs_start", 200),
+            ev("rootfs_stop", 201), // +1s
+            ev("guestd_start", 201),
+            ev("guestd_stop", 201), // +0ms
+            ev("boot_start", 201),
+            ev("boot_stop", 203), // +2s
+            ev("start_stop", 203),
+        ];
+        let legend = line_text(&flame_legend(&lifecycle));
+        assert!(legend.contains("rootfs=1000ms"), "legend: {legend}");
+        assert!(legend.contains("boot=2000ms"), "legend: {legend}");
+        assert!(!legend.contains("guestd"), "sub-1ms phase leaked: {legend}");
+    }
+
+    #[test]
+    fn point_events_render_below_the_bar() {
+        // agent_ready sits 3s after start_stop; stop is a plain timestamp.
+        let mut lifecycle = start_lifecycle(300);
+        lifecycle.push(ev("agent_ready", 306));
+        lifecycle.push(ev("stop", 400));
+        let lines = flame_lines(&[lifecycle], 80);
+        // bar + legend + agent_ready + stop = 4 lines.
+        assert_eq!(lines.len(), 4);
+        let ready = line_text(&lines[2]);
+        assert!(ready.contains("✓ agent_ready"), "ready: {ready}");
+        assert!(ready.contains("+3000ms"), "ready: {ready}");
+        let stop = line_text(&lines[3]);
+        assert!(stop.contains("stop"), "stop: {stop}");
+        assert!(!stop.contains("+"), "stop has no duration: {stop}");
+    }
+
+    #[test]
+    fn root_span_start_is_never_a_segment_or_legend_entry() {
+        // start_start/start_stop define the bar; "start" must not be drawn as
+        // a segment (it would overwrite every other phase) nor listed in the
+        // legend as start=... (it is the total, which is already on the bar).
+        let lifecycle = vec![
+            ev("start_start", 400),
+            ev("rootfs_start", 400),
+            ev("rootfs_stop", 401), // +1s
+            ev("boot_start", 401),
+            ev("boot_stop", 403), // +2s
+            ev("start_stop", 403),
+        ];
+        let bar = line_text(&flame_bar_line(&lifecycle, 40));
+        assert!(bar.contains("3000ms"), "bar: {bar}");
+        // Both sub-phases survive: the root span must not have painted over them.
+        let colors = bar_colors(&flame_bar_line(&lifecycle, 40));
+        assert!(colors.contains(&Color::Yellow), "rootfs painted over: {colors:?}");
+        assert!(colors.contains(&Color::Red), "boot painted over: {colors:?}");
+        let legend = line_text(&flame_legend(&lifecycle));
+        assert!(!legend.contains("start="), "root span in legend: {legend}");
+        assert!(legend.contains("rootfs=1000ms"), "legend: {legend}");
+        assert!(legend.contains("boot=2000ms"), "legend: {legend}");
+    }
+
+    #[test]
+    fn narrow_phase_still_gets_a_sliver() {
+        // ports lasts 2ms inside a 3s boot: far too narrow for a proportional
+        // column, but it's in the legend (>1ms) so it still gets a segment —
+        // laid out sequentially it's at least one column wide, right after
+        // rootfs, so it stays visible.
+        let lifecycle = vec![
+            ev("start_start", 500),
+            ev("rootfs_start", 500),
+            ev("rootfs_stop", 501), // +1s
+            ev("ports_start", 501),
+            ev_ms("ports_stop", 501, 2), // +2ms
+            ev_ms("boot_start", 501, 2),
+            ev("boot_stop", 503), // +2s
+            ev("start_stop", 503),
+        ];
+        let colors = bar_colors(&flame_bar_line(&lifecycle, 40));
+        assert!(colors.contains(&Color::LightBlue), "ports sliver missing: {colors:?}");
+    }
+
+    #[test]
+    fn bar_always_fills_the_full_width() {
+        // Two boot bars with very different totals (3s vs 30s) must render the
+        // bar at the same fixed width — no trailing gap, no right-alignment.
+        let short = start_lifecycle(100);
+        let mut long = start_lifecycle(200);
+        long.push(ev("agent_ready", 230));
+        long.push(ev("stop", 300));
+        let a = line_text(&flame_bar_line(&short, 80));
+        let b = line_text(&flame_bar_line(&long, 80));
+        // Everything before the first "ms" (the total) is the fixed-width bar.
+        let bar_a = a.split("ms").next().unwrap().to_string();
+        let bar_b = b.split("ms").next().unwrap().to_string();
+        assert_eq!(bar_a.len(), bar_b.len(), "bars differ in length\nA: {a}\nB: {b}");
+    }
+
+    #[test]
+    fn phase_color_is_fixed_per_name_not_rank() {
+        assert_eq!(phase_color("rootfs"), Color::Yellow);
+        assert_eq!(phase_color("guestd"), Color::Magenta);
+        assert_eq!(phase_color("boot"), Color::Red);
+        assert_eq!(phase_color("future-phase"), phase_color("future-phase"));
     }
 }
