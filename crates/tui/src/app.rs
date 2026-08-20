@@ -66,11 +66,11 @@ pub struct Inspect {
     /// Fetched record; None while loading or after an error.
     pub sandbox: Option<Sandbox>,
     pub error: Option<String>,
-    /// Rows scrolled past in the info pane (j/k).
+    /// Rows scrolled past in the info pane.
     pub scroll: u16,
     /// Rows scrolled past in the flamegraph pane.
     pub flame_scroll: u16,
-    /// Which pane j/k scroll; `tab` switches.
+    /// Which pane ↑/↓ scroll; `tab` switches.
     pub pane: InspectPane,
 }
 

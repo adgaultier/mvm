@@ -289,7 +289,10 @@ impl Manager {
         // 1. Writable rootfs. The `copy` driver duplicates the whole image
         // rootfs here — for large images that's seconds of blocking file IO,
         // so it runs on a blocking thread rather than the async runtime
-        // (which must keep serving the control plane while a VM boots).
+        // (which must keep serving the control plane while a VM boots). The
+        // phase starts before the prep so the copy time lands in `rootfs`,
+        // not in the unattributed gap after `start_start`.
+        timings.mark("rootfs");
         let prepared = tokio::task::spawn_blocking({
             let storage = self.inner.storage.clone();
             let sandbox_id = sandbox_id.clone();
@@ -298,7 +301,6 @@ impl Manager {
         })
         .await
         .map_err(|e| Error::Runtime(format!("rootfs prepare task panicked: {e}")))??;
-        timings.mark("rootfs");
         tracing::debug!(
             sandbox = %id,
             driver = %self.inner.storage.name(),
@@ -493,7 +495,6 @@ impl Manager {
             entry.info.guest_token_created_at = guest_token.map(|_| chrono::Utc::now());
         }
         self.persist()?;
-        timings.mark("persist");
 
         // 9. Guestd control channel accept task.
         if let Some(listener) = guestd_listener {
@@ -545,7 +546,10 @@ impl Manager {
         // 11. Exec-readiness barrier: don't return "running" until the guest
         // guestd has connected (or the sandbox died / never had a guestd).
         // Callers that exec immediately after start would otherwise race the
-        // guestd.s vsock connection.
+        // guestd.s vsock connection. The wait below is the `boot` phase
+        // (shim spawn -> guestd control channel up); the registry write at
+        // step 8 is not timed as its own phase.
+        timings.mark("boot");
         if guestd_socket.is_some() {
             const AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
             let deadline = std::time::Instant::now() + AGENT_WAIT;
@@ -566,7 +570,6 @@ impl Manager {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
-        timings.mark("boot");
 
         let total_ms = timings.total_ms();
         let boot_ms = timings.phase_ms("boot");

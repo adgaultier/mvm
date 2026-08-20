@@ -126,8 +126,8 @@ fn run_loop(
                         };
                         app.table_state.select(Some(0));
                     }
-                    KeyCode::Char('j') | KeyCode::Down => app.next(),
-                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                    KeyCode::Down => app.next(),
+                    KeyCode::Up => app.previous(),
                     KeyCode::Char('g') => app.table_state.select(Some(0)),
                     KeyCode::Char('s') => {
                         if let Some(sb) = app.selected_sandbox() {
@@ -183,7 +183,7 @@ fn run_loop(
     }
 }
 
-/// Keys for the delete confirmation. Only `y` goes through; anything that is
+/// Keys for the delete confirmation. `y`/Enter go through; anything that is
 /// not an explicit yes or no leaves the prompt up rather than guessing.
 fn handle_confirm_key(
     app: &mut App,
@@ -192,7 +192,7 @@ fn handle_confirm_key(
     tx: &mpsc::Sender<PollUpdate>,
 ) {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
             let Some(confirm) = app.confirm_delete.take() else {
                 return;
             };
@@ -235,14 +235,14 @@ fn handle_inspect_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 InspectPane::Flame => InspectPane::Info,
             };
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        KeyCode::Down => {
             let s = match ins.pane {
                 InspectPane::Info => &mut ins.scroll,
                 InspectPane::Flame => &mut ins.flame_scroll,
             };
             *s = s.saturating_add(1);
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        KeyCode::Up => {
             let s = match ins.pane {
                 InspectPane::Info => &mut ins.scroll,
                 InspectPane::Flame => &mut ins.flame_scroll,
