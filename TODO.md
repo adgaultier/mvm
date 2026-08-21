@@ -85,6 +85,12 @@ prebuilt images.
 
 ## Done
 
+- **Sandbox rlimits inherit the host's** (2026-08-21) — the shim captures the
+  daemon's own limits via getrlimit(2) (all 16 Linux resources; macOS subset)
+  and passes them to `krun_set_rlimits` (`KrunContext::set_rlimits` in
+  runtime/src/vm.rs, numeric-ID wire format — see AGENTS.md). init.krun
+  applies them before exec'ing the guestd, so workload and exec sessions
+  start with host-equal limits by plain fork/exec inheritance.
 - **Async notifications: wire types, registration, control-plane delivery**
   (2026-08-18) — `Notification` + `NotificationFrom`/`NotificationKind`/
   `TerminationReason` (`from`/`type` kebab-case wire shape per

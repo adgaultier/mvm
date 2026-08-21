@@ -282,6 +282,13 @@ pub struct Sandbox {
     /// `/console/resize` calls and is None until one arrives.
     #[serde(default)]
     pub console_size: Option<(u16, u16)>,
+    /// File-descriptor rlimit (soft, hard) the VM booted with. The daemon
+    /// captures its own limit at start — the shim forwards the daemon's
+    /// rlimits verbatim via `krun_set_rlimits` — so this is exactly what the
+    /// guest's init, the workload and every exec session run under.
+    /// `u64::MAX` means unlimited; None until the first start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nofile: Option<(u64, u64)>,
     /// Per-lifecycle timeline of timestamped events. Each inner Vec is one
     /// lifecycle's events (start, stop) in chronological order — op
     /// boundaries (`<op>_start`/`<op>_stop`), phase boundaries
@@ -326,6 +333,7 @@ impl Sandbox {
             ready_at: None,
             finished_at: None,
             console_size: None,
+            nofile: None,
             timeline: Vec::new(),
             #[cfg(feature = "agent-api")]
             notification_command: None,

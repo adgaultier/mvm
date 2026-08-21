@@ -67,6 +67,79 @@ impl ShimConfig {
     }
 }
 
+/// Host rlimit resources forwarded to the guest as
+/// `(Linux guest resource id, host-side libc constant)`. The first element
+/// is the *guest's* enum position and must never be taken from the host
+/// constant's value: on macOS the numbering differs entirely (and some
+/// resources don't exist there at all).
+#[cfg(target_os = "linux")]
+const HOST_RLIMITS: [(u32, u32); 16] = [
+    (0, libc::RLIMIT_CPU),
+    (1, libc::RLIMIT_FSIZE),
+    (2, libc::RLIMIT_DATA),
+    (3, libc::RLIMIT_STACK),
+    (4, libc::RLIMIT_CORE),
+    (5, libc::RLIMIT_RSS),
+    (6, libc::RLIMIT_NPROC),
+    (7, libc::RLIMIT_NOFILE),
+    (8, libc::RLIMIT_MEMLOCK),
+    (9, libc::RLIMIT_AS),
+    (10, libc::RLIMIT_LOCKS),
+    (11, libc::RLIMIT_SIGPENDING),
+    (12, libc::RLIMIT_MSGQUEUE),
+    (13, libc::RLIMIT_NICE),
+    (14, libc::RLIMIT_RTPRIO),
+    (15, libc::RLIMIT_RTTIME),
+];
+#[cfg(target_os = "macos")]
+const HOST_RLIMITS: [(u32, libc::c_int); 10] = [
+    (0, libc::RLIMIT_CPU),
+    (1, libc::RLIMIT_FSIZE),
+    (2, libc::RLIMIT_DATA),
+    (3, libc::RLIMIT_STACK),
+    (4, libc::RLIMIT_CORE),
+    (5, libc::RLIMIT_RSS),
+    (6, libc::RLIMIT_NPROC),
+    (7, libc::RLIMIT_NOFILE),
+    (8, libc::RLIMIT_MEMLOCK),
+    (9, libc::RLIMIT_AS),
+];
+
+/// One `KRUN_RLIMITS` entry: `"ID=CUR:MAX"` with numeric fields — the
+/// guest's `/init.krun` runs bare `strtoull` over all three. `RLIM_INFINITY`
+/// becomes decimal `u64::MAX`, which `strtoull` reads back as `ULLONG_MAX`,
+// i.e. exactly `RLIM_INFINITY`.
+fn rlimit_entry(linux_id: u32, cur: libc::rlim_t, max: libc::rlim_t) -> String {
+    let v = |x: libc::rlim_t| {
+        if x == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            x as u64
+        }
+    };
+    format!("{linux_id}={}:{}", v(cur), v(max))
+}
+
+/// The shim inherits the daemon's (i.e. the host's) rlimits; forward them
+/// verbatim so the guest's init — and everything it spawns: guestd,
+/// workload, exec sessions — starts with the same limits.
+fn host_rlimits() -> Vec<String> {
+    HOST_RLIMITS
+        .iter()
+        .filter_map(|&(id, res)| {
+            let mut rl = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if unsafe { libc::getrlimit(res as _, &mut rl) } == 0 {
+                Some(rlimit_entry(id, rl.rlim_cur, rl.rlim_max))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Entry point of the `__vm-shim` subcommand. Boots the VM; only returns
 /// (with an error) if the VM could not be started.
 pub fn run_shim(config: &ShimConfig) -> Result<()> {
@@ -98,6 +171,7 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
     let ctx = KrunContext::new()?;
     ctx.set_vm_config(config.vcpus, config.ram_mib)?;
     ctx.set_root(&config.rootfs)?;
+    ctx.set_rlimits(&host_rlimits())?;
 
     // Extra virtio-fs bind mounts. Tags must be unique; the guest mounts
     // them via the guestd (or they are simply visible under the tag).
@@ -235,4 +309,35 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
 
     // Diverges on success.
     ctx.start_enter()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rlimit_entry_formats_numeric_ids_and_infinity() {
+        assert_eq!(rlimit_entry(7, 1024, 4096), "7=1024:4096");
+        assert_eq!(
+            rlimit_entry(9, libc::RLIM_INFINITY, libc::RLIM_INFINITY),
+            format!("9={}:{}", u64::MAX, u64::MAX)
+        );
+        assert_eq!(
+            rlimit_entry(6, 256, libc::RLIM_INFINITY),
+            format!("6=256:{}", u64::MAX)
+        );
+    }
+
+    #[test]
+    fn host_rlimits_captures_every_listed_resource() {
+        let limits = host_rlimits();
+        assert_eq!(limits.len(), HOST_RLIMITS.len());
+        for entry in &limits {
+            let (id, rest) = entry.split_once('=').expect("ID=CUR:MAX shape");
+            id.parse::<u32>().expect("numeric resource id");
+            let (cur, max) = rest.split_once(':').expect("CUR:MAX pair");
+            cur.parse::<u64>().expect("numeric soft limit");
+            max.parse::<u64>().expect("numeric hard limit");
+        }
+    }
 }

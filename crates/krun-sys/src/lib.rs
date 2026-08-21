@@ -1,8 +1,7 @@
-//! Raw FFI bindings to libkrun (subset used by mvm).
+//! Raw FFI bindings to the subset of libkrun used by mvm.
 //!
-//! All functions mirror `/usr/include/libkrun.h`. They are unsafe: callers
-//! must pass valid null-terminated strings and respect libkrun's threading
-//! rules (a context is configured and entered from a single thread/process).
+//! Signatures intentionally mirror `/usr/include/libkrun.h`.
+//! If upgrading libkrun, review this file against that header.
 
 #![allow(non_snake_case)]
 
