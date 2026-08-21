@@ -331,6 +331,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   or directory`). The CLI canonicalizes `-v` host paths (`parse_volume`), and
   `Manager::validate_mounts` rejects any relative path that still slips in via
   the API/TUI.
+- **`krun_set_rlimits` speaks numeric resource IDs.** libkrun joins the
+  entries into `KRUN_RLIMITS="…"` and `/init.krun` parses every field with
+  bare `strtoull`, so `7=1024:1024` works while the header-documented
+  `RLIMIT_NOFILE=1024:1024` fails silently ("Invalid rlimit ID", nothing set)
+  — and an *empty* var fails the same way, which is why `set_rlimits`
+  refuses empty lists. The shim forwards the daemon's own limits
+  (`host_rlimits()` in shim.rs), pairing each entry with the **Linux** enum
+  position because host constant values differ on macOS (and some resources
+  don't exist there); `RLIM_INFINITY` travels as decimal `u64::MAX`.
+  Limits land on init.krun → guestd → workload + every exec session by
+  fork/exec inheritance.
 
 
 
