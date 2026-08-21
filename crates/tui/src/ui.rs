@@ -695,7 +695,7 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
         ("CREATED", ts(Some(sb.created_at))),
         ("STARTED", ts(sb.started_at)),
         ("BOOTED", ts(sb.booted_at)),
-        ("READY", ts(sb.ready_at)),
+        ("AGENT_READY", ts(sb.ready_at)),
         ("FINISHED", ts(sb.finished_at)),
         ("IMAGE", spec.image.clone()),
         ("COMMAND", command),
