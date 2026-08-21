@@ -669,6 +669,13 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
     } else {
         spec.command.join(" ")
     };
+    let rlim = |v: u64| {
+        if v == u64::MAX {
+            "unlimited".to_string()
+        } else {
+            v.to_string()
+        }
+    };
 
     vec![
         ("ID", sb.id.to_string()),
@@ -701,6 +708,12 @@ fn inspect_rows(sb: &mvm_common::Sandbox) -> Vec<(&'static str, String)> {
         ("COMMAND", command),
         ("VCPUS", spec.vcpus.to_string()),
         ("RAM (MiB)", spec.ram_mib.to_string()),
+        (
+            "FD RLIMIT",
+            sb.nofile
+                .map(|(cur, max)| format!("{} / {}", rlim(cur), rlim(max)))
+                .unwrap_or_else(|| dash.clone()),
+        ),
         ("NETWORK", spec.network.to_string()),
         ("PORTS", join(spec.ports.clone())),
         ("MOUNTS", mounts),
@@ -1002,5 +1015,30 @@ mod tests {
         assert_eq!(phase_color("guestd"), Color::Magenta);
         assert_eq!(phase_color("boot"), Color::Red);
         assert_eq!(phase_color("future-phase"), phase_color("future-phase"));
+    }
+
+    fn sandbox() -> mvm_common::Sandbox {
+        mvm_common::Sandbox::new(mvm_common::SandboxSpec {
+            image: "alpine".into(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn inspect_shows_fd_rlimit_with_unlimited_spelled_out() {
+        let mut sb = sandbox();
+        let row = |sb: &mvm_common::Sandbox| {
+            inspect_rows(sb)
+                .into_iter()
+                .find(|(k, _)| *k == "FD RLIMIT")
+                .map(|(_, v)| v)
+                .unwrap()
+        };
+        // Never started: no limit recorded yet.
+        assert_eq!(row(&sb), "-");
+        sb.nofile = Some((1024, 524288));
+        assert_eq!(row(&sb), "1024 / 524288");
+        sb.nofile = Some((u64::MAX, u64::MAX));
+        assert_eq!(row(&sb), "unlimited / unlimited");
     }
 }
