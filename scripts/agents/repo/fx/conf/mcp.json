@@ -2,7 +2,8 @@
   "mcp": {
      "mvm-agent": {
       "type": "local",
-      "command": ["bash", "-c" ,"/home/agent/.local/bin/uvx  mvm-agent-mcp  >> /tmp/mcp.log 2>&1"],
+       "command": ["uvx","mvm-agent-mcp"],
+     "required": true,
       "enabled": true,
       "environment": {
         "NOTIFICATION_CMD": "",
