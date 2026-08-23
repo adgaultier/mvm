@@ -5,7 +5,9 @@ use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use rataflow::{Edge, Flow, Node, NodeContent, NodeRenderContext, StepEdge, Sugiyama};
+use rataflow::{
+    Edge, Flow, HandlePosition, Node, NodeContent, NodeRenderContext, StepEdge, Sugiyama,
+};
 
 pub const NODE_WIDTH: f64 = 30.0;
 pub const NODE_HEIGHT: f64 = 6.0;
@@ -190,12 +192,19 @@ impl GraphState {
         for id in &visible {
             let view = by_id[id.as_str()];
             if self.flow.node(id).is_none() {
+                // Vertical graph: edges leave the parent's bottom and enter
+                // the child's top. These must be set at creation: the
+                // `set_handles_hidden` below materializes them as the node's
+                // (hidden) handles, and `apply_layout` cannot change them
+                // afterwards.
                 let node = Node::new(
                     id.clone(),
                     (0.0, 0.0),
                     (NODE_WIDTH, NODE_HEIGHT),
                     AgentNode::from_view(view),
                 )
+                .with_source_position(HandlePosition::Bottom)
+                .with_target_position(HandlePosition::Top)
                 .with_connectable(false)
                 .with_deletable(false);
                 let _ = self.flow.add_node(node);
@@ -310,6 +319,15 @@ mod tests {
         assert_eq!(g.flow.edges().len(), 1);
         assert_eq!(g.flow.edges()[0].source, "rootaaaa");
         assert_eq!(g.flow.edges()[0].target, "childbbbb");
+
+        // vertical tree: edges leave the parent's bottom, enter the child's
+        // top (must hold even though handles are hidden — they are
+        // materialized from these positions at node creation)
+        for id in ["rootaaaa", "childbbbb"] {
+            let node = g.flow.node(id).unwrap();
+            assert_eq!(node.source_position, HandlePosition::Bottom);
+            assert_eq!(node.target_position, HandlePosition::Top);
+        }
 
         // status change flows into the node content without rebuilding
         let child2 = view_state("childbbbb", Some("rootaaaa"), SandboxState::Stopped);
