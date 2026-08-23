@@ -14,11 +14,16 @@ Configuration:
     MVM_AGENT_CID=2
     MVM_AGENT_PORT=24643
     MVM_GUEST_TOKEN=<vm-scoped-token>
-    NOTIFICATION_CMD=<shell command template, `$MSG` = notification JSON>
+    NOTIFICATION_CMD=<shell command template, `<MSG>` = notification text>
 
 At boot, `NOTIFICATION_CMD` is registered with the control plane over the
 Agent API (`set_notification_command`) so the host can deliver async
 notifications later. If it is unset or empty, nothing is registered.
+
+Delegation needs no template: `delegate` boots an interactive clone of the
+calling agent (same image/workload/env), and the delegation message is queued
+on the child as a Daddy notification, delivered through the child's own
+registered `NOTIFICATION_CMD` once the child declares `ready`.
 """
 
 from __future__ import annotations
@@ -31,7 +36,6 @@ import struct
 from typing import Any
 
 from mcp.server import MCPServer
-
 
 AGENT_CID = int(os.environ.get("MVM_AGENT_CID", "2"))
 AGENT_PORT = int(os.environ.get("MVM_AGENT_PORT", "24643"))
@@ -110,8 +114,7 @@ class VsockTransport:
 
         if size > self.max_message_size:
             raise AgentProtocolError(
-                f"message too large: {size} bytes "
-                f"(maximum {self.max_message_size})"
+                f"message too large: {size} bytes (maximum {self.max_message_size})"
             )
 
         header = struct.pack("!I", size)
@@ -120,9 +123,7 @@ class VsockTransport:
             sock.sendall(header)
             sock.sendall(payload)
         except (TimeoutError, OSError) as exc:
-            raise AgentTransportError(
-                "failed to send message to Agent"
-            ) from exc
+            raise AgentTransportError("failed to send message to Agent") from exc
 
     def recv_frame(self, sock: socket.socket) -> bytes:
         header = self._recv_exact(sock, 4)
@@ -181,9 +182,7 @@ class AgentClient:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.token:
-            raise RuntimeError(
-                "MVM_GUEST_TOKEN is not set"
-            )
+            raise RuntimeError("MVM_GUEST_TOKEN is not set")
 
         request = {
             "method": method,
@@ -198,9 +197,7 @@ class AgentClient:
                 ensure_ascii=False,
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise AgentProtocolError(
-                "failed to encode Agent request as JSON"
-            ) from exc
+            raise AgentProtocolError("failed to encode Agent request as JSON") from exc
 
         with self.transport.connect() as sock:
             self.transport.send_frame(sock, payload)
@@ -209,26 +206,18 @@ class AgentClient:
         try:
             response = json.loads(response_payload)
         except json.JSONDecodeError as exc:
-            raise AgentProtocolError(
-                "Agent returned invalid JSON"
-            ) from exc
+            raise AgentProtocolError("Agent returned invalid JSON") from exc
 
         if not isinstance(response, dict):
-            raise AgentProtocolError(
-                "Agent response must be a JSON object"
-            )
+            raise AgentProtocolError("Agent response must be a JSON object")
 
         if "ok" not in response:
-            raise AgentProtocolError(
-                "Agent response is missing 'ok'"
-            )
+            raise AgentProtocolError("Agent response is missing 'ok'")
 
         ok = response["ok"]
 
         if not isinstance(ok, bool):
-            raise AgentProtocolError(
-                "Agent response field 'ok' must be a boolean"
-            )
+            raise AgentProtocolError("Agent response field 'ok' must be a boolean")
 
         if not ok:
             error = response.get(
@@ -236,9 +225,7 @@ class AgentClient:
                 "unknown Agent error",
             )
 
-            raise RuntimeError(
-                f"mvm agent API error: {error}"
-            )
+            raise RuntimeError(f"mvm agent API error: {error}")
 
         result = response.get("result")
 
@@ -277,13 +264,16 @@ def stop() -> dict[str, Any]:
 
 
 @mcp.tool()
-def delegate(timeout: int, command: list[str]) -> dict[str, Any]:
-    """Launch a child clone of this sandbox."""
+def delegate(timeout: int, message: str) -> dict[str, Any]:
+    """Launch an interactive clone of this sandbox to work on `message`. The
+    child boots with your own workload; the message is queued on it as a Daddy
+    notification and delivered through its own NOTIFICATION_CMD once it
+    declares ready — you supply the task, never the child's command."""
     return client.request(
         "delegate",
         params={
             "timeout": timeout,
-            "command": command,
+            "message": message,
         },
     )
 
@@ -292,24 +282,24 @@ def delegate(timeout: int, command: list[str]) -> dict[str, Any]:
 def test_notification() -> dict[str, Any]:
     """Ask the control plane to fire one mock notification of every kind at
     this agent, through the real delivery path (its registered
-    NOTIFICATION_CMD, `$MSG` substituted). Returns a per-kind report
+    NOTIFICATION_CMD, `<MSG>` substituted). Returns a per-kind report
     (kind/ok/exit_code/output/error) — a good end-to-end check of a fresh
     agent's notification wiring."""
     return {"notifications": client.request("test_notification")}
 
 
-@mcp.tool()
-def register() -> dict[str, Any]:
-    """Register yourself to the host. You MUST call this once after startup
-    initialization is complete."""
-    _register_notification_command()
-    return client.request("ready")
+def _notify_agent_ready():
+    try:
+        client.request("ready")
+        logger.info("registered readiness with control plane")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("failed to register agent readiness: %s", exc)
 
 
 def _register_notification_command() -> None:
     """Register the `NOTIFICATION_CMD` template with the control plane so it
-    can deliver async notifications to this agent (`$MSG` is substituted with
-    the serialized notification JSON at delivery time). Best-effort: an unset
+    can deliver async notifications to this agent (`<MSG>` is substituted with
+    the notification's human-readable text at delivery time). Best-effort: an unset
     or empty variable is a no-op, and a registration failure only warns —
     the MCP server still boots."""
     if not NOTIFICATION_CMD:
@@ -329,12 +319,9 @@ def _register_notification_command() -> None:
 
 def main() -> None:
     if not TOKEN:
-        raise SystemExit(
-            "mvm-agent-mcp: MVM_GUEST_TOKEN is not set"
-        )
-
-    
-
+        raise SystemExit("mvm-agent-mcp: MVM_GUEST_TOKEN is not set")
+    _register_notification_command()
+    _notify_agent_ready()
     mcp.run()
 
 

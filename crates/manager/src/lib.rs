@@ -4,6 +4,8 @@
 
 #[cfg(feature = "agent-api")]
 mod agent_api;
+#[cfg(feature = "agent-api")]
+mod delegate;
 mod guestd_conn;
 pub mod console_filter;
 mod gvproxy;
@@ -695,7 +697,7 @@ impl Manager {
     }
 
     /// Register the shell command template the control plane runs with
-    /// `mvm exec` to deliver async notifications to this agent (`$MSG` is the
+    /// `mvm exec` to deliver async notifications to this agent (`<MSG>` is the
     /// placeholder for the serialized `Notification`). Called by the agent
     /// itself over the Agent API; persisted like the rest of the record.
     #[cfg(feature = "agent-api")]
@@ -744,6 +746,16 @@ impl Manager {
                 at: chrono::Utc::now(),
             },
         );
+        // Readiness is the trigger for handing the agent anything queued for
+        // it (a delegated child's Daddy task). Best effort: a delivery failure
+        // must not bounce the `ready` declaration — the queue stays intact.
+        if let Err(e) = self.flush_pending(&id).await {
+            tracing::warn!(
+                sandbox = %id,
+                error = %e,
+                "flushing pending notifications on ready failed"
+            );
+        }
         Ok(info)
     }
 
@@ -812,6 +824,41 @@ impl Manager {
         let mut out: Vec<_> = sandboxes.values().map(|e| e.info.clone()).collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
         out
+    }
+
+    /// Direct children of a sandbox — the sandboxes it delegated to
+    /// (records with `parent == id`).
+    #[cfg(feature = "agent-api")]
+    pub fn children_of(&self, id: &SandboxId) -> Vec<SandboxId> {
+        let sandboxes = self.inner.sandboxes.read().unwrap();
+        let mut children: Vec<SandboxId> = sandboxes
+            .values()
+            .filter(|e| e.info.parent.as_ref() == Some(id))
+            .map(|e| e.info.id.clone())
+            .collect();
+        children.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        children
+    }
+
+    /// Host-side projection of every sandbox as an agent — lineage, derived
+    /// status, TTL deadline, latest notification — for `GET /api/v1/agents`
+    /// (consumed by `mvm-flow`). Newest first, like `list`.
+    #[cfg(feature = "agent-api")]
+    pub fn agents(&self) -> Vec<mvm_common::agent_api::AgentView> {
+        let sandboxes = self.inner.sandboxes.read().unwrap();
+        let mut infos: Vec<&Sandbox> = sandboxes.values().map(|e| &e.info).collect();
+        infos.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        infos
+            .iter()
+            .map(|sb| {
+                let children = infos
+                    .iter()
+                    .filter(|c| c.parent.as_ref() == Some(&sb.id))
+                    .map(|c| c.id.clone())
+                    .collect();
+                mvm_common::agent_api::AgentView::new(sb, children)
+            })
+            .collect()
     }
 
     /// Read the console log backlog and optionally subscribe for live data.
@@ -1684,7 +1731,7 @@ mod tests {
             .unwrap()
             .insert(id.to_string(), SandboxEntry::new(sb));
 
-        let cmd = "curl -sS -X POST \"localhost:4096/session/$SID/prompt_async\" -d \"$MSG\"";
+        let cmd = "curl -sS -X POST \"localhost:4096/session/$SID/prompt_async\" -d \"<MSG>\"";
         let record = mgr.set_notification_command(id.as_str(), cmd.into()).unwrap();
         assert_eq!(record.notification_command.as_deref(), Some(cmd));
 
@@ -1693,6 +1740,37 @@ mod tests {
         let sandboxes = reloaded.inner.sandboxes.read().unwrap();
         let entry = sandboxes.get(id.as_str()).unwrap();
         assert_eq!(entry.info.notification_command.as_deref(), Some(cmd));
+        drop(sandboxes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(feature = "agent-api")]
+    fn pending_notifications_persist_across_reload() {
+        let dir = std::env::temp_dir().join(format!("mvm-pending-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mgr = Manager::new(DataDir::at(dir.clone())).unwrap();
+
+        let sb = Sandbox::new(SandboxSpec::default());
+        let id = sb.id.clone();
+        mgr.inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .insert(id.to_string(), SandboxEntry::new(sb));
+
+        // A queued delegation must survive a daemon restart.
+        mgr.queue_notification(
+            id.as_str(),
+            mvm_common::agent_api::Notification::input(serde_json::json!("delegated task")),
+        )
+        .unwrap();
+
+        let reloaded = Manager::new(DataDir::at(dir.clone())).unwrap();
+        let sandboxes = reloaded.inner.sandboxes.read().unwrap();
+        let entry = sandboxes.get(id.as_str()).unwrap();
+        assert_eq!(entry.info.pending_notifications.len(), 1);
         drop(sandboxes);
 
         let _ = std::fs::remove_dir_all(&dir);

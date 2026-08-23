@@ -40,6 +40,7 @@ echo "==> collecting dist/"
 mkdir -p dist
 cp target/release/mvm dist/
 cp target/release/mvm-tui dist/
+cp target/release/mvm-flow dist/
 # The static guestd replaces the host-linked one; mvm looks for it next to
 # its own binary (or via MVM_GUESTD_PATH).
 cp "target/$MUSL_TARGET/release/mvm-guestd" dist/

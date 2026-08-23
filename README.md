@@ -157,6 +157,7 @@ don't control, and the daemon refuses a dynamically linked one.
 | `mvm inspect SDBX` | full sandbox JSON |
 | `mvm clone SDBX [--fork] [FLAG…]` | new sandbox from the source's spec |
 | `mvm-tui` | live dashboard |
+| `mvm-flow SDBX` | live agent lineage graph (a sandbox and its delegated children) |
 
 
 Any command taking a `SDBX` accepts its **id, a unique id prefix, or its
@@ -220,6 +221,22 @@ snapshot is point-in-time, not crash-consistent.
 Live dashboard with sandbox and image tabs. Sandboxes can be started, stopped,
 resized (`r`), deleted (`d` with confirmation), and inspected (`i`, including
 lifecycle timing flamegraphs); images are listed only.
+
+### `mvm-flow`
+
+Live lineage graph of one agent and everything it delegated to:
+
+```console
+$ mvm-flow [--host URL] <sandbox-id|name>
+```
+
+Each node shows the agent's derived status (`ready` / `running` / `booting` /
+`stopped` / `failed`), its cpu/ram allocation and, when the delegation carried
+a timeout, a TTL countdown. Edges follow the parent link and are labelled with
+the last notification the child received. The graph is polled from
+`GET /api/v1/agents` and reconciled live; pan/zoom with mouse or `hjkl`,
+`Tab`/arrows select a node (details in the bottom bar), `f` fits the view,
+`q` quits.
 
 ## Networking
 
@@ -411,6 +428,10 @@ POST   /api/v1/sandboxes/{id}/exec                     (framed event stream)
 POST   /api/v1/sandboxes/{id}/exec/{session}/stdin[?eof=true]
 POST   /api/v1/sandboxes/{id}/exec/{session}/resize    {"cols":N,"rows":N}
 
+GET    /api/v1/agents                    (one AgentView per sandbox: derived
+                                         status, parent/children, ttl deadline,
+                                         last notification; agent-api feature)
+
 GET    /api/v1/images                    DELETE /api/v1/images/{name}
 POST   /api/v1/images/pull                             (JSON-lines progress)
 POST   /api/v1/images/load?name=…                      (body = OCI-layout .tar; JSON-lines progress)
@@ -437,8 +458,25 @@ inspect                              -> the caller's own agent info (redacted:
                                         internals like host mounts/ports/pids are
                                         never exposed)
 stop                                  -> stops the caller's own sandbox
-delegate {timeout, command}           -> not yet implemented
+delegate {timeout, message}           -> launch a child that is an interactive
+                                        clone of the caller (same workload) to
+                                        work on `message`; the message is queued
+                                        on the child as a Daddy notification and
+                                        delivered through the child's own
+                                        notification command once it declares
+                                        ready — the parent supplies data only,
+                                        never the child's command
+set_notification_command {command}    -> register the `<MSG>` shell template the
+                                        control plane runs to deliver async
+                                        notifications to this agent (`<MSG>` is
+                                        the notification rendered as
+                                        human-readable text)
+test_notification                     -> fire one mock notification of every kind
+                                        through the real delivery path
 ```
+
+The notification template is normally registered at boot by the bridge from
+the agent's `NOTIFICATION_CMD` environment variable.
 
 See `scripts/agents/mvm-agent-mcp` for the guest-side MCP bridge that speaks
 this protocol.

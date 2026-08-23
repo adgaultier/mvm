@@ -85,12 +85,93 @@ prebuilt images.
 
 ## Done
 
+- **mvm-flow mailbox + right-click context menu** (2026-08-23) — nodes show a
+  `✉ N pending` badge when the agent has queued notifications; right-clicking
+  a node (or Enter on the selected one) opens a context menu with `info` /
+  `mailbox`. `mailbox` is an email-style modal: inbox list on the left
+  (● pending / ○ delivered, timestamp, id, kind) and a reading pane on the
+  right with From/Kind/Id/Date/Status headers and the `to_text()` body;
+  scrollable, selection preserved across polls by notification id. The data
+  rides `AgentView`, which now carries `pending_notifications` (queued,
+  persisted) and `recent_notifications` (delivered history, volatile) — both
+  cloned from the sandbox record in `AgentView::new`. Left click no longer
+  opens modals; selection is purely rataflow's.
+- **Notifications delivered as human-readable text, not JSON** (2026-08-23) —
+  `<MSG>` substitution now injects `Notification::to_text()` prose
+  ("Daddy is requesting: …", "Child <id> finished (exit code 0): …", …)
+  instead of the serialized `Notification` JSON — agents read prose, the wire
+  format stays reserved for persistence and host-side views. String payloads
+  render verbatim (multi-line tasks survive), non-strings as compact JSON.
+  Single substitution point (`Manager::deliver_notification`); templates must
+  quote `<MSG>` (single quotes) because the prose contains spaces and shell
+  metacharacters — a bare `<MSG>` word-splits and breaks on `(`/`)`/`;`.
+  Docs, integration assertions and the `test_notification` probe all updated.
+- **mvm-flow node detail modal** (2026-08-23) — clicking a graph node (or
+  Enter on the selected one) opens a `Clear`-ed centered modal with the full
+  `GET /api/v1/sandboxes/{id}` record as a field table (same rows as the
+  TUI's inspect, plus agent status / parent / TTL) and state-gated
+  Start/Stop/Delete buttons (mouse-clickable and keyboard: s/x/d, tab+enter;
+  start iff not Running, stop iff Running, delete confirms y/n in-modal).
+  Modal owns keyboard+mouse while open, syncs from the 1s agents poll.
+- **Delegation redesign: interactive clone + Daddy notification**
+  (2026-08-22) — the `DELEGATION_CMD` template mechanism is gone (supersedes
+  the delegation entry below). `delegate {timeout, message}` now boots an
+  interactive *clone* of the caller (same image/workload/env, ports dropped),
+  and the message is queued on the child as a Daddy `input` notification
+  (`Sandbox.pending_notifications`, persisted). `flush_pending` drains the
+  queue through the child's own registered `NOTIFICATION_CMD` once the child
+  is running, has declared `ready` and has registered the command — both
+  `mark_ready` and `set_notification_command` trigger a flush, whichever comes
+  last. The Agent API's `set_delegation_command` was removed; integration
+  coverage: clone boot, queued task, lineage + TTL, and the full
+  ready → register → deliver loop.
+- **Template placeholder: `<MSG>` replaces `$MSG`** (2026-08-22) — hard switch
+  of `MSG_PLACEHOLDER` (used by `NOTIFICATION_CMD` delivery) from `$MSG` to
+  `<MSG>`: a `$`-form is expanded
+  by the shell that *creates* the sandbox when the template is passed via
+  `-e` ("MSG: unbound variable" or silently empty), `<MSG>` survives any
+  quoting. Substitution stays a literal string replace; the old `$MSG` form is
+  no longer recognized.
+- **Delegation without command injection: DELEGATION_CMD template**
+  (2026-08-22; superseded the same day by the interactive-clone redesign
+  above) — a delegating parent can no longer choose its child's command.
+  `DelegateRequest` is now `{timeout, message}` (data only); the child's
+  workload comes from the caller's registered `delegation_command` template —
+  the same `<MSG>` mechanism as `NOTIFICATION_CMD`: the MCP bridge registers
+  the agent's `DELEGATION_CMD` env var at boot (`set_delegation_command`,
+  mirroring `set_notification_command`), and `Manager::delegate` boots the
+  child with `sh -c <template, <MSG> = JSON-serialized message>`. Delegation
+  is refused when no template is registered. Integration coverage: template
+  registration, `<MSG>` substitution visible in the child's command, lineage +
+  TTL on `/agents`, and the no-template refusal.
+- **Integration suite: per-section counters + real delegate/vsock coverage**
+  (2026-08-21) — `just all` now resets `PASS/FAIL/SKIP` before each section
+  (one section's failure no longer re-fails every later section) and tallies
+  a grand total + failed-section list at the end. `agent-api.sh` replaces the
+  "delegate not implemented" stub check with real assertions (child created,
+  `parent` link + TTL deadline visible on `GET /api/v1/agents`).
+  `lifecycle.sh` writes `/persist-marker` itself before the restart so the
+  persistence check no longer depends on another section running first. Also
+  fixed the Agent API response close race (half-close + drain before drop,
+  see AGENTS.md) that made vsockprobe round-trips lose their reply.
+- **mvm-flow: live agent lineage graph viewer + real delegation lineage**
+  (2026-08-21) — new `crates/flow` binary (`mvm-flow <sandbox-id|name>`), a
+  rataflow/ratatui 0.30 graph of one agent and its delegated descendants,
+  polled live from the new `GET /api/v1/agents` (agent-api feature; one
+  `AgentView` per sandbox: derived status stopped/booting/running/ready/
+  failed, parent/children, TTL deadline, last notification). Lineage is now
+  real: `Sandbox.parent` + `ttl_deadline` records, the Agent API `delegate`
+  method creates the child (spec inherited, ports dropped, `delegate` label)
+  and starts it; TTL is display-only — enforcement is still open. Edge labels
+  come from a bounded per-sandbox notification history
+  (`record_notification`, newest 16). Workspace upgraded ratatui 0.29→0.30 /
+  crossterm 0.28→0.29. Plan: `doc/agentic/AGENT-FLOW.TODO.md`.
 - **Async notifications: wire types, registration, control-plane delivery**
   (2026-08-18) — `Notification` + `NotificationFrom`/`NotificationKind`/
   `TerminationReason` (`from`/`type` kebab-case wire shape per
   `doc/agentic/notes.md`) live in the feature-gated `mvm_common::agent_api`
   module. Each sandbox records an `async_cmd` template
-  (`Sandbox.notification_command`, `$MSG` = the serialized notification);
+  (`Sandbox.notification_command`, `<MSG>` = the serialized notification);
   the agent registers it over the Agent API
   (`set_notification_command`), and the guest-side bridge does so at boot by
   reading `NOTIFICATION_CMD` (unset/empty = no-op; see `server.py`). The

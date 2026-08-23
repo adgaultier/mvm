@@ -5,3 +5,6 @@ bun.lock
 sessions.db*
 
 
+# Agents related 
+workspace/*
+!workspace/.gitkeep

@@ -19,22 +19,35 @@ _default:
 
 # Run every section against ONE shared daemon: `_serve` boots it once, the
 # loop sources each section script in this shell, and `trap cleanup EXIT`
-# tears it down at the end. Individual section recipes below boot their own
-# run all test suite
+# tears it down at the end. Counters are reset between sections so one
+# section's failures don't bleed into the next section's summary; the suite
+# total is tallied separately and reported at the end.
 all: _serve
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{LIB}}"
     trap cleanup EXIT
-    rc=0
+    TOTAL_PASS=0
+    TOTAL_SKIP=0
+    TOTAL_FAIL=0
+    FAILED_SECTIONS=""
     for sh in {{justfile_directory()}}/sections/*.sh; do
         echo ""
+        PASS=0; FAIL=0; SKIP=0
         if ! source "$sh"; then
             echo "❌ section $(basename "$sh" .sh) failed"
-            rc=1
+            FAILED_SECTIONS="$FAILED_SECTIONS $(basename "$sh" .sh)"
         fi
+        TOTAL_PASS=$((TOTAL_PASS + PASS))
+        TOTAL_SKIP=$((TOTAL_SKIP + SKIP))
+        TOTAL_FAIL=$((TOTAL_FAIL + FAIL))
     done
-    [ "$rc" -eq 0 ]
+    echo ""
+    echo "== suite total: $TOTAL_PASS passed, $TOTAL_SKIP skipped, $TOTAL_FAIL failed =="
+    if [ -n "$FAILED_SECTIONS" ]; then
+        echo "failed sections:$FAILED_SECTIONS"
+    fi
+    [ "$TOTAL_FAIL" -eq 0 ]
 
 # --- sections (each boots the daemon via `_serve`, tears it down after) ------
 
