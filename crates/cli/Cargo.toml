@@ -28,4 +28,4 @@ tracing-subscriber.workspace = true
 # AGENT_API_VSOCK_PORT`). On by default; build with `--no-default-features`
 # to compile mvm without the Agent API surface.
 default = ["agent-api"]
-agent-api = ["mvm-manager/agent-api"]
+agent-api = ["mvm-manager/agent-api", "mvm-api/agent-api"]

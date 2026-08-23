@@ -16,7 +16,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
 use mvm_common::agent_api::{
-    AgentApiRequest, AgentApiResponse, AgentInfo, DelegateRequest, SetNotificationCommandParams,
+    AgentApiRequest, AgentApiResponse, AgentInfo, DelegateRequest,
+    SetNotificationCommandParams,
 };
 use mvm_common::protocol::{encode_frame, MAX_FRAME};
 use mvm_common::Principal;
@@ -98,6 +99,21 @@ async fn handle_conn(
 
     let frame = encode_frame(&response)?;
     stream.write_all(&frame).await?;
+    // Half-close our write end, then wait for the client to finish reading
+    // and close its end before we drop the socket. A hard close right after
+    // the write races libkrun's vsock bridge: the guest can see EOF before
+    // the response bytes that are still in flight, losing the frame.
+    stream.shutdown().await?;
+    let mut drain = [0u8; 256];
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match stream.read(&mut drain).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
     Ok(())
 }
 
@@ -112,7 +128,10 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
 
     match request.method.as_str() {
         "inspect" => match manager.get(vm_id.as_str()) {
-            Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
+            Ok(sandbox) => to_response(&AgentInfo::with_lineage(
+                &sandbox,
+                manager.children_of(&sandbox.id),
+            )),
             Err(e) => AgentApiResponse::err(e.to_string()),
         },
         "stop" => match manager.stop(vm_id.as_str()).await {
@@ -120,7 +139,13 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
             Err(e) => AgentApiResponse::err(e.to_string()),
         },
         "delegate" => match serde_json::from_value::<DelegateRequest>(request.params.clone()) {
-            Ok(_) => AgentApiResponse::err("delegate is not yet implemented"),
+            Ok(req) => match manager.delegate(&vm_id, req).await {
+                Ok(child) => to_response(&AgentInfo::with_lineage(
+                    &child,
+                    manager.children_of(&child.id),
+                )),
+                Err(e) => AgentApiResponse::err(e.to_string()),
+            },
             Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
         },
         "set_notification_command" => {
@@ -128,6 +153,16 @@ async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest
                 Ok(params) => match manager.set_notification_command(vm_id.as_str(), params.command) {
                     Ok(sandbox) => {
                         tracing::info!(agent = %vm_id, "notification delivery command registered");
+                        // Race guard: if the agent declared `ready` before
+                        // registering the command, `mark_ready`'s flush found
+                        // nothing to drain — do it now.
+                        if let Err(e) = manager.flush_pending(vm_id.as_str()).await {
+                            tracing::warn!(
+                                agent = %vm_id,
+                                error = %e,
+                                "flushing pending notifications failed"
+                            );
+                        }
                         to_response(&AgentInfo::from(&sandbox))
                     }
                     Err(e) => AgentApiResponse::err(e.to_string()),

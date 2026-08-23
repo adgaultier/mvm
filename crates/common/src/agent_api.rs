@@ -11,30 +11,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Sandbox, SandboxId, SandboxState};
 
-/// Agent API "delegate" params — ask the host to launch a child clone of the
-/// calling sandbox, bounded by `timeout`. Not yet implemented: the handler
-/// authenticates and authorizes, then reports that delegation is still in
-/// progress.
+/// Agent API "delegate" params — ask the host to launch a child that is an
+/// *interactive clone* of the calling sandbox (same image/workload/resources),
+/// bounded by `timeout`. The parent supplies *data only*: the `message` is
+/// queued on the child as a Daddy `input` notification
+/// (`Sandbox.pending_notifications`) and delivered through the child's own
+/// registered `notification_command` once the child declares `ready` — an
+/// agent can never set a command for its child. The host records lineage
+/// (`Sandbox.parent`) and starts the child immediately; the timeout becomes
+/// the child's TTL deadline (`Sandbox.ttl_deadline`), which is display-only
+/// until enforcement lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelegateRequest {
-    /// Seconds the child may run before it is stopped.
+    /// Seconds the child may run before it expires. `0` = no TTL.
     pub timeout: u64,
-    /// Command for the child sandbox (image/env/etc. inherit from the caller;
-    /// mounts are supplied by the host policy, not the caller).
-    pub command: Vec<String>,
+    /// The task handed to the child, delivered as a Daddy notification once
+    /// the child is ready.
+    pub message: String,
 }
 
-/// Placeholder inside a notification delivery command that the control plane
-/// substitutes with the serialized `Notification` JSON when it fires one.
-pub const NOTIF_MSG_PLACEHOLDER: &str = "$MSG";
+/// Placeholder inside a notification command template that the control plane
+/// substitutes at delivery time with the serialized `Notification` JSON.
+pub const MSG_PLACEHOLDER: &str = "<MSG>";
 
 /// Agent API "set_notification_command" params — register the shell command
 /// template the control plane should run with `mvm exec <id> sh -c <command>`
 /// to deliver async notifications to this agent. The template references
-/// `$MSG` (`NOTIF_MSG_PLACEHOLDER`) for the serialized `Notification`.
+/// `<MSG>` (`MSG_PLACEHOLDER`) for the serialized `Notification`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetNotificationCommandParams {
-    /// `async_cmd` template; the control plane substitutes `$MSG` with the
+    /// `async_cmd` template; the control plane substitutes `<MSG>` with the
     /// serialized notification at delivery time.
     pub command: String,
 }
@@ -224,9 +230,9 @@ impl Notification {
 /// never hand a workload the full `Sandbox` record: host mount paths, the
 /// network profile, port mappings, host process PIDs and lifecycle telemetry
 /// are control-plane internals. The agent gets its own identity, resource
-/// allocation and lifecycle status — plus delegation/lineage placeholders
-/// (`parent`, `children`, `capabilities`, `budget`) that are always empty
-/// until delegation is implemented.
+/// allocation and lifecycle status, its lineage (`parent` from the record,
+/// `children` computed by the manager), and the `capabilities`/`budget`
+/// placeholders that stay empty until delegation policy lands.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentInfo {
     /// The agent's own sandbox id.
@@ -250,20 +256,25 @@ pub struct AgentInfo {
     /// RAM in MiB allocated to the sandbox.
     pub ram_mib: u32,
     /// The parent agent that delegated to this sandbox, if any (None = root).
-    /// Placeholder: always None until delegation is implemented.
+    /// Set by `Manager::delegate` when the sandbox was created.
     pub parent: Option<SandboxId>,
-    /// Child agents this sandbox delegated to. Placeholder: always empty.
+    /// Child agents this sandbox delegated to (ids of sandboxes whose
+    /// `parent` is this id). Needs registry context, so it is filled by
+    /// `AgentInfo::with_lineage`, not by `From<&Sandbox>`.
     pub children: Vec<SandboxId>,
     /// Capabilities this sandbox may delegate to its children. Placeholder:
-    /// always None until delegation is implemented.
+    /// always None until delegation policy is implemented.
     pub capabilities: Option<serde_json::Value>,
     /// Resource budget this sandbox may delegate to its children. Placeholder:
-    /// always None until delegation is implemented.
+    /// always None until delegation policy is implemented.
     pub budget: Option<serde_json::Value>,
 }
 
-impl From<&Sandbox> for AgentInfo {
-    fn from(sandbox: &Sandbox) -> Self {
+impl AgentInfo {
+    /// Lineage-complete view: `children` requires registry context (a scan
+    /// for sandboxes with `parent == sandbox.id`), which the manager
+    /// supplies.
+    pub fn with_lineage(sandbox: &Sandbox, children: Vec<SandboxId>) -> Self {
         Self {
             id: sandbox.id.clone(),
             name: sandbox.spec.name.clone(),
@@ -272,10 +283,116 @@ impl From<&Sandbox> for AgentInfo {
             ready_at: sandbox.ready_at,
             vcpus: sandbox.spec.vcpus,
             ram_mib: sandbox.spec.ram_mib,
-            parent: None,
-            children: Vec::new(),
+            parent: sandbox.parent.clone(),
+            children,
             capabilities: None,
             budget: None,
+        }
+    }
+}
+
+impl From<&Sandbox> for AgentInfo {
+    fn from(sandbox: &Sandbox) -> Self {
+        Self::with_lineage(sandbox, Vec::new())
+    }
+}
+
+/// Agent-level status derived from the sandbox record — what graph views
+/// (`mvm-flow`) render in nodes. No extra state is kept: it follows `state`
+/// plus `booted_at` (guestd `Ready`) and `ready_at` (Agent API `ready`).
+/// `Idle` is reserved for the future idle-detection feature
+/// (`doc/agentic/notes.md`, "IDLE AGENTS").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentStatus {
+    /// Not running: created, stopped on request, or workload exited.
+    Stopped,
+    /// Shim died unexpectedly or failed to launch.
+    Failed,
+    /// VM shim alive, infrastructure boot not yet complete.
+    Booting,
+    /// Infrastructure booted, workload has not declared ready yet.
+    Running,
+    /// Workload declared ready (steady state).
+    Ready,
+    /// Reserved: running but idle (needs idle detection).
+    Idle,
+}
+
+impl AgentStatus {
+    pub fn derive(sandbox: &Sandbox) -> Self {
+        match sandbox.state {
+            SandboxState::Created | SandboxState::Stopped | SandboxState::Exited => {
+                AgentStatus::Stopped
+            }
+            SandboxState::Failed => AgentStatus::Failed,
+            SandboxState::Running => match (sandbox.booted_at, sandbox.ready_at) {
+                (None, _) => AgentStatus::Booting,
+                (Some(_), None) => AgentStatus::Running,
+                (Some(_), Some(_)) => AgentStatus::Ready,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for AgentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            AgentStatus::Stopped => "stopped",
+            AgentStatus::Failed => "failed",
+            AgentStatus::Booting => "booting",
+            AgentStatus::Running => "running",
+            AgentStatus::Ready => "ready",
+            AgentStatus::Idle => "idle",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Host-facing projection of one agent for control-plane clients (`mvm-flow`
+/// over `GET /api/v1/agents`). Unlike `AgentInfo` this is for the host side
+/// of the HTTP surface, so it adds the derived status, lineage, TTL deadline
+/// and the latest delivered notification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentView {
+    pub id: SandboxId,
+    pub name: Option<String>,
+    pub state: SandboxState,
+    pub status: AgentStatus,
+    /// The agent that delegated to this one (None = root).
+    pub parent: Option<SandboxId>,
+    /// Direct children (ids of sandboxes whose `parent` is this id).
+    pub children: Vec<SandboxId>,
+    pub vcpus: u8,
+    pub ram_mib: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Display-only TTL deadline, from a `delegate` timeout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    /// Newest notification delivered to this agent, if any (volatile
+    /// in-memory history; gone after a daemon restart).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_notification: Option<Notification>,
+}
+
+impl AgentView {
+    pub fn new(sandbox: &Sandbox, children: Vec<SandboxId>) -> Self {
+        Self {
+            id: sandbox.id.clone(),
+            name: sandbox.spec.name.clone(),
+            state: sandbox.state,
+            status: AgentStatus::derive(sandbox),
+            parent: sandbox.parent.clone(),
+            children,
+            vcpus: sandbox.spec.vcpus,
+            ram_mib: sandbox.spec.ram_mib,
+            booted_at: sandbox.booted_at,
+            ready_at: sandbox.ready_at,
+            ttl_deadline: sandbox.ttl_deadline,
+            last_notification: sandbox.recent_notifications.last().cloned(),
         }
     }
 }
@@ -326,7 +443,7 @@ mod tests {
         let req = AgentApiRequest {
             method: "delegate".into(),
             token: "deadbeef".into(),
-            params: serde_json::json!({ "timeout": 60, "command": ["sleep", "1"] }),
+            params: serde_json::json!({ "timeout": 60, "message": "finish the report" }),
         };
         let json = serde_json::to_value(&req).unwrap();
         let back: AgentApiRequest = serde_json::from_value(json).unwrap();
@@ -411,5 +528,97 @@ mod tests {
                 "AgentInfo leaked control-plane field '{leaked}'"
             );
         }
+    }
+
+    fn sandbox_with(state: SandboxState, booted: bool, ready: bool) -> Sandbox {
+        use crate::spec::{NetworkMode, SandboxSpec, SecurityProfile};
+
+        let spec = SandboxSpec {
+            name: None,
+            image: "alpine:latest".to_string(),
+            command: vec![],
+            env: vec![],
+            workdir: None,
+            user: None,
+            vcpus: 1,
+            ram_mib: 512,
+            attach_stdin: false,
+            tty: false,
+            tty_size: None,
+            network: NetworkMode::None,
+            ports: vec![],
+            mounts: vec![],
+            security: SecurityProfile::Default,
+            labels: std::collections::BTreeMap::new(),
+        };
+        let mut sb = Sandbox::new(spec);
+        sb.state = state;
+        if booted {
+            sb.booted_at = Some(chrono::Utc::now());
+        }
+        if ready {
+            sb.ready_at = Some(chrono::Utc::now());
+        }
+        sb
+    }
+
+    #[test]
+    fn agent_status_derives_from_lifecycle_fields() {
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Created, false, false)),
+            AgentStatus::Stopped
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Stopped, true, true)),
+            AgentStatus::Stopped
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Exited, false, false)),
+            AgentStatus::Stopped
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Failed, false, false)),
+            AgentStatus::Failed
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Running, false, false)),
+            AgentStatus::Booting
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Running, false, true)),
+            AgentStatus::Booting,
+            "ready without booted is still booting"
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Running, true, false)),
+            AgentStatus::Running
+        );
+        assert_eq!(
+            AgentStatus::derive(&sandbox_with(SandboxState::Running, true, true)),
+            AgentStatus::Ready
+        );
+    }
+
+    #[test]
+    fn agent_view_carries_lineage_and_ttl() {
+        let mut parent = sandbox_with(SandboxState::Running, true, true);
+        let mut child = sandbox_with(SandboxState::Running, true, false);
+        child.parent = Some(parent.id.clone());
+        child.ttl_deadline = Some(chrono::Utc::now() + chrono::Duration::seconds(60));
+        child.recent_notifications.push(Notification::input(serde_json::json!({"msg": "hi"})));
+
+        let view = AgentView::new(&child, vec![]);
+        assert_eq!(view.status, AgentStatus::Running);
+        assert_eq!(view.parent, Some(parent.id.clone()));
+        assert!(view.ttl_deadline.is_some());
+        assert!(view.last_notification.is_some());
+
+        let parent_view = AgentView::new(&parent, vec![child.id.clone()]);
+        assert_eq!(parent_view.children, vec![child.id.clone()]);
+        assert_eq!(parent_view.parent, None);
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["status"], serde_json::json!("running"));
+        assert_eq!(json["parent"], serde_json::json!(parent.id.as_str()));
     }
 }

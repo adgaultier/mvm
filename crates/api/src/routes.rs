@@ -18,7 +18,7 @@ use std::convert::Infallible;
 use crate::{ApiError, AppState};
 
 pub fn api_routes() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/info", get(info))
         .route("/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/sandboxes/{id}", get(get_sandbox).delete(remove_sandbox))
@@ -35,7 +35,17 @@ pub fn api_routes() -> Router<AppState> {
         .route("/images", get(list_images))
         .route("/images/pull", post(pull_image))
         .route("/images/load", post(load_image))
-        .route("/images/{*name}", delete(remove_image))
+        .route("/images/{*name}", delete(remove_image));
+    #[cfg(feature = "agent-api")]
+    let router = router.route("/agents", get(list_agents));
+    router
+}
+
+/// Every sandbox projected as an agent (derived status, lineage, TTL
+/// deadline, latest notification) for host-side graph views like `mvm-flow`.
+#[cfg(feature = "agent-api")]
+async fn list_agents(State(state): State<AppState>) -> Json<Vec<mvm_common::agent_api::AgentView>> {
+    Json(state.manager.agents())
 }
 
 async fn info(State(_state): State<AppState>) -> Json<InfoResponse> {

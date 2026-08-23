@@ -290,13 +290,40 @@ pub struct Sandbox {
     /// timestamps directly. Bounded by the manager.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timeline: Vec<Vec<TimelineEvent>>,
+    /// Lineage: the agent that delegated this sandbox into existence
+    /// (`Manager::delegate`). `None` for root sandboxes created by a user.
+    /// Persisted so lineage survives daemon restarts.
+    #[cfg(feature = "agent-api")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SandboxId>,
+    /// Display-only TTL: set when this sandbox was delegated with a timeout;
+    /// the deadline at which it expires. Enforcement (stop+rm of the agent
+    /// and its children, per `doc/agentic/notes.md`) is a follow-up — graph
+    /// views render a countdown from this for now.
+    #[cfg(feature = "agent-api")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    /// Bounded in-memory history of notifications delivered to this agent
+    /// (newest last, capped by the manager). Volatile — never serialized —
+    /// feeding `mvm-flow`'s edge labels.
+    #[cfg(feature = "agent-api")]
+    #[serde(skip)]
+    pub recent_notifications: Vec<crate::agent_api::Notification>,
     /// Shell command template the control plane runs with `mvm exec` to
     /// deliver async notifications to this agent (the spec's `async_cmd`;
-    /// `$MSG` is the placeholder for the serialized `Notification` JSON).
+    /// `<MSG>` is the placeholder for the serialized `Notification` JSON).
     /// Registered by the agent itself over the Agent API.
     #[cfg(feature = "agent-api")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_command: Option<String>,
+    /// Notifications queued for this agent but not yet delivered (a delegated
+    /// child receives its Daddy task this way). Flushed through
+    /// `notification_command` once the agent declares `ready` and has
+    /// registered the command — persisted so a daemon restart cannot lose a
+    /// delegation.
+    #[cfg(feature = "agent-api")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_notifications: Vec<crate::agent_api::Notification>,
     /// SHA-256 hash of the sandbox's VM-scoped bearer token, held only while
     /// the VM is running. This is authentication material internal to the
     /// manager: `#[serde(skip)]` keeps it out of every API response and out
@@ -328,7 +355,15 @@ impl Sandbox {
             console_size: None,
             timeline: Vec::new(),
             #[cfg(feature = "agent-api")]
+            parent: None,
+            #[cfg(feature = "agent-api")]
+            ttl_deadline: None,
+            #[cfg(feature = "agent-api")]
+            recent_notifications: Vec::new(),
+            #[cfg(feature = "agent-api")]
             notification_command: None,
+            #[cfg(feature = "agent-api")]
+            pending_notifications: Vec::new(),
             guest_token_hash: None,
             guest_token_created_at: None,
         }

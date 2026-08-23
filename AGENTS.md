@@ -104,6 +104,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
 | `api` | axum routes; streams = `Body::from_stream`; exec has a kill-on-drop guard |
 | `cli` | `mvm` binary incl. hidden `__vm-shim` subcommand + userns re-exec |
 | `tui` | ratatui dashboard; modal forms own the keyboard while open (`r` resize, `d` delete confirmation) |
+| `flow` | `mvm-flow` binary; rataflow lineage graph of one agent + descendants, polled from `GET /api/v1/agents` |
 
 ## Sharp edges (learned the hard way)
 
@@ -303,16 +304,39 @@ candidate that is dynamically linked or not a Linux ELF at all.
   token-verification code, while token *minting* into the guest env stays (it
   is part of the boot plumbing).
 - **Control-plane notification delivery runs `sh -c` through `mvm exec`.**
-  A sandbox's `notification_command` (`async_cmd`, `$MSG` = the serialized
+  A sandbox's `notification_command` (`async_cmd`, `<MSG>` = the serialized
   `Notification`) is a template the control plane executes as
   `sh -c <template>` via the manager's `exec` — so delivery only works while
   the guestd is up and the sandbox is `Running` (that's by design: the spec
-  delivers asynchronously to *running* agents). `$MSG` substitution is a
-  literal string replace (`NOTIF_MSG_PLACEHOLDER`), not a shell expansion,
-  so the template is free to use `$MSG` inside single quotes for the agent's
-  own shell. `test_notification` (Agent API method + `mvm-agent-mcp` tool)
+  delivers asynchronously to *running* agents). `<MSG>` substitution is a
+  literal string replace (`MSG_PLACEHOLDER`), not a shell expansion,
+  so the template is free to use `<MSG>` inside single quotes for the agent's
+  own shell. The placeholder is `<MSG>`, not `$MSG`, on purpose: a `$`-form
+  gets expanded by the shell that *creates* the sandbox when the template
+  arrives via `-e` ("unbound variable" or silently empty), `<MSG>` survives
+  any quoting. `test_notification` (Agent API method + `mvm-agent-mcp` tool)
   fires one mock notification of every kind through this same path and is
   the end-to-end wiring check in `agent-api.sh`.
+- **Delegation boots an interactive clone — never a parent-supplied command.**
+  `DelegateRequest` is `{timeout, message}`; the child inherits the caller's
+  spec verbatim (same workload, image, env) and starts immediately, with the
+  message queued on it as a Daddy `input` notification
+  (`Sandbox.pending_notifications`, persisted). The queue is drained by
+  `flush_pending` once the child is running, has declared `ready`, and has
+  registered its `notification_command` — both `mark_ready` and
+  `set_notification_command` trigger a flush, whichever comes last wins the
+  race. An agent may therefore hand a child *data*, but only the
+  operator-provided workload + notification template decide what a child
+  executes. Delivery failures leave the remainder queued; a non-zero exit of
+  the agent's own command counts as delivered (recorded in the history).
+- **Agent API responses need a graceful close.** Each Agent API connection
+  carries one request + one response; dropping the unix socket right after
+  `write_all` races libkrun's vsock bridge — the guest sees EOF *before* the
+  response bytes still in flight and loses the whole frame (the tell:
+  `vsockprobe: recv header: Success`, i.e. `read()` returned 0 with no
+  errno). Long-lived channels never hit this because they don't close
+  per-message. `handle_conn` therefore half-closes (`shutdown`) and drains
+  until the client closes (capped at 5 s) before the stream is dropped.
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
   driver writes the rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't
@@ -323,6 +347,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   virtiofs `LinuxComplete` semantics turns that chown into a
   `user.containers.override_stat` xattr, so it sticks for the boot; it's a
   no-op on Linux (userns already owns the files, and the uid check skips it).
+- **rataflow event loops must drain every pending event.** The terminal
+  delivers mouse at 125–1000 Hz; `mvm-flow` polls with a timeout for the
+  *first* event, then loops `poll(Duration::ZERO)` until empty before
+  rendering — reading one event per frame makes pan/drag stutter. Also never
+  rebuild the `Flow` on poll: reconcile by diffing (`node_content_mut` for
+  status updates, add/remove only on structural change), or the viewport and
+  selection reset every second. `apply_layout(Sugiyama)` rewrites node
+  positions *and* handle sides, so it runs only on structural change, with
+  `request_fit_view()` only on the first one. The delegation lineage behind
+  the edges is data-path only (`Sandbox.parent`/`ttl_deadline`, display in
+  the nodes); TTL/idle *enforcement* is still an open item.
 - **Mount host paths must be absolute.** libkrun's virtiofs passthrough opens
   the host dir with `openat(AT_FDCWD, …, O_NOFOLLOW)` from the *daemon's* cwd,
   so a relative `-v` source fails with `ENOENT` at device activation — which

@@ -3,6 +3,12 @@ set -euo pipefail
 echo "== lifecycle =="
 # exec's `itest`; create it if this section runs standalone.
 ensure_sandbox itest alpine sleep 60
+if [ "$(uname -s)" = Linux ]; then
+    # Write the marker BEFORE the restart so this check is self-contained:
+    # the overlay upper must survive stop/start. (Do not rely on another
+    # section having written it — section order is alphabetical.)
+    "$MVM" exec itest touch /persist-marker >/dev/null 2>&1
+fi
 "$MVM" stop itest >/dev/null 2>&1
 wait "${RUN_PID:-}" 2>/dev/null || true
 check "stopped state" "1" "$("$MVM" ps -a | grep itest | grep -c stopped)"

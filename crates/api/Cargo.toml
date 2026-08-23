@@ -15,3 +15,8 @@ serde_json.workspace = true
 tokio.workspace = true
 tower-http = { version = "0.6", features = ["trace"] }
 tracing.workspace = true
+
+[features]
+# Host-side agent listing (`GET /agents`) for graph views like `mvm-flow`.
+# Mirrors the daemon-level gating in mvm-cli: off = no agent surface at all.
+agent-api = ["mvm-manager/agent-api", "mvm-common/agent-api"]
