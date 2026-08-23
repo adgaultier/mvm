@@ -31,17 +31,20 @@ pub struct DelegateRequest {
 }
 
 /// Placeholder inside a notification command template that the control plane
-/// substitutes at delivery time with the serialized `Notification` JSON.
+/// substitutes at delivery time with the notification's human-readable text
+/// (`Notification::to_text`). The substitution is a literal string replace
+/// and the text is prose (spaces, parentheses, …), so templates must quote
+/// it — e.g. `echo '<MSG>' >> /tmp/notifs.log`.
 pub const MSG_PLACEHOLDER: &str = "<MSG>";
 
 /// Agent API "set_notification_command" params — register the shell command
 /// template the control plane should run with `mvm exec <id> sh -c <command>`
 /// to deliver async notifications to this agent. The template references
-/// `<MSG>` (`MSG_PLACEHOLDER`) for the serialized `Notification`.
+/// `<MSG>` (`MSG_PLACEHOLDER`) for the notification's text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetNotificationCommandParams {
     /// `async_cmd` template; the control plane substitutes `<MSG>` with the
-    /// serialized notification at delivery time.
+    /// notification's human-readable text at delivery time.
     pub command: String,
 }
 
@@ -85,10 +88,10 @@ impl AgentApiResponse {
     }
 }
 
-/// A notification delivered asynchronously to a running agent — the serialized
-/// `msg` of `mvm exec <async_cmd>` (typically a curl to the agent's local
-/// notification endpoint). Sender and kind are the spec's `from`/`type`;
-/// see `doc/agentic/notes.md`.
+/// A notification delivered asynchronously to a running agent — its
+/// `to_text()` rendering becomes the `msg` of `mvm exec <async_cmd>`
+/// (typically a curl to the agent's local notification endpoint). Sender and
+/// kind are the spec's `from`/`type`; see `doc/agentic/notes.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Notification {
     /// Opaque unique id, for dedup and correlating replies.
@@ -223,6 +226,58 @@ impl Notification {
     /// `input-notif` from the parent agent.
     pub fn input(data: serde_json::Value) -> Self {
         Self::new(NotificationFrom::Daddy, NotificationKind::Input { data })
+    }
+
+    /// Human-readable rendering — this is what the control plane substitutes
+    /// for `<MSG>` in the agent's `notification_command` at delivery time.
+    /// Agents read prose, not wire formats; the JSON form stays reserved for
+    /// persistence (`pending_notifications`) and host-side views.
+    pub fn to_text(&self) -> String {
+        // The kind determines the message; `from` only supplies the child id
+        // for child-sourced kinds (the constructors enforce the pairing).
+        let child_id = || match &self.from {
+            NotificationFrom::Child { id } => id.to_string(),
+            _ => "?".to_string(),
+        };
+        match &self.kind {
+            NotificationKind::ChildTtlAboutToExpire {
+                child,
+                remaining_secs,
+            } => format!("Child {child} is about to hit its TTL ({remaining_secs}s left)"),
+            NotificationKind::RestartedAfterIdle => {
+                "You were restarted after an idle stop; continue your work.".to_string()
+            }
+            NotificationKind::NeedInput { data } => {
+                format!("Child {} is requesting input: {}", child_id(), render_data(data))
+            }
+            NotificationKind::Finished { exit_code, data } => match exit_code {
+                Some(code) => format!(
+                    "Child {} finished (exit code {code}): {}",
+                    child_id(),
+                    render_data(data)
+                ),
+                None => format!("Child {} finished: {}", child_id(), render_data(data)),
+            },
+            NotificationKind::Terminated { reason } => {
+                let reason = match reason {
+                    TerminationReason::Faulted => "faulted",
+                    TerminationReason::TtlExpired => "TTL expired",
+                };
+                format!("Child {} was terminated ({reason})", child_id())
+            }
+            NotificationKind::Input { data } => {
+                format!("Daddy is requesting: {}", render_data(data))
+            }
+        }
+    }
+}
+
+/// Render a notification payload for `to_text`: strings verbatim (the common
+/// case — a task or prompt), anything else as compact JSON.
+fn render_data(data: &serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -376,6 +431,13 @@ pub struct AgentView {
     /// in-memory history; gone after a daemon restart).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_notification: Option<Notification>,
+    /// Notifications queued but not yet delivered (persisted on the sandbox
+    /// record). Newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_notifications: Vec<Notification>,
+    /// Bounded in-memory history of delivered notifications (newest last).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_notifications: Vec<Notification>,
 }
 
 impl AgentView {
@@ -393,6 +455,8 @@ impl AgentView {
             ready_at: sandbox.ready_at,
             ttl_deadline: sandbox.ttl_deadline,
             last_notification: sandbox.recent_notifications.last().cloned(),
+            pending_notifications: sandbox.pending_notifications.clone(),
+            recent_notifications: sandbox.recent_notifications.clone(),
         }
     }
 }
@@ -435,6 +499,57 @@ mod tests {
         assert_eq!(
             Notification::restarted_after_idle().kind,
             NotificationKind::RestartedAfterIdle
+        );
+    }
+
+    #[test]
+    fn to_text_renders_every_kind_as_prose() {
+        let child: SandboxId = "deadbeefcafe".into();
+
+        assert_eq!(
+            Notification::child_ttl_about_to_expire(child.clone(), 30).to_text(),
+            "Child deadbeefcafe is about to hit its TTL (30s left)"
+        );
+        assert_eq!(
+            Notification::restarted_after_idle().to_text(),
+            "You were restarted after an idle stop; continue your work."
+        );
+        assert_eq!(
+            Notification::need_input(child.clone(), serde_json::json!("which file?")).to_text(),
+            "Child deadbeefcafe is requesting input: which file?"
+        );
+        assert_eq!(
+            Notification::finished(child.clone(), Some(0), serde_json::json!("done")).to_text(),
+            "Child deadbeefcafe finished (exit code 0): done"
+        );
+        assert_eq!(
+            Notification::finished(child.clone(), None, serde_json::json!("done")).to_text(),
+            "Child deadbeefcafe finished: done"
+        );
+        assert_eq!(
+            Notification::terminated(child.clone(), TerminationReason::Faulted).to_text(),
+            "Child deadbeefcafe was terminated (faulted)"
+        );
+        assert_eq!(
+            Notification::terminated(child.clone(), TerminationReason::TtlExpired).to_text(),
+            "Child deadbeefcafe was terminated (TTL expired)"
+        );
+        assert_eq!(
+            Notification::input(serde_json::json!("finish the report")).to_text(),
+            "Daddy is requesting: finish the report"
+        );
+    }
+
+    #[test]
+    fn to_text_renders_non_string_data_as_compact_json() {
+        assert_eq!(
+            Notification::input(serde_json::json!({ "text": "mock input" })).to_text(),
+            "Daddy is requesting: {\"text\":\"mock input\"}"
+        );
+        // Multi-line strings stay verbatim — a delegated task can span lines.
+        assert_eq!(
+            Notification::input(serde_json::json!("line one\nline two")).to_text(),
+            "Daddy is requesting: line one\nline two"
         );
     }
 
@@ -601,7 +716,7 @@ mod tests {
 
     #[test]
     fn agent_view_carries_lineage_and_ttl() {
-        let mut parent = sandbox_with(SandboxState::Running, true, true);
+        let parent = sandbox_with(SandboxState::Running, true, true);
         let mut child = sandbox_with(SandboxState::Running, true, false);
         child.parent = Some(parent.id.clone());
         child.ttl_deadline = Some(chrono::Utc::now() + chrono::Duration::seconds(60));

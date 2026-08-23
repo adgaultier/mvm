@@ -14,7 +14,7 @@ Configuration:
     MVM_AGENT_CID=2
     MVM_AGENT_PORT=24643
     MVM_GUEST_TOKEN=<vm-scoped-token>
-    NOTIFICATION_CMD=<shell command template, `<MSG>` = notification JSON>
+    NOTIFICATION_CMD=<shell command template, `<MSG>` = notification text>
 
 At boot, `NOTIFICATION_CMD` is registered with the control plane over the
 Agent API (`set_notification_command`) so the host can deliver async
@@ -299,7 +299,7 @@ def _notify_agent_ready():
 def _register_notification_command() -> None:
     """Register the `NOTIFICATION_CMD` template with the control plane so it
     can deliver async notifications to this agent (`<MSG>` is substituted with
-    the serialized notification JSON at delivery time). Best-effort: an unset
+    the notification's human-readable text at delivery time). Best-effort: an unset
     or empty variable is a no-op, and a registration failure only warns —
     the MCP server still boots."""
     if not NOTIFICATION_CMD:

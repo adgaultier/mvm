@@ -1,9 +1,10 @@
 //! Control-plane notification dispatch: delivering a `Notification` to a
 //! running agent by running its registered `notification_command` (`<MSG>` is
-//! the placeholder for the serialized notification) as `sh -c` through
-//! `mvm exec`. Also the `test_notification` mock probe, which fires one
-//! notification of every kind through the real delivery path — a cheap way to
-//! verify a fresh agent's notification wiring end to end.
+//! the placeholder for the notification's human-readable text,
+//! `Notification::to_text`) as `sh -c` through `mvm exec`. Also the
+//! `test_notification` mock probe, which fires one notification of every kind
+//! through the real delivery path — a cheap way to verify a fresh agent's
+//! notification wiring end to end.
 
 use mvm_common::agent_api::{
     Notification, NotificationKind, TerminationReason, MSG_PLACEHOLDER,
@@ -58,8 +59,8 @@ impl NotificationDelivery {
 
 impl Manager {
     /// Deliver a notification to a running agent: read its registered
-    /// `notification_command`, substitute `<MSG>` with the serialized
-    /// `Notification`, and run the template as `sh -c` via `mvm exec`.
+    /// `notification_command`, substitute `<MSG>` with the notification's
+    /// human-readable text, and run the template as `sh -c` via `mvm exec`.
     pub async fn deliver_notification(
         &self,
         id_or_name: &str,
@@ -79,8 +80,7 @@ impl Manager {
             })?
         };
 
-        let msg = serde_json::to_string(notification)
-            .map_err(|e| Error::Runtime(format!("serialize notification: {e}")))?;
+        let msg = notification.to_text();
         let command = template.replace(MSG_PLACEHOLDER, &msg);
         tracing::debug!(
             sandbox = %id,
@@ -277,10 +277,10 @@ mod tests {
     #[test]
     fn msg_placeholder_is_substituted_into_the_command() {
         let notification = Notification::input(serde_json::json!({ "text": "hi" }));
-        let msg = serde_json::to_string(&notification).unwrap();
+        let msg = notification.to_text();
         let template = "echo <MSG>".to_string();
         let command = template.replace(MSG_PLACEHOLDER, &msg);
-        assert!(command.contains(&msg));
+        assert!(command.contains("Daddy is requesting:"));
         assert!(!command.contains(MSG_PLACEHOLDER));
     }
 

@@ -22,7 +22,13 @@ all notification are passed asyncronously to running agents via via `mvm exec <a
 
 
  > curl http://localhost:`<local-agent-server-port>`/`<agent_async_notif_endpoint>`/`<msg>`
-and msg is serialized notification 
+and msg is the notification rendered as human-readable text
+(`Notification::to_text` in `crates/common/src/agent_api.rs`), e.g.
+`Daddy is requesting: <task>`, `Child <id> is requesting input: <data>`,
+`Child <id> finished (exit code <n>): <data>`,
+`Child <id> was terminated (faulted | TTL expired)`,
+`You were restarted after an idle stop; continue your work.`,
+`Child <id> is about to hit its TTL (<n>s left)`
 for opencode:
 ```
 SID=$(curl -s localhost:4096/session | jq -r 'sort_by(.time.updated) | reverse | map(select(.parentID == null)) | .[0].id'); curl -sS -X POST "localhost:4096/session/$SID/prompt_async" -H 'Content-Type: application/json' -d "$(jq -n --arg text '<MSG>' '{parts:[{type:"text",text:$text}]}')"

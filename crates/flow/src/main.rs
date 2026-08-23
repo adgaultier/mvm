@@ -1,6 +1,7 @@
 mod client;
 mod detail;
 mod graph;
+mod mailbox;
 
 use std::io::stdout;
 use std::sync::mpsc;
@@ -25,6 +26,7 @@ use rataflow::{EventResponse, FlowEvent};
 use crate::client::Client;
 use crate::detail::{Action, Detail};
 use crate::graph::GraphState;
+use crate::mailbox::Mailbox;
 
 #[derive(Parser)]
 #[command(name = "mvm-flow", about = "Live agent lineage graph for a running mvm daemon")]
@@ -35,6 +37,109 @@ struct Args {
 
     /// Root sandbox (id or name); its whole descendant tree is shown
     root: String,
+}
+
+/// The open modal, if any: the info panel (full record + actions) or the
+/// mailbox. Never both at once.
+enum Modal {
+    Info(Box<Detail>),
+    Mailbox(Mailbox),
+}
+
+impl Modal {
+    fn id(&self) -> &str {
+        match self {
+            Modal::Info(d) => &d.id,
+            Modal::Mailbox(m) => &m.id,
+        }
+    }
+}
+
+/// What a context-menu entry opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuChoice {
+    Info,
+    Mailbox,
+}
+
+const MENU_ENTRIES: [(&str, MenuChoice); 2] = [
+    ("info", MenuChoice::Info),
+    ("mailbox", MenuChoice::Mailbox),
+];
+
+/// Right-click context menu on a node (rataflow's `NodeContextMenu`).
+struct ContextMenu {
+    node_id: String,
+    label: String,
+    selected: usize,
+    /// Terminal position the menu was opened at.
+    pos: (u16, u16),
+    /// Menu rect from the last render, for hit-testing.
+    area: ratatui::layout::Rect,
+}
+
+impl ContextMenu {
+    fn new(node_id: &str, label: String, pos: (u16, u16)) -> Self {
+        Self {
+            node_id: node_id.to_string(),
+            label,
+            selected: 0,
+            pos,
+            area: ratatui::layout::Rect::default(),
+        }
+    }
+
+    fn cycle(&mut self, delta: i32) {
+        let n = MENU_ENTRIES.len() as i32;
+        self.selected = ((self.selected as i32 + delta).rem_euclid(n)) as usize;
+    }
+
+    fn choice(&self) -> MenuChoice {
+        MENU_ENTRIES[self.selected].1
+    }
+
+    /// Entry index at a terminal position, if the click hit one.
+    fn entry_at(&self, column: u16, row: u16) -> Option<usize> {
+        let inner_y = self.area.y + 1;
+        if column <= self.area.x || column >= self.area.x + self.area.width - 1 {
+            return None;
+        }
+        let idx = row.checked_sub(inner_y)? as usize;
+        (idx < MENU_ENTRIES.len()).then_some(idx)
+    }
+
+    fn contains(&self, column: u16, row: u16) -> bool {
+        self.area
+            .contains(ratatui::layout::Position::new(column, row))
+    }
+}
+
+fn draw_menu(f: &mut ratatui::Frame, menu: &mut ContextMenu) {
+    let width = 16u16;
+    let height = MENU_ENTRIES.len() as u16 + 2;
+    let screen = f.area();
+    let x = menu.pos.0.min(screen.width.saturating_sub(width));
+    let y = menu.pos.1.min(screen.height.saturating_sub(height));
+    let area = ratatui::layout::Rect::new(x, y, width, height);
+    menu.area = area;
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = ratatui::widgets::Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {} ", menu.label));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    for (i, (label, _)) in MENU_ENTRIES.iter().enumerate() {
+        let row = ratatui::layout::Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let style = if i == menu.selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        f.render_widget(Paragraph::new(format!(" {label}")).style(style), row);
+    }
 }
 
 enum PollUpdate {
@@ -111,7 +216,8 @@ fn main() {
     let mut snapshot = agents;
     let mut last_error: Option<String> = None;
     let mut root_gone = false;
-    let mut detail: Option<Detail> = None;
+    let mut modal: Option<Modal> = None;
+    let mut menu: Option<ContextMenu> = None;
 
     'app: loop {
         let _ = terminal.draw(|f| {
@@ -122,7 +228,8 @@ fn main() {
                 &root,
                 root_gone,
                 last_error.as_deref(),
-                &mut detail,
+                &mut modal,
+                &mut menu,
             );
         });
 
@@ -131,22 +238,30 @@ fn main() {
                 PollUpdate::Agents(agents) => {
                     root_gone = !graph.reconcile(&agents, &root);
                     // Keep the open modal in sync with the fresher poll view.
-                    if let Some(det) = detail.as_mut() {
-                        if let (Some(sb), Some(view)) = (
-                            det.sandbox.as_mut(),
-                            agents.iter().find(|a| a.id.as_str() == det.id),
-                        ) {
-                            sb.state = view.state;
-                            sb.booted_at = view.booted_at;
-                            sb.ready_at = view.ready_at;
+                    let view = modal
+                        .as_ref()
+                        .and_then(|m| agents.iter().find(|a| a.id.as_str() == m.id()));
+                    match (modal.as_mut(), view) {
+                        (Some(Modal::Info(det)), Some(view)) => {
+                            if let Some(sb) = det.sandbox.as_mut() {
+                                sb.state = view.state;
+                                sb.booted_at = view.booted_at;
+                                sb.ready_at = view.ready_at;
+                            }
                         }
+                        (Some(Modal::Mailbox(mb)), Some(view)) => {
+                            mb.sync(&view.pending_notifications, &view.recent_notifications);
+                        }
+                        _ => {}
                     }
                     snapshot = agents;
                     last_error = None;
                 }
                 PollUpdate::Error(e) => last_error = Some(e),
                 PollUpdate::Inspect { id, result } => {
-                    if let Some(det) = detail.as_mut().filter(|d| d.id == id) {
+                    if let Some(Modal::Info(det)) =
+                        modal.as_mut().filter(|m| m.id() == id)
+                    {
                         match result {
                             Ok(sb) => {
                                 det.sandbox = Some(*sb);
@@ -166,7 +281,9 @@ fn main() {
                 }
                 PollUpdate::Action { id, action, result } => {
                     let mut close = false;
-                    if let Some(det) = detail.as_mut().filter(|d| d.id == id) {
+                    if let Some(Modal::Info(det)) =
+                        modal.as_mut().filter(|m| m.id() == id)
+                    {
                         det.busy = false;
                         match result {
                             Ok(()) => {
@@ -181,7 +298,7 @@ fn main() {
                         }
                     }
                     if close {
-                        detail = None;
+                        modal = None;
                     }
                 }
             }
@@ -214,12 +331,37 @@ fn main() {
                     {
                         break 'app;
                     }
-                    // The detail modal owns the keyboard while it is open.
-                    if let Some(det) = detail.as_mut() {
-                        if handle_detail_key(det, key, &client, &tx) {
-                            detail = None;
+                    // The context menu owns the keyboard while it is open.
+                    if let Some(m) = menu.as_mut() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => menu = None,
+                            KeyCode::Up => m.cycle(-1),
+                            KeyCode::Down => m.cycle(1),
+                            KeyCode::Enter => {
+                                let choice = m.choice();
+                                let node_id = m.node_id.clone();
+                                menu = None;
+                                open_choice(&mut modal, choice, &node_id, &client, &tx, &snapshot);
+                            }
+                            _ => {}
                         }
                         continue;
+                    }
+                    // Modals own the keyboard while they are open.
+                    match modal.as_mut() {
+                        Some(Modal::Info(det)) => {
+                            if handle_detail_key(det, key, &client, &tx) {
+                                modal = None;
+                            }
+                            continue;
+                        }
+                        Some(Modal::Mailbox(mb)) => {
+                            if handle_mailbox_key(mb, key) {
+                                modal = None;
+                            }
+                            continue;
+                        }
+                        None => {}
                     }
                     if key.code == KeyCode::Char('q') {
                         break 'app;
@@ -228,7 +370,12 @@ fn main() {
                         KeyCode::Char('f') => graph.flow.request_fit_view(),
                         KeyCode::Enter => {
                             if let Some(id) = graph.flow.first_selected_node_id() {
-                                open_detail(&mut detail, &client, &tx, &id, &snapshot);
+                                let pos = graph
+                                    .flow
+                                    .node_terminal_rect(&id)
+                                    .map(|(l, t, _, _)| (l.max(0) as u16, t.max(0) as u16))
+                                    .unwrap_or((2, 2));
+                                menu = Some(menu_for(&id, &snapshot, pos));
                             }
                         }
                         _ => {
@@ -242,10 +389,31 @@ fn main() {
                     }
                 }
                 Ok(Event::Mouse(mouse)) => {
-                    // The detail modal owns the mouse while it is open.
-                    if let Some(det) = detail.as_mut() {
-                        let mut close = false;
+                    // The context menu owns the mouse while it is open.
+                    if let Some(m) = menu.as_mut() {
                         match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(idx) = m.entry_at(mouse.column, mouse.row) {
+                                    let choice = MENU_ENTRIES[idx].1;
+                                    let node_id = m.node_id.clone();
+                                    menu = None;
+                                    open_choice(
+                                        &mut modal, choice, &node_id, &client, &tx, &snapshot,
+                                    );
+                                } else if !m.contains(mouse.column, mouse.row) {
+                                    menu = None;
+                                }
+                            }
+                            MouseEventKind::ScrollUp => m.cycle(-1),
+                            MouseEventKind::ScrollDown => m.cycle(1),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Modals own the mouse while they are open.
+                    let mut close = false;
+                    match modal.as_mut() {
+                        Some(Modal::Info(det)) => match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if let Some(action) = det.action_at(mouse.column, mouse.row) {
                                     trigger_action(det, action, &client, &tx);
@@ -260,18 +428,37 @@ fn main() {
                                 det.scroll = det.scroll.saturating_add(1);
                             }
                             _ => {}
-                        }
-                        if close {
-                            detail = None;
-                        }
-                        continue;
+                        },
+                        Some(Modal::Mailbox(mb)) => match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if !mb.click(mouse.column, mouse.row)
+                                    && !mb.contains(mouse.column, mouse.row)
+                                {
+                                    close = true;
+                                }
+                            }
+                            MouseEventKind::ScrollUp => mb.select_move(-1),
+                            MouseEventKind::ScrollDown => mb.select_move(1),
+                            _ => {}
+                        },
+                        None => {}
                     }
-                    let resp = graph.flow.handle_mouse_event(mouse);
-                    for ev in resp.into_events() {
-                        if let FlowEvent::NodeClicked { node_id } = ev {
-                            open_detail(&mut detail, &client, &tx, &node_id, &snapshot);
+                    if close {
+                        modal = None;
+                    }
+                    if menu.is_none() && modal.is_none() {
+                        let resp = graph.flow.handle_mouse_event(mouse);
+                        for ev in resp.into_events() {
+                            if let FlowEvent::NodeContextMenu { node_id } = ev {
+                                menu = Some(menu_for(
+                                    &node_id,
+                                    &snapshot,
+                                    (mouse.column, mouse.row),
+                                ));
+                            }
                         }
                     }
+                    continue;
                 }
                 Ok(Event::Resize(_, _)) => {
                     graph.flow.request_fit_view();
@@ -294,6 +481,44 @@ fn resolve_root(agents: &[AgentView], root: &str) -> Option<String> {
         .map(|a| a.id.to_string())
 }
 
+fn node_label(snapshot: &[AgentView], id: &str) -> String {
+    snapshot
+        .iter()
+        .find(|a| a.id.as_str() == id)
+        .and_then(|a| a.name.clone())
+        .unwrap_or_else(|| id.chars().take(8).collect())
+}
+
+/// Build the context menu for a node, opened at terminal position `pos`.
+fn menu_for(id: &str, snapshot: &[AgentView], pos: (u16, u16)) -> ContextMenu {
+    ContextMenu::new(id, node_label(snapshot, id), pos)
+}
+
+/// Open the modal a context-menu entry points at.
+fn open_choice(
+    modal: &mut Option<Modal>,
+    choice: MenuChoice,
+    id: &str,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+    snapshot: &[AgentView],
+) {
+    let label = node_label(snapshot, id);
+    match choice {
+        MenuChoice::Info => {
+            *modal = Some(Modal::Info(Box::new(Detail::loading(id, &label))));
+            spawn_fetch(client, tx, id);
+        }
+        MenuChoice::Mailbox => {
+            let mut mb = Mailbox::new(id, &label);
+            if let Some(view) = snapshot.iter().find(|a| a.id.as_str() == id) {
+                mb.sync(&view.pending_notifications, &view.recent_notifications);
+            }
+            *modal = Some(Modal::Mailbox(mb));
+        }
+    }
+}
+
 /// Fetch the full sandbox record on a background thread (the daemon call is
 /// blocking; the record arrives as `PollUpdate::Inspect`).
 fn spawn_fetch(client: &Client, tx: &mpsc::Sender<PollUpdate>, id: &str) {
@@ -304,22 +529,6 @@ fn spawn_fetch(client: &Client, tx: &mpsc::Sender<PollUpdate>, id: &str) {
         let result = c.get_sandbox(&id).map(Box::new);
         let _ = t.send(PollUpdate::Inspect { id, result });
     });
-}
-
-fn open_detail(
-    detail: &mut Option<Detail>,
-    client: &Client,
-    tx: &mpsc::Sender<PollUpdate>,
-    id: &str,
-    snapshot: &[AgentView],
-) {
-    let label = snapshot
-        .iter()
-        .find(|a| a.id.as_str() == id)
-        .and_then(|a| a.name.clone())
-        .unwrap_or_else(|| id.chars().take(8).collect());
-    *detail = Some(Detail::loading(id, &label));
-    spawn_fetch(client, tx, id);
 }
 
 /// Run a state-gated action on a background thread. `Delete` first arms the
@@ -360,7 +569,20 @@ fn trigger_action(det: &mut Detail, action: Action, client: &Client, tx: &mpsc::
     });
 }
 
-/// Modal keyboard handler; returns true when the modal should close.
+/// Mailbox keyboard handler; returns true when the modal should close.
+fn handle_mailbox_key(mb: &mut Mailbox, key: event::KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return true,
+        KeyCode::Up => mb.select_move(-1),
+        KeyCode::Down => mb.select_move(1),
+        KeyCode::PageUp => mb.body_scroll_by(-10),
+        KeyCode::PageDown => mb.body_scroll_by(10),
+        _ => {}
+    }
+    false
+}
+
+/// Detail-modal keyboard handler; returns true when the modal should close.
 fn handle_detail_key(
     det: &mut Detail,
     key: event::KeyEvent,
@@ -399,6 +621,7 @@ fn handle_detail_key(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     f: &mut ratatui::Frame,
     graph: &mut GraphState,
@@ -406,7 +629,8 @@ fn draw(
     root: &str,
     root_gone: bool,
     last_error: Option<&str>,
-    detail: &mut Option<Detail>,
+    modal: &mut Option<Modal>,
+    menu: &mut Option<ContextMenu>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -457,7 +681,7 @@ fn draw(
             None => format!("{id} (not in last snapshot)"),
         }
     } else {
-        "q quit · f fit · click/enter details · arrows/hjkl pan · Tab select · +/- zoom · drag nodes to rearrange"
+        "q quit · f fit · right-click/enter menu · Tab select · arrows/hjkl pan · +/- zoom · drag nodes to rearrange"
             .to_string()
     };
     f.render_widget(
@@ -465,8 +689,13 @@ fn draw(
         chunks[2],
     );
 
-    // The modal renders last = on top of the graph.
-    if let Some(det) = detail.as_mut() {
-        detail::draw_detail(f, det);
+    // Overlays render last = on top of the graph (menu on top of a modal).
+    match modal.as_mut() {
+        Some(Modal::Info(det)) => detail::draw_detail(f, det),
+        Some(Modal::Mailbox(mb)) => mailbox::draw_mailbox(f, mb),
+        None => {}
+    }
+    if let Some(m) = menu.as_mut() {
+        draw_menu(f, m);
     }
 }

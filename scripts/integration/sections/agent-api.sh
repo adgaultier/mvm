@@ -64,9 +64,9 @@ if [ "$HAVE_PROBE" = 1 ]; then
     check "A's token cannot reach B's socket" "1" \
         "$(agent_api_call agent-b "$TOKEN_A" inspect | grep -c '"ok": *false')"
     check "agent API set_notification_command registers template" "1" \
-        "$(agent_api_call agent-a "$TOKEN_A" set_notification_command '{"command":"echo <MSG> >> /tmp/notifs.log"}' | grep -c '"ok": *true')"
+        "$(agent_api_call agent-a "$TOKEN_A" set_notification_command '{"command":"echo '\''<MSG>'\'' >> /tmp/notifs.log"}' | grep -c '"ok": *true')"
     check "notification command surfaces in mvm inspect" "1" \
-        "$("$MVM" inspect agent-a | grep -c '"notification_command": *"echo <MSG> >> /tmp/notifs.log"')"
+        "$("$MVM" inspect agent-a | grep -c '"notification_command": *"echo '"'"'<MSG>'"'"' >> /tmp/notifs.log"')"
     check "notification command is sandbox-scoped (B unaffected)" "0" \
         "$("$MVM" inspect agent-b | grep -c 'notification_command')"
 
@@ -82,8 +82,9 @@ if [ "$HAVE_PROBE" = 1 ]; then
         "$(printf '%s\n' "$PROBE_RESP" | grep -o '"kind": *"[^"]*", *"ok": *true' | wc -l | tr -d ' ')"
     NOTIF_LOG=$("$MVM" exec agent-a cat /tmp/notifs.log 2>/dev/null || true)
     MISSING=0
-    for kind in child-ttl-about-to-expire restarted-after-idle need-input finished terminated input; do
-        printf '%s\n' "$NOTIF_LOG" | grep -q "$kind" || MISSING=$((MISSING + 1))
+    # Notifications are delivered as human-readable text, one line per kind.
+    for marker in "about to hit its TTL" "restarted after an idle stop" "is requesting input" "finished (exit code" "was terminated" "Daddy is requesting"; do
+        printf '%s\n' "$NOTIF_LOG" | grep -q "$marker" || MISSING=$((MISSING + 1))
     done
     check "mock notifications reached the agent's endpoint" "0" "$MISSING"
 
@@ -105,6 +106,8 @@ if [ "$HAVE_PROBE" = 1 ]; then
         "$(printf '%s\n' "$AGENTS_JSON" | grep -c "\"id\":\"$CHILD_ID\"[^}]*\"parent\":\"$SB_A\"")"
     check "delegate timeout becomes the child's TTL" "1" \
         "$(printf '%s\n' "$AGENTS_JSON" | grep -c "\"id\":\"$CHILD_ID\"[^}]*\"ttl_deadline\":\"")"
+    check "queued notification surfaces in /agents (mailbox data)" "1" \
+        "$(printf '%s\n' "$AGENTS_JSON" | grep -c '"pending_notifications":\[{')"
 
     # The queued task is only delivered once the child is ready AND has
     # registered its notification command (the mvm-agent-mcp bridge does both
@@ -124,7 +127,7 @@ if [ "$HAVE_PROBE" = 1 ]; then
     check "daddy task delivered to the child once ready" "1" \
         "$(printf '%s\n' "$DELEG_LOG" | grep -c 'integration test task')"
     check "daddy task arrived as a daddy notification" "1" \
-        "$(printf '%s\n' "$DELEG_LOG" | grep -c '"from":"daddy"')"
+        "$(printf '%s\n' "$DELEG_LOG" | grep -c 'Daddy is requesting:')"
 
     # A delegation without a message is refused outright.
     check "delegate with empty message refused" "1" \

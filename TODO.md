@@ -85,6 +85,34 @@ prebuilt images.
 
 ## Done
 
+- **mvm-flow mailbox + right-click context menu** (2026-08-23) — nodes show a
+  `✉ N pending` badge when the agent has queued notifications; right-clicking
+  a node (or Enter on the selected one) opens a context menu with `info` /
+  `mailbox`. `mailbox` is an email-style modal: inbox list on the left
+  (● pending / ○ delivered, timestamp, id, kind) and a reading pane on the
+  right with From/Kind/Id/Date/Status headers and the `to_text()` body;
+  scrollable, selection preserved across polls by notification id. The data
+  rides `AgentView`, which now carries `pending_notifications` (queued,
+  persisted) and `recent_notifications` (delivered history, volatile) — both
+  cloned from the sandbox record in `AgentView::new`. Left click no longer
+  opens modals; selection is purely rataflow's.
+- **Notifications delivered as human-readable text, not JSON** (2026-08-23) —
+  `<MSG>` substitution now injects `Notification::to_text()` prose
+  ("Daddy is requesting: …", "Child <id> finished (exit code 0): …", …)
+  instead of the serialized `Notification` JSON — agents read prose, the wire
+  format stays reserved for persistence and host-side views. String payloads
+  render verbatim (multi-line tasks survive), non-strings as compact JSON.
+  Single substitution point (`Manager::deliver_notification`); templates must
+  quote `<MSG>` (single quotes) because the prose contains spaces and shell
+  metacharacters — a bare `<MSG>` word-splits and breaks on `(`/`)`/`;`.
+  Docs, integration assertions and the `test_notification` probe all updated.
+- **mvm-flow node detail modal** (2026-08-23) — clicking a graph node (or
+  Enter on the selected one) opens a `Clear`-ed centered modal with the full
+  `GET /api/v1/sandboxes/{id}` record as a field table (same rows as the
+  TUI's inspect, plus agent status / parent / TTL) and state-gated
+  Start/Stop/Delete buttons (mouse-clickable and keyboard: s/x/d, tab+enter;
+  start iff not Running, stop iff Running, delete confirms y/n in-modal).
+  Modal owns keyboard+mouse while open, syncs from the 1s agents poll.
 - **Delegation redesign: interactive clone + Daddy notification**
   (2026-08-22) — the `DELEGATION_CMD` template mechanism is gone (supersedes
   the delegation entry below). `delegate {timeout, message}` now boots an

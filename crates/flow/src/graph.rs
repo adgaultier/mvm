@@ -18,6 +18,8 @@ pub struct AgentNode {
     pub vcpus: u8,
     pub ram_mib: u32,
     pub ttl_secs: Option<i64>,
+    /// Queued-but-undelivered notifications (the mailbox badge).
+    pub pending: usize,
 }
 
 fn ttl_remaining(deadline: Option<chrono::DateTime<chrono::Utc>>) -> Option<i64> {
@@ -41,6 +43,7 @@ impl AgentNode {
             vcpus: view.vcpus,
             ram_mib: view.ram_mib,
             ttl_secs: ttl_remaining(view.ttl_deadline),
+            pending: view.pending_notifications.len(),
         }
     }
 
@@ -49,6 +52,7 @@ impl AgentNode {
         self.vcpus = view.vcpus;
         self.ram_mib = view.ram_mib;
         self.ttl_secs = ttl_remaining(view.ttl_deadline);
+        self.pending = view.pending_notifications.len();
     }
 }
 
@@ -76,7 +80,7 @@ impl NodeContent for AgentNode {
                 Style::default().fg(Color::LightMagenta),
             ),
         };
-        let lines = vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(label, status_style),
                 Span::styled(
@@ -87,6 +91,15 @@ impl NodeContent for AgentNode {
             Line::from(format!("{} cpu / {} MiB", self.vcpus, self.ram_mib)),
             Line::from(ttl_span),
         ];
+        // Mailbox badge: undelivered notifications waiting on this agent.
+        if self.pending > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("✉ {} pending", self.pending),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
         let block = ratatui::widgets::Block::bordered()
             .title(self.name.clone())
             .border_style(border_style);

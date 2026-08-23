@@ -468,7 +468,9 @@ delegate {timeout, message}           -> launch a child that is an interactive
                                         never the child's command
 set_notification_command {command}    -> register the `<MSG>` shell template the
                                         control plane runs to deliver async
-                                        notifications to this agent
+                                        notifications to this agent (`<MSG>` is
+                                        the notification rendered as
+                                        human-readable text)
 test_notification                     -> fire one mock notification of every kind
                                         through the real delivery path
 ```

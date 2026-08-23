@@ -240,12 +240,6 @@ pub fn draw_detail(f: &mut Frame, det: &mut Detail) {
                 None => Line::from(vec![
                     Span::styled("  ↑/↓", Style::default().fg(Color::Yellow)),
                     Span::raw(" scroll  "),
-                    Span::styled("tab", Style::default().fg(Color::Yellow)),
-                    Span::raw(" button  "),
-                    Span::styled("enter/click", Style::default().fg(Color::Yellow)),
-                    Span::raw(" run  "),
-                    Span::styled("s/x/d", Style::default().fg(Color::Yellow)),
-                    Span::raw(" action  "),
                     Span::styled("q", Style::default().fg(Color::Yellow)),
                     Span::raw(" close"),
                 ]),
@@ -414,7 +408,7 @@ fn detail_rows(sb: &Sandbox) -> Vec<(&'static str, String)> {
 }
 
 /// A `width` x `height` rect centred in `area` (clamped to it).
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     Rect {

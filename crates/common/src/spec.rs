@@ -311,7 +311,8 @@ pub struct Sandbox {
     pub recent_notifications: Vec<crate::agent_api::Notification>,
     /// Shell command template the control plane runs with `mvm exec` to
     /// deliver async notifications to this agent (the spec's `async_cmd`;
-    /// `<MSG>` is the placeholder for the serialized `Notification` JSON).
+    /// `<MSG>` is the placeholder for the notification's human-readable
+    /// text, `Notification::to_text`).
     /// Registered by the agent itself over the Agent API.
     #[cfg(feature = "agent-api")]
     #[serde(default, skip_serializing_if = "Option::is_none")]

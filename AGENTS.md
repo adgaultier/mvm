@@ -304,14 +304,17 @@ candidate that is dynamically linked or not a Linux ELF at all.
   token-verification code, while token *minting* into the guest env stays (it
   is part of the boot plumbing).
 - **Control-plane notification delivery runs `sh -c` through `mvm exec`.**
-  A sandbox's `notification_command` (`async_cmd`, `<MSG>` = the serialized
-  `Notification`) is a template the control plane executes as
+  A sandbox's `notification_command` (`async_cmd`, `<MSG>` = the
+  notification's human-readable text, `Notification::to_text`) is a template
+  the control plane executes as
   `sh -c <template>` via the manager's `exec` — so delivery only works while
   the guestd is up and the sandbox is `Running` (that's by design: the spec
   delivers asynchronously to *running* agents). `<MSG>` substitution is a
-  literal string replace (`MSG_PLACEHOLDER`), not a shell expansion,
-  so the template is free to use `<MSG>` inside single quotes for the agent's
-  own shell. The placeholder is `<MSG>`, not `$MSG`, on purpose: a `$`-form
+  literal string replace (`MSG_PLACEHOLDER`), not a shell expansion. The
+  rendered text is prose — spaces, parentheses, semicolons — so templates
+  must quote `<MSG>` (single quotes, e.g. `echo '<MSG>' >> log`); a bare
+  `<MSG>` word-splits and breaks on the first metacharacter. The placeholder
+  is `<MSG>`, not `$MSG`, on purpose: a `$`-form
   gets expanded by the shell that *creates* the sandbox when the template
   arrives via `-e` ("unbound variable" or silently empty), `<MSG>` survives
   any quoting. `test_notification` (Agent API method + `mvm-agent-mcp` tool)
