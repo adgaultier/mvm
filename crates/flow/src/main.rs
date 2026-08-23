@@ -1,4 +1,5 @@
 mod client;
+mod detail;
 mod graph;
 
 use std::io::stdout;
@@ -8,18 +9,21 @@ use std::time::Duration;
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
 use mvm_common::agent_api::AgentView;
+use mvm_common::{Sandbox, SandboxState};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
-use rataflow::EventResponse;
+use rataflow::{EventResponse, FlowEvent};
 
 use crate::client::Client;
+use crate::detail::{Action, Detail};
 use crate::graph::GraphState;
 
 #[derive(Parser)]
@@ -36,6 +40,17 @@ struct Args {
 enum PollUpdate {
     Agents(Vec<AgentView>),
     Error(String),
+    /// Detail modal record fetch (on open and as a post-action refresh).
+    Inspect {
+        id: String,
+        result: Result<Box<Sandbox>, String>,
+    },
+    /// A start/stop/delete triggered from the detail modal finished.
+    Action {
+        id: String,
+        action: Action,
+        result: Result<(), String>,
+    },
 }
 
 fn main() {
@@ -80,6 +95,7 @@ fn main() {
     let (tx, rx) = mpsc::channel::<PollUpdate>();
     {
         let client = client.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(1000));
             let update = match client.list_agents() {
@@ -95,20 +111,79 @@ fn main() {
     let mut snapshot = agents;
     let mut last_error: Option<String> = None;
     let mut root_gone = false;
+    let mut detail: Option<Detail> = None;
 
     'app: loop {
         let _ = terminal.draw(|f| {
-            draw(f, &mut graph, &snapshot, &root, root_gone, last_error.as_deref());
+            draw(
+                f,
+                &mut graph,
+                &snapshot,
+                &root,
+                root_gone,
+                last_error.as_deref(),
+                &mut detail,
+            );
         });
 
         while let Ok(update) = rx.try_recv() {
             match update {
                 PollUpdate::Agents(agents) => {
                     root_gone = !graph.reconcile(&agents, &root);
+                    // Keep the open modal in sync with the fresher poll view.
+                    if let Some(det) = detail.as_mut() {
+                        if let (Some(sb), Some(view)) = (
+                            det.sandbox.as_mut(),
+                            agents.iter().find(|a| a.id.as_str() == det.id),
+                        ) {
+                            sb.state = view.state;
+                            sb.booted_at = view.booted_at;
+                            sb.ready_at = view.ready_at;
+                        }
+                    }
                     snapshot = agents;
                     last_error = None;
                 }
                 PollUpdate::Error(e) => last_error = Some(e),
+                PollUpdate::Inspect { id, result } => {
+                    if let Some(det) = detail.as_mut().filter(|d| d.id == id) {
+                        match result {
+                            Ok(sb) => {
+                                det.sandbox = Some(*sb);
+                                det.error = None;
+                                det.action_error = None;
+                            }
+                            Err(e) => {
+                                // A refresh failure keeps the stale record.
+                                if det.sandbox.is_some() {
+                                    det.action_error = Some(e);
+                                } else {
+                                    det.error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                }
+                PollUpdate::Action { id, action, result } => {
+                    let mut close = false;
+                    if let Some(det) = detail.as_mut().filter(|d| d.id == id) {
+                        det.busy = false;
+                        match result {
+                            Ok(()) => {
+                                if action == Action::Delete {
+                                    // The next poll drops the node.
+                                    close = true;
+                                } else {
+                                    spawn_fetch(&client, &tx, &id);
+                                }
+                            }
+                            Err(e) => det.action_error = Some(e),
+                        }
+                    }
+                    if close {
+                        detail = None;
+                    }
+                }
             }
         }
 
@@ -134,23 +209,69 @@ fn main() {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    if key.code == KeyCode::Char('q')
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         break 'app;
                     }
-                    if key.code == KeyCode::Char('f') {
-                        graph.flow.request_fit_view();
-                    } else if matches!(
-                        graph.flow.handle_controls_key_event(key),
-                        EventResponse::NotHandled
-                    ) {
-                        graph.flow.handle_key_event(key);
+                    // The detail modal owns the keyboard while it is open.
+                    if let Some(det) = detail.as_mut() {
+                        if handle_detail_key(det, key, &client, &tx) {
+                            detail = None;
+                        }
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('q') {
+                        break 'app;
+                    }
+                    match key.code {
+                        KeyCode::Char('f') => graph.flow.request_fit_view(),
+                        KeyCode::Enter => {
+                            if let Some(id) = graph.flow.first_selected_node_id() {
+                                open_detail(&mut detail, &client, &tx, &id, &snapshot);
+                            }
+                        }
+                        _ => {
+                            if matches!(
+                                graph.flow.handle_controls_key_event(key),
+                                EventResponse::NotHandled
+                            ) {
+                                graph.flow.handle_key_event(key);
+                            }
+                        }
                     }
                 }
                 Ok(Event::Mouse(mouse)) => {
-                    graph.flow.handle_mouse_event(mouse);
+                    // The detail modal owns the mouse while it is open.
+                    if let Some(det) = detail.as_mut() {
+                        let mut close = false;
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(action) = det.action_at(mouse.column, mouse.row) {
+                                    trigger_action(det, action, &client, &tx);
+                                } else if !det.contains(mouse.column, mouse.row) {
+                                    close = true;
+                                }
+                            }
+                            MouseEventKind::ScrollUp => {
+                                det.scroll = det.scroll.saturating_sub(1);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                det.scroll = det.scroll.saturating_add(1);
+                            }
+                            _ => {}
+                        }
+                        if close {
+                            detail = None;
+                        }
+                        continue;
+                    }
+                    let resp = graph.flow.handle_mouse_event(mouse);
+                    for ev in resp.into_events() {
+                        if let FlowEvent::NodeClicked { node_id } = ev {
+                            open_detail(&mut detail, &client, &tx, &node_id, &snapshot);
+                        }
+                    }
                 }
                 Ok(Event::Resize(_, _)) => {
                     graph.flow.request_fit_view();
@@ -173,6 +294,111 @@ fn resolve_root(agents: &[AgentView], root: &str) -> Option<String> {
         .map(|a| a.id.to_string())
 }
 
+/// Fetch the full sandbox record on a background thread (the daemon call is
+/// blocking; the record arrives as `PollUpdate::Inspect`).
+fn spawn_fetch(client: &Client, tx: &mpsc::Sender<PollUpdate>, id: &str) {
+    let c = client.clone();
+    let t = tx.clone();
+    let id = id.to_string();
+    std::thread::spawn(move || {
+        let result = c.get_sandbox(&id).map(Box::new);
+        let _ = t.send(PollUpdate::Inspect { id, result });
+    });
+}
+
+fn open_detail(
+    detail: &mut Option<Detail>,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+    id: &str,
+    snapshot: &[AgentView],
+) {
+    let label = snapshot
+        .iter()
+        .find(|a| a.id.as_str() == id)
+        .and_then(|a| a.name.clone())
+        .unwrap_or_else(|| id.chars().take(8).collect());
+    *detail = Some(Detail::loading(id, &label));
+    spawn_fetch(client, tx, id);
+}
+
+/// Run a state-gated action on a background thread. `Delete` first arms the
+/// in-modal confirmation; once confirmed, a running sandbox is stopped before
+/// removal (same order as the TUI).
+fn trigger_action(det: &mut Detail, action: Action, client: &Client, tx: &mpsc::Sender<PollUpdate>) {
+    let Some(sb) = det.sandbox.as_ref() else {
+        return;
+    };
+    if det.busy || !action.enabled(sb.state) {
+        return;
+    }
+    if action == Action::Delete && !det.confirming_delete {
+        det.confirming_delete = true;
+        return;
+    }
+    det.busy = true;
+    det.confirming_delete = false;
+    det.action_error = None;
+    let c = client.clone();
+    let t = tx.clone();
+    let id = det.id.clone();
+    let running = sb.state == SandboxState::Running;
+    std::thread::spawn(move || {
+        let result: Result<(), String> = (|| {
+            match action {
+                Action::Start => c.start_sandbox(&id),
+                Action::Stop => c.stop_sandbox(&id),
+                Action::Delete => {
+                    if running {
+                        c.stop_sandbox(&id)?;
+                    }
+                    c.remove_sandbox(&id)
+                }
+            }
+        })();
+        let _ = t.send(PollUpdate::Action { id, action, result });
+    });
+}
+
+/// Modal keyboard handler; returns true when the modal should close.
+fn handle_detail_key(
+    det: &mut Detail,
+    key: event::KeyEvent,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+) -> bool {
+    if det.confirming_delete {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                trigger_action(det, Action::Delete, client, tx);
+            }
+            _ => det.confirming_delete = false,
+        }
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return true,
+        KeyCode::Up => det.scroll = det.scroll.saturating_sub(1),
+        KeyCode::Down => det.scroll = det.scroll.saturating_add(1),
+        KeyCode::PageUp => det.scroll = det.scroll.saturating_sub(10),
+        KeyCode::PageDown => det.scroll = det.scroll.saturating_add(10),
+        KeyCode::Tab | KeyCode::Right => det.cycle_button(true),
+        KeyCode::BackTab | KeyCode::Left => det.cycle_button(false),
+        KeyCode::Enter => {
+            if let Some(action) = det.selected_action() {
+                trigger_action(det, action, client, tx);
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(action) = Action::from_key(c) {
+                trigger_action(det, action, client, tx);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
 fn draw(
     f: &mut ratatui::Frame,
     graph: &mut GraphState,
@@ -180,6 +406,7 @@ fn draw(
     root: &str,
     root_gone: bool,
     last_error: Option<&str>,
+    detail: &mut Option<Detail>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -230,11 +457,16 @@ fn draw(
             None => format!("{id} (not in last snapshot)"),
         }
     } else {
-        "q quit · f fit · arrows/hjkl pan · Tab select · +/- zoom · drag nodes to rearrange"
+        "q quit · f fit · click/enter details · arrows/hjkl pan · Tab select · +/- zoom · drag nodes to rearrange"
             .to_string()
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         chunks[2],
     );
+
+    // The modal renders last = on top of the graph.
+    if let Some(det) = detail.as_mut() {
+        detail::draw_detail(f, det);
+    }
 }

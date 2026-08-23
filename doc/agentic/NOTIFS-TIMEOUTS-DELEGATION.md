@@ -27,7 +27,7 @@ for opencode:
 ```
 SID=$(curl -s localhost:4096/session | jq -r 'sort_by(.time.updated) | reverse | map(select(.parentID == null)) | .[0].id'); curl -sS -X POST "localhost:4096/session/$SID/prompt_async" -H 'Content-Type: application/json' -d "$(jq -n --arg text '<MSG>' '{parts:[{type:"text",text:$text}]}')"
 ```
-````
+```
                     Message
                        │
             ┌──────────┴──────────┐
@@ -57,7 +57,6 @@ SID=$(curl -s localhost:4096/session | jq -r 'sort_by(.time.updated) | reverse |
 if an agent is idle, then :
 - incoming notifications are put into a queue
 - agent is restarted `mvm start`
-- notif mesage should basically say to continue to work, after having consumed notification queue
 - vm start command  + mounts are responsible to restart from saved state:
     - with overlayfs storage backend:`opencode -c `
     - with copy storage backend: `opencode -c ` + `OPENCODE_DB=/home/agent/opencode/sessions.db` where `/home/agent/opencode`  is a  bind mount  
@@ -79,21 +78,25 @@ if an agent is idle, then :
 
 ## RUNTIME 
 ### vercel FX
-➜  dist git:(feat/mcp-inspect-agent-limitation) ✗ time fx ask "Reply with exactly: FX  TEST OK"
+➜  ` time fx ask "Reply with exactly: FX  TEST OK"`
+```
 𝒇x v0.0.3 · Run /help for commands
 
 ┃ Reply with exactly: FX  TEST OK
 
   FX  TEST OK
 fx ask "Reply with exactly: FX  TEST OK"  
+```
 >> 0,04s user 0,06s system 1% cpu 5,886 total
 
-###
-➜  dist git:(feat/mcp-inspect-agent-limitation) ✗ time opencode run  "Reply with exactly: opencode TEST OK"
-
+### Opencode
+➜  `time opencode run  "Reply with exactly: opencode TEST OK"`
+```
 > build · deepseek-v4-flash-free
 
 opencode TEST OK
 
-opencode run "Reply with exactly: opencode TEST OK" 
+"Reply with exactly: opencode TEST OK"
+
+```
 >>  2,61s user 0,69s system 65% cpu 5,019 total

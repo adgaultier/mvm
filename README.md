@@ -469,9 +469,6 @@ delegate {timeout, message}           -> launch a child that is an interactive
 set_notification_command {command}    -> register the `<MSG>` shell template the
                                         control plane runs to deliver async
                                         notifications to this agent
-ready                                 -> declare the workload ready (steady state);
-                                        also flushes any notifications queued for
-                                        this agent (a delegated child's task)
 test_notification                     -> fire one mock notification of every kind
                                         through the real delivery path
 ```
