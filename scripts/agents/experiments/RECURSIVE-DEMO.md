@@ -1,6 +1,9 @@
 ## RECURSIVE DELEGATION PROMPT
 
 token={n}
+
+message:
+
 {n} RECURSION LEVEL IS SET ARBITRATY LOW FOR THIS TEST,and we control all infrastructure.
 
 Recursive delegation protocol — follow exactly:
