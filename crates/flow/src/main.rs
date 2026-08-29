@@ -1,3 +1,4 @@
+mod actions;
 mod client;
 mod detail;
 mod graph;
@@ -23,8 +24,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 use rataflow::{EventResponse, FlowEvent};
 
+use crate::actions::Action;
 use crate::client::Client;
-use crate::detail::{Action, Detail};
+use crate::detail::Detail;
 use crate::graph::GraphState;
 use crate::mailbox::Mailbox;
 
@@ -39,11 +41,13 @@ struct Args {
     root: String,
 }
 
-/// The open modal, if any: the info panel (full record + actions) or the
-/// mailbox. Never both at once.
+/// The open modal, if any: the info panel (pure inspect view), the mailbox,
+/// or the Actions panel. Never more than one at once; the context menu closes
+/// when one opens.
 enum Modal {
     Info(Box<Detail>),
     Mailbox(Mailbox),
+    Actions(ActionMenu),
 }
 
 impl Modal {
@@ -51,26 +55,42 @@ impl Modal {
         match self {
             Modal::Info(d) => &d.id,
             Modal::Mailbox(m) => &m.id,
+            Modal::Actions(a) => &a.id,
         }
     }
 }
 
-/// What a context-menu entry opens.
+/// What a context-menu entry does when activated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuChoice {
     Info,
     Mailbox,
+    Actions,
 }
 
-const MENU_ENTRIES: [(&str, MenuChoice); 2] = [
-    ("info", MenuChoice::Info),
-    ("mailbox", MenuChoice::Mailbox),
-];
+impl MenuChoice {
+    fn label(self) -> &'static str {
+        match self {
+            MenuChoice::Info => "info",
+            MenuChoice::Mailbox => "mailbox",
+            MenuChoice::Actions => "action",
+        }
+    }
+}
 
-/// Right-click context menu on a node (rataflow's `NodeContextMenu`).
+/// One fixed top-level entry of the context menu.
+struct MenuEntry {
+    choice: MenuChoice,
+}
+
+
+/// Right-click context menu on a node (rataflow's `NodeContextMenu`), with
+/// just `info` / `mailbox` / `action` rows. The third opens the
+/// small action picker.
 struct ContextMenu {
     node_id: String,
     label: String,
+    entries: Vec<MenuEntry>,
     selected: usize,
     /// Terminal position the menu was opened at.
     pos: (u16, u16),
@@ -80,9 +100,15 @@ struct ContextMenu {
 
 impl ContextMenu {
     fn new(node_id: &str, label: String, pos: (u16, u16)) -> Self {
+        let entries = vec![
+            MenuEntry { choice: MenuChoice::Info },
+            MenuEntry { choice: MenuChoice::Mailbox },
+            MenuEntry { choice: MenuChoice::Actions },
+        ];
         Self {
             node_id: node_id.to_string(),
             label,
+            entries,
             selected: 0,
             pos,
             area: ratatui::layout::Rect::default(),
@@ -90,12 +116,12 @@ impl ContextMenu {
     }
 
     fn cycle(&mut self, delta: i32) {
-        let n = MENU_ENTRIES.len() as i32;
+        let n = self.entries.len() as i32;
         self.selected = ((self.selected as i32 + delta).rem_euclid(n)) as usize;
     }
 
     fn choice(&self) -> MenuChoice {
-        MENU_ENTRIES[self.selected].1
+        self.entries[self.selected].choice
     }
 
     /// Entry index at a terminal position, if the click hit one.
@@ -105,7 +131,75 @@ impl ContextMenu {
             return None;
         }
         let idx = row.checked_sub(inner_y)? as usize;
-        (idx < MENU_ENTRIES.len()).then_some(idx)
+        (idx < self.entries.len()).then_some(idx)
+    }
+
+    fn contains(&self, column: u16, row: u16) -> bool {
+        self.area
+            .contains(ratatui::layout::Position::new(column, row))
+    }
+}
+
+/// The small action-picker modal: state-applicable actions (start/stop as
+/// gated, delete always) plus the three greyed children placeholders. Rows
+/// the state forbids are dropped entirely. Delete is two-step: the first
+/// click/Enter arms `confirming_delete`, the second fires (stop-then-remove
+/// via the daemon).
+struct ActionMenu {
+    id: String,
+    label: String,
+    /// Rows: applicable actions + placeholder (colour-less) rows.
+    entries: Vec<Action>,
+    selected: usize,
+    confirming_delete: bool,
+    /// Modal rect from the last render, for click-outside-to-close.
+    area: ratatui::layout::Rect,
+}
+
+impl ActionMenu {
+    fn new(id: &str, label: &str, state: SandboxState, has_children: bool) -> Self {
+        // Child actions only appear when the node actually has children.
+        let entries = Action::ALL
+            .into_iter()
+            .filter(|a| {
+                let is_children = matches!(
+                    a,
+                    Action::StartChildren | Action::StopChildren | Action::DeleteChildren
+                );
+                (is_children && has_children) || (!is_children && a.enabled(state))
+            })
+            .collect();
+        Self {
+            id: id.to_string(),
+            label: label.to_string(),
+            entries,
+            selected: 0,
+            confirming_delete: false,
+            area: ratatui::layout::Rect::default(),
+        }
+    }
+
+    fn cycle(&mut self, delta: i32) {
+        let n = self.entries.len() as i32;
+        self.selected = ((self.selected as i32 + delta).rem_euclid(n)) as usize;
+    }
+
+    /// Highlighted action, when it may run (placeholder rows are colour-less).
+    fn choice(&self) -> Option<Action> {
+        self.entries.get(self.selected).and_then(|a| {
+            (a.color().is_some()).then_some(*a)
+        })
+    }
+
+    /// Action at a terminal position, if it may run.
+    fn action_at(&self, column: u16, row: u16) -> Option<Action> {
+        let inner_y = self.area.y + 1;
+        if column <= self.area.x || column >= self.area.x + self.area.width - 1 {
+            return None;
+        }
+        let idx = row.checked_sub(inner_y)? as usize;
+        let a = self.entries[idx];
+        (idx < self.entries.len() && a.color().is_some()).then_some(a)
     }
 
     fn contains(&self, column: u16, row: u16) -> bool {
@@ -115,8 +209,8 @@ impl ContextMenu {
 }
 
 fn draw_menu(f: &mut ratatui::Frame, menu: &mut ContextMenu) {
-    let width = 16u16;
-    let height = MENU_ENTRIES.len() as u16 + 2;
+    let width = 12u16;
+    let height = menu.entries.len() as u16 + 2;
     let screen = f.area();
     let x = menu.pos.0.min(screen.width.saturating_sub(width));
     let y = menu.pos.1.min(screen.height.saturating_sub(height));
@@ -128,7 +222,7 @@ fn draw_menu(f: &mut ratatui::Frame, menu: &mut ContextMenu) {
         .title(format!(" {} ", menu.label));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    for (i, (label, _)) in MENU_ENTRIES.iter().enumerate() {
+    for (i, entry) in menu.entries.iter().enumerate() {
         let row = ratatui::layout::Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         let style = if i == menu.selected {
             Style::default()
@@ -138,24 +232,62 @@ fn draw_menu(f: &mut ratatui::Frame, menu: &mut ContextMenu) {
         } else {
             Style::default()
         };
+        let label = entry.choice.label();
         f.render_widget(Paragraph::new(format!(" {label}")).style(style), row);
+    }
+}
+
+fn draw_action_menu(f: &mut ratatui::Frame, menu: &mut ActionMenu) {
+    // "delete children" is 14; the confirm line is longer.
+    let width = if menu.confirming_delete { 24 } else { 16 };
+    let height = menu.entries.len() as u16 + 2;
+    let screen = f.area();
+    let area = detail::centered_rect(width.min(screen.width), height.min(screen.height), screen);
+    menu.area = area;
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = ratatui::widgets::Block::bordered()
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {} ", menu.label));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    for (i, action) in menu.entries.iter().enumerate() {
+        let row = ratatui::layout::Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let is_delete = *action == Action::Delete;
+        let (text, base) = if menu.confirming_delete && is_delete {
+            (
+                " really delete? [y]/[n]".to_string(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            let base = match action.color() {
+                Some(c) => Style::default().fg(c),
+                None => Style::default().fg(Color::DarkGray),
+            };
+            (format!(" {}", action.label()), base)
+        };
+        let style = if i == menu.selected && action.color().is_some() {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        f.render_widget(Paragraph::new(text).style(style), row);
     }
 }
 
 enum PollUpdate {
     Agents(Vec<AgentView>),
     Error(String),
-    /// Detail modal record fetch (on open and as a post-action refresh).
+    /// Detail modal record fetch (on open; the modal is inspect-only now).
     Inspect {
         id: String,
         result: Result<Box<Sandbox>, String>,
     },
-    /// A start/stop/delete triggered from the detail modal finished.
-    Action {
-        id: String,
-        action: Action,
-        result: Result<(), String>,
-    },
+    /// A start/stop/delete triggered from the context menu finished.
+    MenuAction { result: Result<(), String> },
 }
 
 fn main() {
@@ -266,39 +398,19 @@ fn main() {
                             Ok(sb) => {
                                 det.sandbox = Some(*sb);
                                 det.error = None;
-                                det.action_error = None;
                             }
                             Err(e) => {
-                                // A refresh failure keeps the stale record.
-                                if det.sandbox.is_some() {
-                                    det.action_error = Some(e);
-                                } else {
-                                    det.error = Some(e);
-                                }
+                                det.error = Some(e);
                             }
                         }
                     }
                 }
-                PollUpdate::Action { id, action, result } => {
-                    let mut close = false;
-                    if let Some(Modal::Info(det)) =
-                        modal.as_mut().filter(|m| m.id() == id)
-                    {
-                        det.busy = false;
-                        match result {
-                            Ok(()) => {
-                                if action == Action::Delete {
-                                    // The next poll drops the node.
-                                    close = true;
-                                } else {
-                                    spawn_fetch(&client, &tx, &id);
-                                }
-                            }
-                            Err(e) => det.action_error = Some(e),
-                        }
-                    }
-                    if close {
-                        modal = None;
+                PollUpdate::MenuAction { result } => {
+                    // Errors surface in the header; on success the next poll
+                    // reconciles the node (drops it on delete, flips state on
+                    // start/stop).
+                    if let Err(e) = result {
+                        last_error = Some(e);
                     }
                 }
             }
@@ -341,7 +453,7 @@ fn main() {
                                 let choice = m.choice();
                                 let node_id = m.node_id.clone();
                                 menu = None;
-                                open_choice(&mut modal, choice, &node_id, &client, &tx, &snapshot);
+                                activate(&mut modal, choice, &node_id, &client, &tx, &snapshot);
                             }
                             _ => {}
                         }
@@ -350,13 +462,19 @@ fn main() {
                     // Modals own the keyboard while they are open.
                     match modal.as_mut() {
                         Some(Modal::Info(det)) => {
-                            if handle_detail_key(det, key, &client, &tx) {
+                            if handle_detail_key(det, key) {
                                 modal = None;
                             }
                             continue;
                         }
                         Some(Modal::Mailbox(mb)) => {
                             if handle_mailbox_key(mb, key) {
+                                modal = None;
+                            }
+                            continue;
+                        }
+                        Some(Modal::Actions(am)) => {
+                            if handle_actions_key(am, key, &client, &tx) {
                                 modal = None;
                             }
                             continue;
@@ -375,7 +493,7 @@ fn main() {
                                     .node_terminal_rect(&id)
                                     .map(|(l, t, _, _)| (l.max(0) as u16, t.max(0) as u16))
                                     .unwrap_or((2, 2));
-                                menu = Some(menu_for(&id, &snapshot, pos));
+                                menu = Some(ContextMenu::new(&id, node_label(&snapshot, &id), pos));
                             }
                         }
                         _ => {
@@ -394,12 +512,10 @@ fn main() {
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if let Some(idx) = m.entry_at(mouse.column, mouse.row) {
-                                    let choice = MENU_ENTRIES[idx].1;
+                                    let choice = m.entries[idx].choice;
                                     let node_id = m.node_id.clone();
                                     menu = None;
-                                    open_choice(
-                                        &mut modal, choice, &node_id, &client, &tx, &snapshot,
-                                    );
+                                    activate(&mut modal, choice, &node_id, &client, &tx, &snapshot);
                                 } else if !m.contains(mouse.column, mouse.row) {
                                     menu = None;
                                 }
@@ -415,9 +531,7 @@ fn main() {
                     match modal.as_mut() {
                         Some(Modal::Info(det)) => match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(action) = det.action_at(mouse.column, mouse.row) {
-                                    trigger_action(det, action, &client, &tx);
-                                } else if !det.contains(mouse.column, mouse.row) {
+                                if !det.contains(mouse.column, mouse.row) {
                                     close = true;
                                 }
                             }
@@ -441,6 +555,34 @@ fn main() {
                             MouseEventKind::ScrollDown => mb.select_move(1),
                             _ => {}
                         },
+                        Some(Modal::Actions(am)) => match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if am.confirming_delete {
+                                    if am.action_at(mouse.column, mouse.row).is_some() {
+                                        let id = am.id.clone();
+                                        modal = None;
+                                        trigger_action(&id, Action::Delete, &client, &tx);
+                                    } else if am.contains(mouse.column, mouse.row) {
+                                        am.confirming_delete = false;
+                                    } else {
+                                        close = true;
+                                    }
+                                } else if let Some(action) = am.action_at(mouse.column, mouse.row) {
+                                    if action == Action::Delete {
+                                        am.confirming_delete = true;
+                                    } else {
+                                        let id = am.id.clone();
+                                        modal = None;
+                                        trigger_action(&id, action, &client, &tx);
+                                    }
+                                } else if !am.contains(mouse.column, mouse.row) {
+                                    close = true;
+                                }
+                            }
+                            MouseEventKind::ScrollUp => am.cycle(-1),
+                            MouseEventKind::ScrollDown => am.cycle(1),
+                            _ => {}
+                        },
                         None => {}
                     }
                     if close {
@@ -450,9 +592,9 @@ fn main() {
                         let resp = graph.flow.handle_mouse_event(mouse);
                         for ev in resp.into_events() {
                             if let FlowEvent::NodeContextMenu { node_id } = ev {
-                                menu = Some(menu_for(
+                                menu = Some(ContextMenu::new(
                                     &node_id,
-                                    &snapshot,
+                                    node_label(&snapshot, &node_id),
                                     (mouse.column, mouse.row),
                                 ));
                             }
@@ -489,13 +631,8 @@ fn node_label(snapshot: &[AgentView], id: &str) -> String {
         .unwrap_or_else(|| id.chars().take(8).collect())
 }
 
-/// Build the context menu for a node, opened at terminal position `pos`.
-fn menu_for(id: &str, snapshot: &[AgentView], pos: (u16, u16)) -> ContextMenu {
-    ContextMenu::new(id, node_label(snapshot, id), pos)
-}
-
 /// Open the modal a context-menu entry points at.
-fn open_choice(
+fn activate(
     modal: &mut Option<Modal>,
     choice: MenuChoice,
     id: &str,
@@ -516,6 +653,12 @@ fn open_choice(
             }
             *modal = Some(Modal::Mailbox(mb));
         }
+        MenuChoice::Actions => {
+            let view = snapshot.iter().find(|a| a.id.as_str() == id);
+            let state = view.map(|a| a.state).unwrap_or(SandboxState::Created);
+            let has_children = view.map(|a| !a.children.is_empty()).unwrap_or(false);
+            *modal = Some(Modal::Actions(ActionMenu::new(id, &label, state, has_children)));
+        }
     }
 }
 
@@ -531,42 +674,63 @@ fn spawn_fetch(client: &Client, tx: &mpsc::Sender<PollUpdate>, id: &str) {
     });
 }
 
-/// Run a state-gated action on a background thread. `Delete` first arms the
-/// in-modal confirmation; once confirmed, a running sandbox is stopped before
-/// removal (same order as the TUI).
-fn trigger_action(det: &mut Detail, action: Action, client: &Client, tx: &mpsc::Sender<PollUpdate>) {
-    let Some(sb) = det.sandbox.as_ref() else {
-        return;
-    };
-    if det.busy || !action.enabled(sb.state) {
-        return;
-    }
-    if action == Action::Delete && !det.confirming_delete {
-        det.confirming_delete = true;
-        return;
-    }
-    det.busy = true;
-    det.confirming_delete = false;
-    det.action_error = None;
+/// Run a lifecycle action from the actions modal on a background thread.
+/// Delete on a running sandbox is stopped before removal (same order as the
+/// TUI); completion arrives as `PollUpdate::MenuAction`.
+fn trigger_action(id: &str, action: Action, client: &Client, tx: &mpsc::Sender<PollUpdate>) {
     let c = client.clone();
     let t = tx.clone();
-    let id = det.id.clone();
-    let running = sb.state == SandboxState::Running;
+    let id = id.to_string();
     std::thread::spawn(move || {
-        let result: Result<(), String> = (|| {
-            match action {
-                Action::Start => c.start_sandbox(&id),
-                Action::Stop => c.stop_sandbox(&id),
-                Action::Delete => {
-                    if running {
-                        c.stop_sandbox(&id)?;
-                    }
-                    c.remove_sandbox(&id)
+        let result: Result<(), String> = match action {
+            Action::Start => c.start_sandbox(&id),
+            Action::Stop => c.stop_sandbox(&id),
+            Action::Delete => {
+                // The record may have transitioned since the menu opened;
+                // stopping a stopped sandbox is a no-op daemon-side.
+                let _ = c.stop_sandbox(&id);
+                c.remove_sandbox(&id)
+            }
+            _ => Ok(()),
+        };
+        let _ = t.send(PollUpdate::MenuAction { result });
+    });
+}
+
+/// Actions-modal keyboard handler; returns true when the modal should close.
+fn handle_actions_key(
+    am: &mut ActionMenu,
+    key: event::KeyEvent,
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+) -> bool {
+    if am.confirming_delete {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                trigger_action(&am.id.clone(), Action::Delete, client, tx);
+                return true;
+            }
+            _ => am.confirming_delete = false,
+        }
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return true,
+        KeyCode::Up => am.cycle(-1),
+        KeyCode::Down => am.cycle(1),
+        KeyCode::Enter => {
+            if let Some(action) = am.choice() {
+                if action == Action::Delete {
+                    am.confirming_delete = true;
+                } else {
+                    trigger_action(&am.id.clone(), action, client, tx);
+                    return true;
                 }
             }
-        })();
-        let _ = t.send(PollUpdate::Action { id, action, result });
-    });
+        }
+        _ => {}
+    }
+    false
 }
 
 /// Mailbox keyboard handler; returns true when the modal should close.
@@ -582,40 +746,15 @@ fn handle_mailbox_key(mb: &mut Mailbox, key: event::KeyEvent) -> bool {
     false
 }
 
-/// Detail-modal keyboard handler; returns true when the modal should close.
-fn handle_detail_key(
-    det: &mut Detail,
-    key: event::KeyEvent,
-    client: &Client,
-    tx: &mpsc::Sender<PollUpdate>,
-) -> bool {
-    if det.confirming_delete {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                trigger_action(det, Action::Delete, client, tx);
-            }
-            _ => det.confirming_delete = false,
-        }
-        return false;
-    }
+/// Detail-modal keyboard handler (inspect-only); returns true when the modal
+/// should close.
+fn handle_detail_key(det: &mut Detail, key: event::KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => return true,
         KeyCode::Up => det.scroll = det.scroll.saturating_sub(1),
         KeyCode::Down => det.scroll = det.scroll.saturating_add(1),
         KeyCode::PageUp => det.scroll = det.scroll.saturating_sub(10),
         KeyCode::PageDown => det.scroll = det.scroll.saturating_add(10),
-        KeyCode::Tab | KeyCode::Right => det.cycle_button(true),
-        KeyCode::BackTab | KeyCode::Left => det.cycle_button(false),
-        KeyCode::Enter => {
-            if let Some(action) = det.selected_action() {
-                trigger_action(det, action, client, tx);
-            }
-        }
-        KeyCode::Char(c) => {
-            if let Some(action) = Action::from_key(c) {
-                trigger_action(det, action, client, tx);
-            }
-        }
         _ => {}
     }
     false
@@ -693,9 +832,70 @@ fn draw(
     match modal.as_mut() {
         Some(Modal::Info(det)) => detail::draw_detail(f, det),
         Some(Modal::Mailbox(mb)) => mailbox::draw_mailbox(f, mb),
+        Some(Modal::Actions(am)) => draw_action_menu(f, am),
         None => {}
     }
     if let Some(m) = menu.as_mut() {
         draw_menu(f, m);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_common::SandboxState;
+
+    fn no_children(state: SandboxState) -> ActionMenu {
+        ActionMenu::new("id", "l", state, false)
+    }
+
+    fn with_children(state: SandboxState) -> ActionMenu {
+        ActionMenu::new("id", "l", state, true)
+    }
+
+    #[test]
+    fn child_actions_hidden_without_children() {
+        for state in [
+            SandboxState::Created,
+            SandboxState::Running,
+            SandboxState::Stopped,
+            SandboxState::Exited,
+            SandboxState::Failed,
+        ] {
+            let am = no_children(state);
+            for a in [Action::StartChildren, Action::StopChildren, Action::DeleteChildren] {
+                assert!(!am.entries.contains(&a), "{a:?} visible on {state} without children");
+            }
+        }
+    }
+
+    #[test]
+    fn child_actions_shown_with_children() {
+        let am = with_children(SandboxState::Running);
+        for a in [Action::StartChildren, Action::StopChildren, Action::DeleteChildren] {
+            assert!(am.entries.contains(&a));
+        }
+    }
+
+    #[test]
+    fn lifecycle_rows_follow_state() {
+        let am = no_children(SandboxState::Running);
+        assert!(!am.entries.contains(&Action::Start));
+        assert!(am.entries.contains(&Action::Stop));
+
+        let am = no_children(SandboxState::Created);
+        assert!(am.entries.contains(&Action::Start));
+        assert!(!am.entries.contains(&Action::Stop));
+        assert!(am.entries.contains(&Action::Delete));
+    }
+
+    #[test]
+    fn action_at_only_hits_live_rows() {
+        let mut am = with_children(SandboxState::Created);
+        am.area = ratatui::layout::Rect::new(0, 0, 24, am.entries.len() as u16 + 2);
+        let idx = am.entries.iter().position(|a| *a == Action::Start).unwrap();
+        assert_eq!(am.action_at(2, 1 + idx as u16), Some(Action::Start));
+        let idx = am.entries.iter().position(|a| *a == Action::StartChildren).unwrap();
+        assert_eq!(am.action_at(2, 1 + idx as u16), None);
     }
 }

@@ -1547,7 +1547,7 @@ fn host_nofile() -> Option<(u64, u64)> {
         rlim_max: 0,
     };
     (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0)
-        .then(|| (rl.rlim_cur as u64, rl.rlim_max as u64))
+        .then_some((rl.rlim_cur, rl.rlim_max))
 }
 
 fn pid_alive(pid: u32) -> bool {
