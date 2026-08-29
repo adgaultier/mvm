@@ -18,7 +18,7 @@ QF_FILTERED=$(mktemp /tmp/mvm-itest-qf.XXXXXX)
 QF_RAW=$(mktemp /tmp/mvm-itest-qr.XXXXXX)
 "$MVM" create --name qfilter alpine sh -c 'sleep 4; printf "Q\033[6nZ\n"' >/dev/null 2>&1
 "$MVM" start qfilter >/dev/null 2>&1
-timeout 30 "$MVM" logs -f qfilter > "$QF_FILTERED" 2>/dev/null &
+timeout "$T" "$MVM" logs -f qfilter > "$QF_FILTERED" 2>/dev/null &
 QF_PID=$!
 curl -sN "$MVM_HOST/api/v1/sandboxes/qfilter/logs?follow=true&raw=true" > "$QF_RAW" 2>/dev/null &
 QR_PID=$!
