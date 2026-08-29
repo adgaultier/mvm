@@ -2,13 +2,14 @@
 //! method) to launch a child that is an *interactive clone* of itself — same
 //! image, workload command, env and resources. The parent supplies *data
 //! only*: the delegation `message` is queued on the child as a Daddy `input`
-//! notification (`Sandbox.pending_notifications`) and flushed through the
-//! child's registered `notification_command` once the child declares `ready`
-//! — an agent can never choose a command for its child. The child inherits
-//! the caller's spec, records lineage (`Sandbox.parent`) and starts
-//! immediately. The request's `timeout` becomes the child's display-only TTL
-//! deadline — enforcement (stop+rm of the agent *and* its children, per
-//! `doc/agentic/notes.md`) is a follow-up.
+//! notification (`Sandbox.agent.pending_notifications`) and flushed through
+//! the child's registered `agent.notification_command` once the child
+//! declares `ready` — an agent can never choose a command for its child.
+//! The child inherits the caller's spec, records lineage
+//! (`Sandbox.agent.parent`) and starts immediately. The request's `timeout`
+//! becomes the child's display-only TTL deadline — enforcement (stop+rm of
+//! the agent *and* its children, per `doc/agentic/notes.md`) is a
+//! follow-up.
 
 use mvm_common::agent_api::{DelegateRequest, Notification};
 use mvm_common::{Error, Result, Sandbox, SandboxId, SandboxSpec};
@@ -16,8 +17,8 @@ use mvm_common::{Error, Result, Sandbox, SandboxId, SandboxSpec};
 use crate::Manager;
 
 /// Label carried by delegated children, value = the delegating parent's id
-/// (lineage also lives on `Sandbox.parent`; the label keeps it visible in
-/// the plain sandbox list/inspect output).
+/// (lineage also lives on `Sandbox.agent.parent`; the label keeps it
+/// visible in the plain sandbox list/inspect output).
 pub const DELEGATE_PARENT_LABEL: &str = "mvm.delegate.parent";
 
 /// Build the child's spec from the parent's record. The child runs the
@@ -76,12 +77,12 @@ impl Manager {
             // Lineage, TTL and the queued task live on the record, not the spec.
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if let Some(entry) = sandboxes.get_mut(child.id.as_str()) {
-                entry.info.parent = Some(caller.id.clone());
+                entry.info.agent.parent = Some(caller.id.clone());
                 if req.timeout > 0 {
-                    entry.info.ttl_deadline =
+                    entry.info.agent.ttl_deadline =
                         Some(chrono::Utc::now() + chrono::Duration::seconds(req.timeout as i64));
                 }
-                entry.info.pending_notifications.push(task);
+                entry.info.agent.pending_notifications.push(task);
             }
         }
         self.persist()?;
