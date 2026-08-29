@@ -18,6 +18,10 @@ fi
 
 # --- assertion helpers ------------------------------------------------------
 
+# Fuse for host-side `timeout` wrappers: seconds. One knob; override with
+# MVM_ITEST_T when a slow runner needs more room than the default of 15.
+T="${MVM_ITEST_T:-15}"
+
 PASS=0
 FAIL=0
 SKIP=0

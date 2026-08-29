@@ -47,7 +47,7 @@ else
 fi
 
 if build_probe "$PROBES_DIR/strictprobe.c" "$PROBE_DIR" strictprobe; then
-    STRICT_OUT=$(timeout 30 "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
+    STRICT_OUT=$(timeout "$T" "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
         /probe/strictprobe 2>/dev/null || true)
     for key in no_new_privs ptrace mount umount2 pivot_root unshare setns init_module \
                delete_module finit_module kexec_load kexec_file_load; do

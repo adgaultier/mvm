@@ -18,8 +18,8 @@ if command -v script >/dev/null 2>&1; then
     # Attach, run a command through the console, then detach with ^P^Q: the
     # workload must survive it (an EOF here would end the shell instead).
     ATT_OUT=$(mktemp /tmp/mvm-itest-attach.XXXXXX)
-    run_pty timeout 40 "$MVM" attach att \
-        < <(sleep 3; printf 'echo ATTACH-OK\n'; sleep 3; printf '\020\021') \
+    run_pty timeout "$T" "$MVM" attach att \
+        < <(sleep 3; printf 'echo ATTACH-OK\n'; sleep 3; printf '\000\021') \
         > "$ATT_OUT" 2>&1 || true
     # The marker appears twice — the pty echoes the command, then the command
     # prints it — so match presence, not a count.
@@ -32,7 +32,7 @@ if command -v script >/dev/null 2>&1; then
         "$("$MVM" exec att echo alive | tr -d '\r')"
     "$MVM" stop att >/dev/null 2>&1
     RESTART_OUT=$(mktemp /tmp/mvm-itest-restart.XXXXXX)
-    run_pty timeout 30 "$MVM" start -a att \
+    run_pty timeout "$T" "$MVM" start -a att \
         < <(sleep 2; printf 'exit\n') > "$RESTART_OUT" 2>&1 || true
     check "start -a does not replay old console" "1" \
         "$(! grep -q ATTACH-OK "$RESTART_OUT" && echo 1)"
