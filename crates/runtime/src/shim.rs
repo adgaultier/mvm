@@ -117,7 +117,7 @@ fn rlimit_entry(linux_id: u32, cur: libc::rlim_t, max: libc::rlim_t) -> String {
         if x == libc::RLIM_INFINITY {
             u64::MAX
         } else {
-            x as u64
+            x
         }
     };
     format!("{linux_id}={}:{}", v(cur), v(max))
