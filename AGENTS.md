@@ -175,6 +175,15 @@ candidate that is dynamically linked or not a Linux ELF at all.
   anything without a trailing newline (shell prompts, raw-mode echo) until
   the next `\n` or process exit — which is exactly what a frozen terminal
   looks like. Flush per chunk on interactive paths.
+- **Termios restore alone does not undo guest terminal modes.** A guest TUI
+  may DECSET 1003 (mouse-motion reporting) or push the kitty keyboard
+  protocol; that state lives in the terminal *emulator*, not in the line
+  discipline, so if the VM dies first the host terminal keeps translating
+  mouse moves into shell input after `mvm` exits, or ctrl+letter into
+  `ESC[97;5u`-style keycodes. Both restore paths (`restore_terminal`, and the
+  signal handler via async-signal-safe `write`) emit DECRST for the mouse
+  modes plus the keyboard-protocol resets (`RESET_TERMINAL_MODES` in
+  `cli/src/run.rs`).
 - **One gvproxy serves one VM, for life.** Its vfkit datagram endpoint
   learns the peer from the first packet and never re-learns, so a shared
   socket leaves every later VM with no route and no error (and all guests
@@ -188,19 +197,25 @@ candidate that is dynamically linked or not a Linux ELF at all.
   silently losing stdout/stderr frames.
 - **`unshare(CLONE_NEWUSER)` requires a single-threaded process** — userns
   entry must happen before the tokio runtime exists.
-- **Terminal *queries* are filtered per consumer, not per stream.** A tty
-  session's output contains sequences that ask the terminal to answer — DSR
-  (`ESC[6n`, "where is the cursor?") and Device Attributes (`ESC[c`). A
+- **Terminal *queries* and *mode changes* are filtered per consumer, not per
+  stream.** A tty session's output contains sequences that ask the terminal
+  to answer — DSR (`ESC[6n`, "where is the cursor?"), Device Attributes
+  (`ESC[c`), OSC colour/palette queries, XTGETTCAP/XTVERSION/DECRQM. A
   question that reaches someone who will not answer it makes *their*
   terminal answer into its own input buffer: stray `^[[1;5R` in their shell
-  (the alpine prompt `~ # ` is 4 columns wide, hence column 5). So:
-  `manager::console_filter` strips queries from `console.log`, and the logs
-  route runs the same filter over the live broadcast unless the client asks
-  for `?raw=true`. Only an interactive console session (`mvm attach`,
-  `mvm run -it`) sets `raw` — it owns the terminal and reads the reply.
-  Filtering only the recording is the trap: it leaves `mvm logs -f`'s live
-  tail unprotected, which is the same bug with a longer path to it. Colours,
-  cursor motion and erases are real output and stay everywhere.
+  (the alpine prompt `~ # ` is 4 columns wide, hence column 5), or a dump of
+  `;10;rgb:…` replies echoed after `mvm logs` exits. Mode changes are just
+  as leaky: a replayed DECSET 1003 or kitty-keyboard push rewires the
+  reader's terminal with nobody left to undo it. So `manager::console_filter`
+  strips both from `console.log`, and the logs route runs the same filter
+  over the backlog *and* the live broadcast unless the client asks for
+  `?raw=true` (the backlog re-filter also cleans logs recorded before the
+  filter existed). Only an interactive console session (`mvm attach`,
+  `mvm run -it`) sets `raw` — it owns the terminal, reads the replies, and
+  resets modes on exit (`RESET_TERMINAL_MODES`). Filtering only the
+  recording is the trap: it leaves `mvm logs -f`'s live tail unprotected,
+  which is the same bug with a longer path to it. Colours, cursor motion and
+  erases are real output and stay everywhere.
 - **macOS: no hypervisor entitlement, no VMs.** Hypervisor.framework
   refuses binaries that don't carry `com.apple.security.hypervisor`;
   `krun_start_enter` fails with `EINVAL` and no better hint. `build.sh`

@@ -457,11 +457,12 @@ impl Manager {
                 .append(true)
                 .open(&log_path)
                 .expect("console.log");
-            // The recording drops terminal queries (see console_filter): it
-            // gets replayed by `logs` and attach's backlog, and a replayed
-            // question makes the reader's terminal answer into its own input.
-            // The broadcast stays byte-exact — a live interactive shell asks
-            // for the cursor column and reads the reply.
+            // The recording drops terminal queries and mode changes (see
+            // console_filter): it gets replayed by `logs` and attach's
+            // backlog, and a replayed question makes the reader's terminal
+            // answer into its own input. The broadcast stays byte-exact — a
+            // live interactive shell asks for the cursor column and reads
+            // the reply.
             let mut filter = console_filter::QueryFilter::default();
             let mut buf = [0u8; 8192];
             loop {
@@ -1563,17 +1564,26 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Keep only the last `n` lines of console output. Console bytes are raw (a
-/// pty emits CRLF), so this splits on '\n' and keeps the separators.
+/// Keep only the last `n` lines of console output, capped at
+/// `MAX_TAIL_BYTES`. Console bytes are raw (a pty emits CRLF), so this splits
+/// on '\n' and keeps the separators; the byte cap matters for TUI streams,
+/// which redraw with cursor motion and may contain almost no newlines —
+/// without it the cap fails open and replays the whole history.
+const MAX_TAIL_BYTES: usize = 16 * 1024;
+
 fn tail_lines(backlog: Vec<u8>, n: Option<usize>) -> Vec<u8> {
     let Some(n) = n else { return backlog };
     if n == 0 {
         return Vec::new();
     }
+    let byte_start = backlog.len().saturating_sub(MAX_TAIL_BYTES);
     // Walk back over `n` line endings, ignoring one trailing newline.
     let end = backlog.len().saturating_sub(1);
     let mut seen = 0;
     for (i, b) in backlog[..end].iter().enumerate().rev() {
+        if i <= byte_start {
+            break;
+        }
         if *b == b'\n' {
             seen += 1;
             if seen == n {
@@ -1584,7 +1594,7 @@ fn tail_lines(backlog: Vec<u8>, n: Option<usize>) -> Vec<u8> {
             break;
         }
     }
-    backlog
+    backlog[byte_start..].to_vec()
 }
 
 /// SIGTERM, wait, then SIGKILL. Kills the whole process group (the shim is
@@ -1635,6 +1645,18 @@ mod tests {
         assert_eq!(tail_lines(b"a\nb\n/ # ".to_vec(), Some(1)), b"/ # ");
         assert_eq!(tail_lines(b"only".to_vec(), Some(3)), b"only");
         assert_eq!(tail_lines(Vec::new(), Some(3)), b"");
+    }
+
+    #[test]
+    fn tail_caps_newline_poor_streams_by_bytes() {
+        // A TUI redraws with cursor motion: almost no newlines, so the line
+        // count is useless and the byte cap must kick in instead of replaying
+        // the whole history.
+        let mut log = vec![b'x'; MAX_TAIL_BYTES * 3];
+        log.extend_from_slice(b"\r\nEND");
+        let tailed = tail_lines(log, Some(40));
+        assert_eq!(tailed.len(), MAX_TAIL_BYTES);
+        assert!(tailed.ends_with(b"\r\nEND"));
     }
 
     #[test]

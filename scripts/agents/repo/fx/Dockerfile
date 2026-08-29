@@ -5,7 +5,8 @@ RUN apk add --no-cache \
     ca-certificates \
     curl \
     wget \
-    tar
+    tar \
+    python3
 
 RUN addgroup -S agent && \
     adduser -S -G agent -h /home/agent agent
@@ -19,5 +20,8 @@ ENV PATH="/home/agent/.local/bin:${PATH}"
 
 COPY --chown=agent:agent mvm-agent-mcp /tmp/mvm-agent-mcp
 
-RUN cd /tmp/mvm-agent-mcp && uv tool install .
+RUN cd /tmp/mvm-agent-mcp && \
+    uv tool install --python /usr/bin/python3 .
 WORKDIR /home/agent
+
+

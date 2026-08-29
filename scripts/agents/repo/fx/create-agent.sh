@@ -9,10 +9,12 @@ source .env
 : "${AI_GATEWAY_API_KEY:?AI_GATEWAY_API_KEY is not set in .env}"
 "$MVM" create -it --net gvproxy \
   --name "$SDBX_NAME" \
-  --cpus 2  -m 2048 \
+  --cpus 1  -m 512 \
   -v "$(pwd)/conf:/home/agent/.fx:rw" \
+  -v "$(pwd)/../../workspace:/home/agent/workspace:rw" \
+  -v "$(pwd)/../../experiments:/home/agent/workspace/experiments:ro" \
   -e AI_GATEWAY_API_KEY=$AI_GATEWAY_API_KEY \
-  fx-agent:latest bash -c "fx ask 'register yourself' && fx -c"
+  fx-agent:latest fx -c
 
 echo "$SDBX_NAME sdbx created with fx agent"
 

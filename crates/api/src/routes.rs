@@ -139,6 +139,14 @@ async fn logs(
 ) -> Result<Response, ApiError> {
     let (backlog, rx) = state.manager.logs(&id, q.follow, q.tail)?;
 
+    // The backlog was already filtered at record time, but logs recorded
+    // before the filter existed still carry queries/mode changes; re-filter
+    // so every non-raw reader gets a clean replay regardless of the log's age.
+    let backlog = if q.raw {
+        backlog
+    } else {
+        QueryFilter::default().filter(&backlog)
+    };
     let backlog_stream = stream::once(async move { Ok::<Bytes, Infallible>(Bytes::from(backlog)) });
 
     let stream: stream::BoxStream<'static, Result<Bytes, Infallible>> = match rx {
