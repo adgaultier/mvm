@@ -347,6 +347,14 @@ candidate that is dynamically linked or not a Linux ELF at all.
   operator-provided workload + notification template decide what a child
   executes. Delivery failures leave the remainder queued; a non-zero exit of
   the agent's own command counts as delivered (recorded in the history).
+- **Agent state in `Sandbox` lives nested under `agent`**. `parent`,
+  `ttl_deadline`, `notification_command`, `pending_notifications` and
+  `recent_notifications` moved from five flat fields to a single
+  `SandboxAgent` object kept as `Sandbox.agent` — so `mvm inspect` shows
+  one tidy nested object instead of five flat top-level keys. Deliberate
+  breaking change: legacy `sandboxes.json` files written before this
+  nesting will fail to deserialize old flat keys; the manager does not
+  migrate them — blow away the registry (or hand-edit) after upgrading.
 - **Agent API responses need a graceful close.** Each Agent API connection
   carries one request + one response; dropping the unix socket right after
   `write_all` races libkrun's vsock bridge — the guest sees EOF *before* the

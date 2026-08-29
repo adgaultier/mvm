@@ -359,8 +359,8 @@ fn detail_rows(sb: &Sandbox) -> Vec<(&'static str, String)> {
         ("NAME", spec.name.clone().unwrap_or(dash.clone())),
         ("STATE", sb.state.to_string()),
         ("AGENT STATUS", AgentStatus::derive(sb).to_string()),
-        ("PARENT", sb.parent.as_ref().map(|p| p.to_string()).unwrap_or_else(|| dash.clone())),
-        ("TTL DEADLINE", ts(sb.ttl_deadline)),
+        ("PARENT", sb.agent.parent.as_ref().map(|p| p.to_string()).unwrap_or_else(|| dash.clone())),
+        ("TTL DEADLINE", ts(sb.agent.ttl_deadline)),
         (
             "EXIT CODE",
             sb.exit_code

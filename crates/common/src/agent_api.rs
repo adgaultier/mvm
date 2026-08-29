@@ -338,7 +338,7 @@ impl AgentInfo {
             ready_at: sandbox.ready_at,
             vcpus: sandbox.spec.vcpus,
             ram_mib: sandbox.spec.ram_mib,
-            parent: sandbox.parent.clone(),
+            parent: sandbox.agent.parent.clone(),
             children,
             capabilities: None,
             budget: None,
@@ -447,16 +447,16 @@ impl AgentView {
             name: sandbox.spec.name.clone(),
             state: sandbox.state,
             status: AgentStatus::derive(sandbox),
-            parent: sandbox.parent.clone(),
+            parent: sandbox.agent.parent.clone(),
             children,
             vcpus: sandbox.spec.vcpus,
             ram_mib: sandbox.spec.ram_mib,
             booted_at: sandbox.booted_at,
             ready_at: sandbox.ready_at,
-            ttl_deadline: sandbox.ttl_deadline,
-            last_notification: sandbox.recent_notifications.last().cloned(),
-            pending_notifications: sandbox.pending_notifications.clone(),
-            recent_notifications: sandbox.recent_notifications.clone(),
+            ttl_deadline: sandbox.agent.ttl_deadline,
+            last_notification: sandbox.agent.recent_notifications.last().cloned(),
+            pending_notifications: sandbox.agent.pending_notifications.clone(),
+            recent_notifications: sandbox.agent.recent_notifications.clone(),
         }
     }
 }
@@ -718,9 +718,9 @@ mod tests {
     fn agent_view_carries_lineage_and_ttl() {
         let parent = sandbox_with(SandboxState::Running, true, true);
         let mut child = sandbox_with(SandboxState::Running, true, false);
-        child.parent = Some(parent.id.clone());
-        child.ttl_deadline = Some(chrono::Utc::now() + chrono::Duration::seconds(60));
-        child.recent_notifications.push(Notification::input(serde_json::json!({"msg": "hi"})));
+        child.agent.parent = Some(parent.id.clone());
+        child.agent.ttl_deadline = Some(chrono::Utc::now() + chrono::Duration::seconds(60));
+        child.agent.recent_notifications.push(Notification::input(serde_json::json!({"msg": "hi"})));
 
         let view = AgentView::new(&child, vec![]);
         assert_eq!(view.status, AgentStatus::Running);

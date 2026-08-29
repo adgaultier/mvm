@@ -713,7 +713,7 @@ impl Manager {
             let entry = sandboxes
                 .get_mut(&id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
-            entry.info.notification_command = Some(command);
+            entry.info.agent.notification_command = Some(command);
             entry.info.clone()
         };
         self.persist()?;
@@ -831,14 +831,13 @@ impl Manager {
         out
     }
 
-    /// Direct children of a sandbox — the sandboxes it delegated to
-    /// (records with `parent == id`).
+    /// Direct children of a sandbox — the sandboxes it delegated to.
     #[cfg(feature = "agent-api")]
     pub fn children_of(&self, id: &SandboxId) -> Vec<SandboxId> {
         let sandboxes = self.inner.sandboxes.read().unwrap();
         let mut children: Vec<SandboxId> = sandboxes
             .values()
-            .filter(|e| e.info.parent.as_ref() == Some(id))
+            .filter(|e| e.info.agent.parent.as_ref() == Some(id))
             .map(|e| e.info.id.clone())
             .collect();
         children.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -858,7 +857,7 @@ impl Manager {
             .map(|sb| {
                 let children = infos
                     .iter()
-                    .filter(|c| c.parent.as_ref() == Some(&sb.id))
+                    .filter(|c| c.agent.parent.as_ref() == Some(&sb.id))
                     .map(|c| c.id.clone())
                     .collect();
                 mvm_common::agent_api::AgentView::new(sb, children)
@@ -1771,13 +1770,13 @@ mod tests {
 
         let cmd = "curl -sS -X POST \"localhost:4096/session/$SID/prompt_async\" -d \"<MSG>\"";
         let record = mgr.set_notification_command(id.as_str(), cmd.into()).unwrap();
-        assert_eq!(record.notification_command.as_deref(), Some(cmd));
+        assert_eq!(record.agent.notification_command.as_deref(), Some(cmd));
 
         // The command is persisted with the registry, not just held in memory.
         let reloaded = Manager::new(DataDir::at(dir.clone())).unwrap();
         let sandboxes = reloaded.inner.sandboxes.read().unwrap();
         let entry = sandboxes.get(id.as_str()).unwrap();
-        assert_eq!(entry.info.notification_command.as_deref(), Some(cmd));
+        assert_eq!(entry.info.agent.notification_command.as_deref(), Some(cmd));
         drop(sandboxes);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1808,7 +1807,7 @@ mod tests {
         let reloaded = Manager::new(DataDir::at(dir.clone())).unwrap();
         let sandboxes = reloaded.inner.sandboxes.read().unwrap();
         let entry = sandboxes.get(id.as_str()).unwrap();
-        assert_eq!(entry.info.pending_notifications.len(), 1);
+        assert_eq!(entry.info.agent.pending_notifications.len(), 1);
         drop(sandboxes);
 
         let _ = std::fs::remove_dir_all(&dir);

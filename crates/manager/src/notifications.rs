@@ -73,7 +73,7 @@ impl Manager {
             let entry = sandboxes
                 .get(&id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
-            entry.info.notification_command.clone().ok_or_else(|| {
+            entry.info.agent.notification_command.clone().ok_or_else(|| {
                 Error::InvalidState(format!(
                     "sandbox {id} has no registered notification command"
                 ))
@@ -193,7 +193,7 @@ impl Manager {
             let entry = sandboxes
                 .get_mut(&id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
-            entry.info.pending_notifications.push(notification);
+            entry.info.agent.pending_notifications.push(notification);
         }
         self.persist()
     }
@@ -215,11 +215,11 @@ impl Manager {
                 .get(&id)
                 .ok_or_else(|| Error::SandboxNotFound(id_or_name.to_string()))?;
             let ready = entry.info.ready_at.is_some();
-            let has_command = entry.info.notification_command.is_some();
+            let has_command = entry.info.agent.notification_command.is_some();
             if !entry.info.state.is_alive() || !ready || !has_command {
                 return Ok(0);
             }
-            entry.info.pending_notifications.clone()
+            entry.info.agent.pending_notifications.clone()
         };
         if pending.is_empty() {
             return Ok(0);
@@ -231,7 +231,7 @@ impl Manager {
             {
                 let mut sandboxes = self.inner.sandboxes.write().unwrap();
                 if let Some(entry) = sandboxes.get_mut(&id) {
-                    entry.info.pending_notifications.remove(0);
+                    entry.info.agent.pending_notifications.remove(0);
                 }
             }
             self.persist()?;
@@ -241,13 +241,12 @@ impl Manager {
     }
 
     /// Append a successfully delivered notification to the sandbox's volatile
-    /// history (`Sandbox.recent_notifications`, bounded, newest last). Not
-    /// persisted — the history only feeds live graph views (`mvm-flow` edge
-    /// labels) and resets on daemon restart.
+    /// history (bounded, newest last). Not persisted — the history only feeds
+    /// live graph views (`mvm-flow` edge labels) and resets on daemon restart.
     fn record_notification(&self, id: &str, notification: &Notification) {
         let mut sandboxes = self.inner.sandboxes.write().unwrap();
         if let Some(entry) = sandboxes.get_mut(id) {
-            let history = &mut entry.info.recent_notifications;
+            let history = &mut entry.info.agent.recent_notifications;
             history.push(notification.clone());
             if history.len() > MAX_RECENT_NOTIFICATIONS {
                 let excess = history.len() - MAX_RECENT_NOTIFICATIONS;
@@ -367,6 +366,7 @@ mod tests {
             .get(id.as_str())
             .unwrap()
             .info
+            .agent
             .pending_notifications;
         assert_eq!(pending.len(), 1);
         assert_eq!(
@@ -387,7 +387,7 @@ mod tests {
 
         let mut sb = Sandbox::new(SandboxSpec::default());
         sb.state = SandboxState::Running;
-        sb.notification_command = Some("true".to_string());
+        sb.agent.notification_command = Some("true".to_string());
         // ready_at deliberately unset: the agent hasn't declared ready yet.
         let id = sb.id.clone();
         mgr.inner
@@ -411,6 +411,7 @@ mod tests {
                 .get(id.as_str())
                 .unwrap()
                 .info
+                .agent
                 .pending_notifications
                 .len(),
             1,
@@ -448,6 +449,7 @@ mod tests {
             .get(id.as_str())
             .unwrap()
             .info
+            .agent
             .recent_notifications;
         assert_eq!(history.len(), MAX_RECENT_NOTIFICATIONS);
         assert_eq!(

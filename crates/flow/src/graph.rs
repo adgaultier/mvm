@@ -295,7 +295,7 @@ mod tests {
         sb.state = state;
         sb.booted_at = Some(chrono::Utc::now());
         sb.ready_at = Some(chrono::Utc::now());
-        sb.parent = parent.map(SandboxId::from);
+        sb.agent.parent = parent.map(SandboxId::from);
         AgentView::new(&sb, Vec::new())
     }
 

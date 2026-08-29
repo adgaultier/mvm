@@ -247,6 +247,60 @@ pub struct TimelineEvent {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Agent-specific state of a sandbox, grouped under one key in the wire
+/// shape (`mvm inspect` renders it as a single nested object instead of
+/// five flat fields). All fields are empty/non-agent by default; only the
+/// `agent-api` feature enables a sandbox to delegate, queue notifications,
+/// and register a `notification_command`.
+#[cfg(feature = "agent-api")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxAgent {
+    /// Lineage: the agent that delegated this sandbox into existence
+    /// (`Manager::delegate`). `None` for root sandboxes created by a user.
+    /// Persisted so lineage survives daemon restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SandboxId>,
+    /// Display-only TTL: set when this sandbox was delegated with a timeout;
+    /// the deadline at which it expires. Enforcement (stop+rm of the agent
+    /// and its children, per `doc/agentic/notes.md`) is a follow-up — graph
+    /// views render a countdown from this for now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    /// Bounded in-memory history of notifications delivered to this agent
+    /// (newest last, capped by the manager). Volatile — never serialized —
+    /// feeding `mvm-flow`'s edge labels.
+    #[serde(skip)]
+    pub recent_notifications: Vec<crate::agent_api::Notification>,
+    /// Shell command template the control plane runs with `mvm exec` to
+    /// deliver async notifications to this agent (the spec's `async_cmd`;
+    /// `<MSG>` is the placeholder for the notification's human-readable
+    /// text, `Notification::to_text`). Registered by the agent itself over
+    /// the Agent API. Persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_command: Option<String>,
+    /// Notifications queued for this agent but not yet delivered (a
+    /// delegated child receives its Daddy task this way). Flushed through
+    /// `notification_command` once the agent declares `ready` and has
+    /// registered the command — persisted so a daemon restart cannot lose
+    /// a delegation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_notifications: Vec<crate::agent_api::Notification>,
+}
+
+#[cfg(feature = "agent-api")]
+impl SandboxAgent {
+    /// Skip-empty-ing helper for `Sandbox.agent`'s `skip_serializing_if`:
+    /// true only when nothing agent-specific was ever set (no delegation,
+    /// no notification plumbing), which keeps non-agent sandboxes' JSON
+    /// free of an empty `"agent": {}` key.
+    fn is_empty(&self) -> bool {
+        self.parent.is_none()
+            && self.ttl_deadline.is_none()
+            && self.notification_command.is_none()
+            && self.pending_notifications.is_empty()
+    }
+}
+
 /// Full record of a sandbox as tracked by the manager.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sandbox {
@@ -297,41 +351,12 @@ pub struct Sandbox {
     /// timestamps directly. Bounded by the manager.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timeline: Vec<Vec<TimelineEvent>>,
-    /// Lineage: the agent that delegated this sandbox into existence
-    /// (`Manager::delegate`). `None` for root sandboxes created by a user.
-    /// Persisted so lineage survives daemon restarts.
+    /// Agent-specific state, nested on the wire under a single `agent` key
+    /// (Option A, breaking): `mvm inspect` shows one tidy object rather than
+    /// five flat fields. Absent from serialization when empty.
     #[cfg(feature = "agent-api")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<SandboxId>,
-    /// Display-only TTL: set when this sandbox was delegated with a timeout;
-    /// the deadline at which it expires. Enforcement (stop+rm of the agent
-    /// and its children, per `doc/agentic/notes.md`) is a follow-up — graph
-    /// views render a countdown from this for now.
-    #[cfg(feature = "agent-api")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
-    /// Bounded in-memory history of notifications delivered to this agent
-    /// (newest last, capped by the manager). Volatile — never serialized —
-    /// feeding `mvm-flow`'s edge labels.
-    #[cfg(feature = "agent-api")]
-    #[serde(skip)]
-    pub recent_notifications: Vec<crate::agent_api::Notification>,
-    /// Shell command template the control plane runs with `mvm exec` to
-    /// deliver async notifications to this agent (the spec's `async_cmd`;
-    /// `<MSG>` is the placeholder for the notification's human-readable
-    /// text, `Notification::to_text`).
-    /// Registered by the agent itself over the Agent API.
-    #[cfg(feature = "agent-api")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notification_command: Option<String>,
-    /// Notifications queued for this agent but not yet delivered (a delegated
-    /// child receives its Daddy task this way). Flushed through
-    /// `notification_command` once the agent declares `ready` and has
-    /// registered the command — persisted so a daemon restart cannot lose a
-    /// delegation.
-    #[cfg(feature = "agent-api")]
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_notifications: Vec<crate::agent_api::Notification>,
+    #[serde(default, skip_serializing_if = "SandboxAgent::is_empty")]
+    pub agent: SandboxAgent,
     /// SHA-256 hash of the sandbox's VM-scoped bearer token, held only while
     /// the VM is running. This is authentication material internal to the
     /// manager: `#[serde(skip)]` keeps it out of every API response and out
@@ -364,15 +389,7 @@ impl Sandbox {
             nofile: None,
             timeline: Vec::new(),
             #[cfg(feature = "agent-api")]
-            parent: None,
-            #[cfg(feature = "agent-api")]
-            ttl_deadline: None,
-            #[cfg(feature = "agent-api")]
-            recent_notifications: Vec::new(),
-            #[cfg(feature = "agent-api")]
-            notification_command: None,
-            #[cfg(feature = "agent-api")]
-            pending_notifications: Vec::new(),
+            agent: SandboxAgent::default(),
             guest_token_hash: None,
             guest_token_created_at: None,
         }
