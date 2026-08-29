@@ -319,8 +319,12 @@ fn console_session(
                             // The log stream blocks in the main thread and
                             // cannot be interrupted, so leave from here —
                             // after putting the terminal back by hand, since
-                            // exiting skips the guard's Drop.
-                            restore_terminal();
+                            // exiting skips the guard's Drop. Termios only:
+                            // a guest TUI's terminal-emulator modes (kitty
+                            // keyboard, modifyOtherKeys,…) must survive the
+                            // detach so re-attaching resumes them; only an
+                            // exited/dead guest warrants the full reset.
+                            restore_terminal(false);
                             eprintln!("\r\nmvm: detached (sandbox still running)");
                             std::process::exit(0);
                         }
@@ -495,8 +499,12 @@ fn reset_terminal_signal_handlers() {
     }
 }
 
-/// Undo raw mode, once, whoever gets there first.
-fn restore_terminal() {
+/// Undo raw mode, once, whoever gets there first. `modes` additionally
+/// resets terminal-emulator modes (mouse, focus, paste, kitty keyboard,
+/// modifyOtherKeys) — needed only when the guest will not re-assert them:
+/// an exited/dead sandbox (guard Drop, signal). Detaching a live one passes
+/// `false`, leaving the modes a re-attach expects intact.
+fn restore_terminal(modes: bool) {
     let Ok(mut saved) = ORIGINAL_TERMIOS.lock() else {
         return;
     };
@@ -507,7 +515,9 @@ fn restore_terminal() {
         // reporting (DECSET 1003). If the VM is killed before the TUI
         // can disable it, mouse movements otherwise become input to the
         // shell after mvm exits.
-        reset_terminal_modes();
+        if modes {
+            reset_terminal_modes();
+        }
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &term);
         }
@@ -516,6 +526,11 @@ fn restore_terminal() {
 }
 
 /// Restores the local terminal on drop (raw mode for `exec -it`).
+///
+/// The Drop always does the full reset: it fires on the console/exec stream
+/// ending, which doubles as sandbox-exit for `mvm run`, and on a signal —
+/// at that point the guest is gone (and an `attach`ed stream only ends when
+/// the sandbox exits).
 struct RawTermGuard;
 
 impl RawTermGuard {
@@ -558,7 +573,7 @@ impl RawTermGuard {
 
 impl Drop for RawTermGuard {
     fn drop(&mut self) {
-        restore_terminal();
+        restore_terminal(true);
     }
 }
 

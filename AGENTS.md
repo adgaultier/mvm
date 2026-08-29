@@ -180,10 +180,15 @@ candidate that is dynamically linked or not a Linux ELF at all.
   protocol; that state lives in the terminal *emulator*, not in the line
   discipline, so if the VM dies first the host terminal keeps translating
   mouse moves into shell input after `mvm` exits, or ctrl+letter into
-  `ESC[97;5u`-style keycodes. Both restore paths (`restore_terminal`, and the
-  signal handler via async-signal-safe `write`) emit DECRST for the mouse
-  modes plus the keyboard-protocol resets (`RESET_TERMINAL_MODES` in
-  `cli/src/run.rs`).
+  `ESC[97;5u`-style keycodes. The reset is issued only when the guest is
+  gone: `restore_terminal(modes)` in `cli/src/run.rs` emits the DECRSTs for
+  the mouse modes plus the keyboard-protocol resets (`RESET_TERMINAL_MODES`)
+  from the guard's `Drop` (stream EOF = sandbox exit) and the signal handler
+  (async-signal-safe `write`), while a *detach* (`^P^Q`) restores termios
+  only — the modes must survive so the TUI's keyboard protocol still works
+  when the next attach replays into the still-running guest. Resetting on
+  detach broke resume: the backlog can't re-assert the modes (console_filter
+  strips them from the recording) and the TUI doesn't re-push them.
 - **One gvproxy serves one VM, for life.** Its vfkit datagram endpoint
   learns the peer from the first packet and never re-learns, so a shared
   socket leaves every later VM with no route and no error (and all guests
