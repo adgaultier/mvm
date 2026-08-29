@@ -187,6 +187,8 @@ oci:`.
 | `--security PROFILE` | `default` \| `strict` -  strict installs an extra guest-side seccomp filter in the workload's spawn path for hostile workloads; see [SEC.TODO.md](doc/security/SEC.TODO.md) |
 | `--rm` | (`run` only) remove the sandbox when the workload exits |
 
+
+
 `-i` and `-t` are **properties of the sandbox, fixed at create time** (as in
 docker). `start` has no `-i`/`-t` of its own -  it reuses what the sandbox was
 created with, so a client can never contradict the running VM:

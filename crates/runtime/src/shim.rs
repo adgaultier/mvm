@@ -13,6 +13,9 @@ use crate::vm::KrunContext;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimConfig {
     pub sandbox_id: String,
+    /// Guest hostname (name + short id, or the plain id).
+    #[serde(default)]
+    pub hostname: Option<String>,
     /// Prepared root filesystem for the guest (writable), served over virtiofs.
     pub rootfs: PathBuf,
     /// Workload argv (already resolved from image config + user override).
@@ -281,6 +284,9 @@ pub fn run_shim(config: &ShimConfig) -> Result<()> {
         // `USER` against its own user database.
         if let Some(user) = &config.user {
             env.push(format!("MVM_USER={user}"));
+        }
+        if let Some(hostname) = &config.hostname {
+            env.push(format!("MVM_HOSTNAME={hostname}"));
         }
         // Security profile. Strict installs an additional seccomp filter in
         // the guestd.s workload spawn path (denies bpf/keyctl/perf_event_open/

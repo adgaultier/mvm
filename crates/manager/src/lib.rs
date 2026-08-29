@@ -396,6 +396,7 @@ impl Manager {
         }
         let config = ShimConfig {
             sandbox_id: id.clone(),
+            hostname: Some(mvm_common::sandbox_hostname(spec.name.as_deref(), &id)),
             rootfs: prepared.rootfs,
             exec,
             env,
