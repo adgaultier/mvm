@@ -342,13 +342,14 @@ candidate that is dynamically linked or not a Linux ELF at all.
   the end-to-end wiring check in `agent-api.sh`.
 - **Delegation boots an interactive clone — never a parent-supplied command.**
   `DelegateRequest` is `{timeout, message}`; the child inherits the caller's
-  spec verbatim (same workload, image, env) and starts immediately, with the
-  message queued on it as a Daddy `input` notification
-  (`Sandbox.pending_notifications`, persisted). The queue is drained by
-  `flush_pending` once the child is running, has declared `ready`, and has
-  registered its `notification_command` — both `mark_ready` and
-  `set_notification_command` trigger a flush, whichever comes last wins the
-  race. An agent may therefore hand a child *data*, but only the
+  spec verbatim (same workload, image, env — including `attach_stdin`, so an
+  interactive parent stays attachable in its children) and starts
+  immediately, with the message queued on it as a Daddy `input`
+  notification (`Sandbox.pending_notifications`, persisted). The queue is
+  drained by `flush_pending` once the child is running, has declared
+  `ready`, and has registered its `notification_command` — both `mark_ready`
+  and `set_notification_command` trigger a flush, whichever comes last wins
+  the race. An agent may therefore hand a child *data*, but only the
   operator-provided workload + notification template decide what a child
   executes. Delivery failures leave the remainder queued; a non-zero exit of
   the agent's own command counts as delivered (recorded in the history).
