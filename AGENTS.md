@@ -403,12 +403,16 @@ candidate that is dynamically linked or not a Linux ELF at all.
   bare `strtoull`, so `7=1024:1024` works while the header-documented
   `RLIMIT_NOFILE=1024:1024` fails silently ("Invalid rlimit ID", nothing set)
   — and an *empty* var fails the same way, which is why `set_rlimits`
-  refuses empty lists. The shim forwards the daemon's own limits
-  (`host_rlimits()` in shim.rs), pairing each entry with the **Linux** enum
-  position because host constant values differ on macOS (and some resources
-  don't exist there); `RLIM_INFINITY` travels as decimal `u64::MAX`.
-  Limits land on init.krun → guestd → workload + every exec session by
-  fork/exec inheritance.
+  refuses empty lists. The shim forwards only the daemon's NOFILE
+  (`host_rlimits()` in shim.rs), pairing it with the **Linux** enum
+  position — host constant values differ on macOS (NOFILE is 8 there, 7 on
+  Linux) — so the host half must be resolved per-platform by the libc
+  crate, never hardcoded from either side. Every other resource keeps the
+  guest kernel defaults. `RLIM_INFINITY` travels as decimal `u64::MAX` —
+  macOS's infinity is `0x7fff_ffff_ffff_ffff`, not `u64::MAX`. The
+  forwarded value is the *daemon's* limit: start `mvm serve` with the
+  desired `ulimit -n` (macOS defaults to a soft 256 in some launch
+  contexts).
 
 
 
@@ -433,6 +437,9 @@ vsock channel.
 
 ## Conventions
 
+- Comments: minimal. State what the code can't say (IDs, invariants,
+  gotchas); no design essays or implementation justifications slop — the
+  "why" belongs in Sharp edges or commit messages.
 - Errors: `mvm_common::Error` (`thiserror`) inside crates; CLI-facing code
   maps to `String`.
 - Keep the daemon's HTTP surface documented in README when routes change.
