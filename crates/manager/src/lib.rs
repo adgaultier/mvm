@@ -490,6 +490,10 @@ impl Manager {
             entry.info.started_at = Some(chrono::Utc::now());
             entry.info.finished_at = None;
             entry.info.exit_code = None;
+            // The shim inherits our rlimits and forwards them to the guest;
+            // record the fd limit so inspect/TUI can show what the VM runs
+            // under.
+            entry.info.nofile = host_nofile();
             entry.console_stdin = console_stdin;
             entry.gvproxy = gvproxy;
             entry.stop_requested = false;
@@ -1531,6 +1535,18 @@ fn validate_mounts(mounts: &[Mount]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The daemon's own `RLIMIT_NOFILE` as (soft, hard), or None if getrlimit
+/// failed. `u64::MAX` = unlimited. This is what the shim — and therefore the
+/// whole guest — inherits.
+fn host_nofile() -> Option<(u64, u64)> {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0)
+        .then(|| (rl.rlim_cur as u64, rl.rlim_max as u64))
 }
 
 fn pid_alive(pid: u32) -> bool {

@@ -179,6 +179,22 @@ impl KrunContext {
         )
     }
 
+    /// Set guest rlimits, libkrun's wire format: numeric Linux resource
+    /// IDs — `"7=1024:1024"` — not `RLIMIT_*` names. The guest's
+    /// `/init.krun` parses `KRUN_RLIMITS` with bare `strtoull`, so names
+    /// would fail silently; an empty list must not be passed at all for the
+    /// same reason.
+    pub fn set_rlimits(&self, rlimits: &[String]) -> Result<()> {
+        if rlimits.is_empty() {
+            return Ok(());
+        }
+        let arr = CStringArray::new(rlimits.iter().map(|s| s.as_str()))?;
+        check(
+            unsafe { krun_sys::krun_set_rlimits(self.ctx, arr.ptrs.as_ptr()) },
+            "krun_set_rlimits",
+        )
+    }
+
     /// Configure libkrun internal logging (global, process-wide).
     pub fn set_log_level(level: u32) {
         unsafe {
