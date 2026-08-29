@@ -81,7 +81,7 @@ enum Command {
     },
     /// Attach the terminal to a running sandbox's console.
     ///
-    /// Detach with ctrl-p ctrl-q, which leaves the workload running; whether
+    /// Detach with ctrl-space, d, which leaves the workload running; whether
     /// stdin is forwarded and whether the workload has a pty were fixed when
     /// the sandbox was created (`-i` / `-t`).
     Attach {

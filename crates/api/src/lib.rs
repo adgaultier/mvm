@@ -26,7 +26,7 @@ pub struct AppState {
 /// them would drown out real requests, so their span is disabled and the
 /// access-log callbacks skip them (they only fire when the span is live).
 fn is_poll_path(path: &str) -> bool {
-    matches!(path, "/api/v1/images" | "/api/v1/sandboxes")
+    matches!(path, "/api/v1/images" | "/api/v1/sandboxes" | "/api/v1/agents" )
 }
 
 /// Apply per-request tracing to a router. The access log is emitted under the

@@ -190,14 +190,14 @@ pub fn attach(client: &Client, sandbox: &str, no_stdin: bool) -> Result<i32, Str
     }
     // The escape sequence only works when we own a raw local terminal and can
     // actually send keys; otherwise ^C is the only way out and saying
-    // "ctrl-p ctrl-q" would be a lie.
+    // "ctrl-space ctrl-q" would be a lie.
     let local_tty = unsafe { libc::isatty(0) == 1 };
     let detach = (interactive && sb.spec.tty && local_tty).then_some(DETACH_KEYS);
     eprintln!(
         "mvm: attached to {} — detach with {}",
         sb.name(),
         if detach.is_some() {
-            "ctrl-p ctrl-q"
+            "ctrl-space, ctrl-q"
         } else {
             "ctrl-c"
         }
@@ -223,7 +223,7 @@ pub fn attach_started(client: &Client, started: &Sandbox) -> Result<i32, String>
         "mvm: attached to {} — detach with {}",
         started.name(),
         if detach.is_some() {
-            "ctrl-p ctrl-q"
+            "ctrl-space, ctrl-q"
         } else {
             "ctrl-c"
         }
@@ -238,8 +238,10 @@ pub fn attach_started(client: &Client, started: &Sandbox) -> Result<i32, String>
     )
 }
 
-/// ^P ^Q — docker's default detach sequence.
-const DETACH_KEYS: [u8; 2] = [0x10, 0x11];
+/// ^P is heavily used in interactive clis/tuis => ^Space
+/// ^Space ^Q — detach sequence.
+const DETACH_KEYS: [u8; 2] = [0x00, 0x11];
+
 
 /// Bridge the local terminal to a running sandbox's console until the VM
 /// exits (or the user types `detach`, when set), then report the exit code.
@@ -378,7 +380,7 @@ fn console_session(
 const ATTACH_TAIL_LINES: usize = 40;
 
 /// Watches stdin for the detach sequence, holding back a partial match so the
-/// first key never reaches the guest on its own. A doubled first key (^P^P)
+/// first key never reaches the guest on its own. A doubled first key (^Space^Space)
 /// passes one literal through, as docker does.
 struct DetachScanner {
     keys: [u8; 2],
@@ -410,7 +412,7 @@ impl DetachScanner {
                 }
                 out.push(self.keys[0]);
                 if b == self.keys[0] {
-                    continue; // ^P^P -> one literal ^P
+                    continue; // ^Space^Space -> one literal ^Space
                 }
                 out.push(b);
             } else if b == self.keys[0] {
