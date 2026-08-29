@@ -428,9 +428,39 @@ impl DetachScanner {
 static ORIGINAL_TERMIOS: std::sync::Mutex<Option<libc::termios>> = std::sync::Mutex::new(None);
 static TERMINAL_SIGNAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static mut SIGNAL_TERMIOS: MaybeUninit<libc::termios> = MaybeUninit::uninit();
+/*
+  - \x1b[?1000l — disable X11 normal mouse tracking
+   - \x1b[?1002l — disable button-event tracking
+   - \x1b[?1003l — disable any-event mouse tracking (motion)
+   - \x1b[?1006l — disable SGR extended mouse mode
+   - \x1b[?1015l — disable urxvt extended mouse mode
+   - \x1b[?1004l — disable focus-event reporting
+   - \x1b[?2004l — disable bracketed paste
+   - \x1b[<u    — pop one kitty keyboard-protocol level
+   - \x1b[>4m  — disable modifyOtherKeys (xterm)
+*/
+const RESET_TERMINAL_MODES: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[<u\x1b[>4m";
+
+/// Disable any terminal modes a guest TUI may have left on: these live in the
+/// terminal *emulator*, separate from termios, so the termios restore alone
+/// leaves mouse moves echoed as input — or, for the keyboard protocols (kitty
+/// / modifyOtherKeys), ctrl+letter arriving as `ESC[97;5u`-style keycodes.
+/// A plain `write(2)` to stdout — async-signal-safe, no locks — so the signal
+/// handler can call it too.
+fn reset_terminal_modes() {
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            RESET_TERMINAL_MODES.as_ptr().cast(),
+            RESET_TERMINAL_MODES.len(),
+        );
+    }
+}
 
 extern "C" fn restore_terminal_on_signal(signal: libc::c_int) {
     if TERMINAL_SIGNAL_ACTIVE.load(Ordering::Acquire) {
+        reset_terminal_modes();
         unsafe {
             libc::tcsetattr(
                 0,
@@ -470,6 +500,12 @@ fn restore_terminal() {
     };
     if let Some(term) = saved.take() {
         TERMINAL_SIGNAL_ACTIVE.store(false, Ordering::Release);
+        // The terminal emulator's state is separate from termios.
+        // In particular, a guest TUI may have enabled mouse-motion
+        // reporting (DECSET 1003). If the VM is killed before the TUI
+        // can disable it, mouse movements otherwise become input to the
+        // shell after mvm exits.
+        reset_terminal_modes();
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &term);
         }
