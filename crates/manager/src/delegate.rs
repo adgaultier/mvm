@@ -36,7 +36,11 @@ pub fn child_spec(parent: &Sandbox) -> SandboxSpec {
         user: parent.spec.user.clone(),
         vcpus: parent.spec.vcpus,
         ram_mib: parent.spec.ram_mib,
-        attach_stdin: false,
+        // `attach_stdin` inherits: an interactive parent stays attachable in
+        // its children. A read-only parent stays read-only. It's a
+        // create-time bit, not a delegation channel — the parent supplies
+        // data only via the queued `message` notification, never via stdin.
+        attach_stdin: parent.spec.attach_stdin,
         tty: parent.spec.tty,
         tty_size: parent.spec.tty_size,
         network: parent.spec.network.clone(),
@@ -153,11 +157,25 @@ mod tests {
     }
 
     #[test]
-    fn child_spec_drops_ports_and_stdin() {
+    fn child_spec_drops_ports_but_inherits_stdin_flag() {
         let parent = parent_sandbox();
         let spec = child_spec(&parent);
         assert!(spec.ports.is_empty(), "child must not inherit host ports");
-        assert!(!spec.attach_stdin);
+        assert_eq!(
+            spec.attach_stdin, parent.spec.attach_stdin,
+            "stdin flag is inherited: an interactive parent gets an attachable child"
+        );
+    }
+
+    #[test]
+    fn child_spec_inherits_read_only_stdin_flag_too() {
+        let mut parent = parent_sandbox();
+        parent.spec.attach_stdin = false;
+        let spec = child_spec(&parent);
+        assert!(
+            !spec.attach_stdin,
+            "inheritance, not hard-coded true: a read-only parent stays read-only"
+        );
     }
 
     #[test]
