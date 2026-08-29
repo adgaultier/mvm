@@ -187,6 +187,11 @@ oci:`.
 | `--security PROFILE` | `default` \| `strict` -  strict installs an extra guest-side seccomp filter in the workload's spawn path for hostile workloads; see [SEC.TODO.md](doc/security/SEC.TODO.md) |
 | `--rm` | (`run` only) remove the sandbox when the workload exits |
 
+Every sandbox gets a guest-side hostname computed at create time: `name-<first
+4 id chars>` when named, otherwise the full sandbox id (docker-style). The
+guestd applies it with `sethostname(2)` and also to `/etc/hostname` and
+`/etc/hosts`, so shell prompts, `hostname`, and name resolution all match.
+
 `-i` and `-t` are **properties of the sandbox, fixed at create time** (as in
 docker). `start` has no `-i`/`-t` of its own -  it reuses what the sandbox was
 created with, so a client can never contradict the running VM:

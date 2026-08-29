@@ -410,7 +410,9 @@ maps).
 
 Daemon → guestd (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
 `MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
-`MVM_HOST_OS` — scrubbed by the guestd before it spawns the workload — plus
+`MVM_HOSTNAME` (`name-<first 4 id chars>`, or the plain id when unnamed;
+applied by the guestd via `sethostname(2)` + `/etc/hostname` +
+`/etc/hosts`), `MVM_HOST_OS` — scrubbed by the guestd before it spawns the workload — plus
 `MVM_GUEST_TOKEN`, which is deliberately *not* scrubbed so the workload's
 tooling (the `mvm-agent-mcp` bridge) can authenticate over the Agent API's
 vsock channel.

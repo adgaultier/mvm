@@ -139,6 +139,13 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // scrub below, and the flag itself is scrubbed like the other plumbing.
     let strict = std::env::var_os("MVM_SECURITY_STRICT").is_some();
 
+    // Guest hostname, before the workload spawns.
+    if let Ok(hostname) = std::env::var("MVM_HOSTNAME") {
+        if !hostname.is_empty() {
+            apply_hostname(&hostname);
+        }
+    }
+
     // Internal plumbing vars must not leak into the workload environment.
     for var in [
         "MVM_MOUNTS",
@@ -147,6 +154,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         "MVM_CONSOLE_TTY",
         "MVM_CONSOLE_SIZE",
         "MVM_USER",
+        "MVM_HOSTNAME",
         "MVM_HOST_OS",
         "MVM_SECURITY_STRICT",
     ] {
@@ -964,6 +972,37 @@ fn connect_vsock_retry(cid: u32, port: u32, attempts: u32) -> Option<RawFd> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     None
+}
+
+/// Set the guest hostname: UTS name, /etc/hostname, and a 127.0.0.1
+/// /etc/hosts entry (appended only if absent). Best-effort.
+fn apply_hostname(hostname: &str) {
+    let c_name = match std::ffi::CString::new(hostname) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if unsafe { libc::sethostname(c_name.as_ptr(), c_name.to_bytes().len()) } != 0 {
+        eprintln!(
+            "mvm-guestd: sethostname({hostname}): {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let _ = std::fs::write("/etc/hostname", format!("{hostname}\n"));
+
+    let entry = format!("127.0.0.1 {hostname}");
+    let present = std::fs::read_to_string("/etc/hosts")
+        .map(|contents| contents.lines().any(|line| line.trim() == entry))
+        .unwrap_or(false);
+    if !present {
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open("/etc/hosts")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{entry}")
+            });
+    }
 }
 
 /// Mount extra virtiofs shares listed in MVM_MOUNTS: "tag:guest[:ro];..."
