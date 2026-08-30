@@ -85,6 +85,12 @@ pub fn maybe_enter_userns() {
     };
     let mut cmd = Command::new(exe);
     cmd.args(std::env::args_os().skip(1)).env(CHILD_MARK, "1");
+    // Carry the subuid/subgid bases into the namespace-root daemon so the
+    // manager can map the guest's agent user (uid 1000) back to a host
+    // identity when preparing `:rw` bind mounts. Survives the re-execs via
+    // exec(2) preserving the environment.
+    cmd.env(MVM_SUBID_START, sub_uid.start.to_string())
+        .env(MVM_SUBGID_START, sub_gid.start.to_string());
     unsafe {
         cmd.pre_exec(|| {
             if libc::unshare(libc::CLONE_NEWUSER) != 0 {
@@ -137,6 +143,12 @@ pub fn maybe_enter_userns() {
 }
 
 const MVM_USERNS: &str = "MVM_USERNS";
+
+/// Host subuid/subgid bases bound into the userns child by
+/// `maybe_enter_userns`; the manager reads these to map guest uids to host
+/// identities when preparing `:rw` bind mounts.
+pub const MVM_SUBID_START: &str = "MVM_SUBID_START";
+pub const MVM_SUBGID_START: &str = "MVM_SUBGID_START";
 
 fn status_signal(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;

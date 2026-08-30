@@ -13,7 +13,7 @@ use crate::vm::KrunContext;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimConfig {
     pub sandbox_id: String,
-    /// Guest hostname (name + short id, or the plain id).
+    /// Guest hostname (the clean name, or the plain id).
     #[serde(default)]
     pub hostname: Option<String>,
     /// Prepared root filesystem for the guest (writable), served over virtiofs.

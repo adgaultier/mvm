@@ -11,7 +11,7 @@ mod gvproxy;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -305,6 +305,19 @@ impl Manager {
             rootfs_ms = timings.phase_ms("rootfs"),
             "rootfs prepared"
         );
+
+        // 1b. Prepare `:rw` bind mounts: on Linux under a user namespace,
+        // chown the host dir so the guest's agent user (uid 1000) can write
+        // through virtiofs (LINUX_COMPLETE honours host ownership). Runs on
+        // a blocking thread (recursive chown is file IO, not for the async
+        // runtime).
+        timings.mark("mounts");
+        tokio::task::spawn_blocking({
+            let mounts = spec.mounts.clone();
+            move || prepare_mount_ownership(&mounts)
+        })
+        .await
+        .map_err(|e| Error::Runtime(format!("mount prepare task panicked: {e}")))??;
 
         // 2. Inject the guestd (enables exec). Not fatal if missing.
         let injected = self.inject_guestd(&prepared.rootfs);
@@ -1534,6 +1547,76 @@ fn validate_mounts(mounts: &[Mount]) -> Result<()> {
     Ok(())
 }
 
+/// Make `:rw` bind mounts writable by the guest's agent user (uid 1000).
+///
+/// virtio-fs uses `KRUN_SEMANTICS_LINUX_COMPLETE` for `-v` mounts, so the
+/// guest's normal Unix DAC is enforced against the host's ownership bits.
+/// The bind dir is usually owned by the invocation user (which the guest
+/// sees as root), so guest uid 1000 is locked out. On Linux under a user
+/// namespace the daemon is namespace-root with CAP_CHOWN over the mapped
+/// range, so it chowns the host dir tree to the namespace identity that the
+/// guest's uid 1000 maps to (see `prepare_mount_ownership` body for why that
+/// is namespace uid 1000, not the host subuid). On macOS — or whenever the
+/// daemon is not running under a userns (`MVM_USERNS=0`, no /etc/subuid,
+/// root) — this is a no-op: the guest's uid 1000 maps back to the invocation
+/// user, who normally owns the dir anyway.
+fn prepare_mount_ownership(mounts: &[Mount]) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // Only meaningful in userns mode: without it the daemon lacks
+        // CAP_CHOWN over the subuid range (and on macOS there is no userns).
+        let Ok(_sub_uid) = std::env::var("MVM_SUBID_START").map(|v| v.parse::<u32>()) else {
+            return Ok(());
+        };
+        // `chown(2)` takes uids in the *caller's* namespace. With identity
+        // mapping between the guest and the daemon userns, the guest's agent
+        // user (uid 1000) is namespace uid 1000 here, which the kernel maps
+        // to the subuid (`sub_start + 999`) on the underlying host fs — so
+        // virtiofs presents the share to the guest owned by uid 1000. Passing
+        // the host subuid (`sub_start + 999`) instead is an unmapped uid in
+        // this namespace and `chown` fails with EINVAL.
+        let host_ns_uid = 1000u32;
+        let host_ns_gid = 1000u32;
+        for m in mounts {
+            if m.read_only {
+                continue;
+            }
+            if let Err(e) = chown_tree(&m.host, host_ns_uid, host_ns_gid) {
+                tracing::warn!(
+                    host = %m.host.display(),
+                    uid = host_ns_uid,
+                    gid = host_ns_gid,
+                    "failed to chown :rw mount: {e}",
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mounts;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::ffi::CString;
+    let p = CString::new(
+        path.to_str()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF8 path"))?,
+    )
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
+    if unsafe { libc::lchown(p.as_ptr(), uid, gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            chown_tree(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
 /// The daemon's own `RLIMIT_NOFILE` as (soft, hard), or None if getrlimit
 /// failed. `u64::MAX` = unlimited. This is what the shim — and therefore the
 /// whole guest — inherits.
@@ -1825,5 +1908,33 @@ mod tests {
             validate_mounts(&[mount("scripts/agents")]),
             Err(Error::Other(_))
         ));
+    }
+
+    #[test]
+    fn guest_1000_maps_to_sub_start_plus_nine_nine_nine() {
+        // The userns mapping: guest uid 0 -> host invocation uid, guest uid
+        // N>=1 -> sub_start + (N - 1). Mirror the arithmetic used in
+        // `prepare_mount_ownership` so a regression in the offset is caught.
+        for (start, expected) in [(100000u32, 100999u32), (200000, 200999)] {
+            assert_eq!(start + 999, expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn chown_tree_rechowns_to_own_identity() {
+        // As a non-root user we cannot chown to an arbitrary uid, but
+        // re-chowning to our own uid/gid must succeed and recurse.
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("mvm-chown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/f"), b"x").unwrap();
+        let uid = std::fs::metadata(&dir).unwrap().uid();
+        let gid = std::fs::metadata(&dir).unwrap().gid();
+        chown_tree(&dir, uid, gid).unwrap();
+        assert_eq!(std::fs::metadata(dir.join("sub/f")).unwrap().uid(), uid);
+        assert_eq!(std::fs::metadata(dir.join("sub/f")).unwrap().gid(), gid);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

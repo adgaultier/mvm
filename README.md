@@ -334,6 +334,26 @@ repairs the workload's home directory ownership before spawning (gated by
 `MVM_HOST_OS=macos`), so a non-root workload can still write to its own home.
 
 
+### Bind mounts (`-v`)
+
+`-v host:guest[:ro]` mounts an existing **live host directory** into the guest as
+an extra virtio-fs share. Like the rootfs, extra `-v` mounts use libkrun's
+**LinuxComplete** permission semantics, so the guest's normal Unix DAC
+(discretionary access control) checks run against the host's real ownership and
+mode bits — the guest sees exactly what is on the host.
+
+On Linux with rootless userns mode, the daemon prepares each `:rw` mount by
+`chown -R`-ing the host directory to the subuid that the guest's agent user
+(uid 1000) maps to, so a non-root workload can write without loosening the
+mount to world-writable. Because guest DAC is real, a guest **root** workload is
+trusted with host data and can `chown`/`chmod` the mounted files — this is the
+accepted cost of faithful semantics, so treat `:rw` as a trust decision. Prefer
+`:ro` unless the workload genuinely needs to write (e.g. an agent workspace whose
+artifacts you want back on the host). Note the consequence: after that chown the
+host invoking user no longer owns the dir's contents directly, so read them back
+via the guest (`mvm run … cat /data/…` or exec) rather than expecting direct
+host access. On macOS (no userns) the guest's uid 1000 maps back to the host
+invocation user, so there is nothing to prepare.
 
 ## Security model and hardening
 

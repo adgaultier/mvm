@@ -398,6 +398,32 @@ candidate that is dynamically linked or not a Linux ELF at all.
   or directory`). The CLI canonicalizes `-v` host paths (`parse_volume`), and
   `Manager::validate_mounts` rejects any relative path that still slips in via
   the API/TUI.
+- **`-v` mounts are LinuxComplete, and the manager chowns `:rw` mounts so the
+  guest's uid 1000 can write.** `add_virtiofs` uses `krun_add_virtiofs4` with
+  `KRUN_SEMANTICS_LINUX_COMPLETE` for every extra `-v` share (same as the
+  rootfs), so the guest's normal Unix DAC runs against the host's real
+  ownership/mode bits — the guest sees exactly what's on the host, and a guest
+  **root** workload is therefore trusted with the live host dir (`chown`/`chmod`
+  forwarding). To keep a non-root workload writable on `:rw` mounts, the manager
+  `chown -R`s the host dir to the subuid/subgid that guest 1000 maps to
+  (`prepare_mount_ownership`, Linux + userns only, gated on
+  `MVM_SUBID_START`/`MVM_SUBGID_START` that `maybe_enter_userns` binds into the
+  userns child; macOS has no userns, so guest 1000 maps back to the invocation
+  user who already owns the dir). Treat `:rw` as a trust decision (e.g. an agent
+  workspace whose artifacts you want back on the host); prefer `:ro`. Do NOT try
+  to restore the non-root write by switching `-v` to
+  `KRUN_SEMANTICS_LINUX_SIMPLIFIED` — that silently removes guest-root's DAC on
+  host data *and* doesn't actually grant guest-1000 writes either; the chown
+  model is the supported path. Cost of the chown: the host invoking user loses
+  direct write (and for a `0700` dir, read) access to the mount's contents —
+  retrieve artifacts from inside the guest (`mvm exec … cat /data/…`), or the
+  shared `-v` dir is unreadable to host tools after first boot. Idmaps are
+  unsupported on these mounts. The guest-1000 identity is *namespace* uid
+  `1000`: `chown(2)` takes caller-namespace uids, so passing the host subuid
+  (`sub_start + 999`) to `lchown` is an unmapped uid and fails with `EINVAL` —
+  chown to `1000` and let the kernel map it to the subuid on disk (that's what
+  virtiofs then reports to the guest as uid 1000). The cli userns step and the
+  manager must agree on this mapping.
 - **`krun_set_rlimits` speaks numeric resource IDs.** libkrun joins the
   entries into `KRUN_RLIMITS="…"` and `/init.krun` parses every field with
   bare `strtoull`, so `7=1024:1024` works while the header-documented
@@ -428,9 +454,9 @@ maps).
 
 Daemon → guestd (set by the shim): `MVM_MOUNTS`, `MVM_NET_CONFIG`,
 `MVM_NET_TSI`, `MVM_CONSOLE_TTY`, `MVM_CONSOLE_SIZE`, `MVM_USER`,
-`MVM_HOSTNAME` (`name-<first 4 id chars>`, or the plain id when unnamed;
-applied by the guestd via `sethostname(2)` + `/etc/hostname` +
-`/etc/hosts`), `MVM_HOST_OS` — scrubbed by the guestd before it spawns the workload — plus
+`MVM_HOSTNAME` (the clean sandbox name, or the plain id when unnamed; applied
+by the guestd via `sethostname(2)` + `/etc/hostname` + `/etc/hosts`),
+`MVM_HOST_OS` — scrubbed by the guestd before it spawns the workload — plus
 `MVM_GUEST_TOKEN`, which is deliberately *not* scrubbed so the workload's
 tooling (the `mvm-agent-mcp` bridge) can authenticate over the Agent API's
 vsock channel.

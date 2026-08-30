@@ -41,13 +41,12 @@ impl From<&str> for SandboxId {
     }
 }
 
-/// Guest hostname: `name-<first 4 id chars>`, or the plain id when unnamed.
+/// Guest hostname: the sanitized name, or the plain id when unnamed.
 pub fn sandbox_hostname(name: Option<&str>, id: &str) -> String {
-    let Some(sanitized) = name.map(sanitize_hostname).filter(|s| !s.is_empty()) else {
-        return id.to_string();
-    };
-    let suffix = id.chars().take(4).collect::<String>();
-    format!("{sanitized}-{suffix}")
+    match name.map(sanitize_hostname).filter(|s| !s.is_empty()) {
+        Some(sanitized) => sanitized,
+        None => id.to_string(),
+    }
 }
 
 /// Hostname-safe form: lowercase alnum and dashes.
@@ -79,15 +78,15 @@ mod tests {
     }
 
     #[test]
-    fn named_sandbox_gets_name_plus_short_id() {
-        assert_eq!(sandbox_hostname(Some("web"), "a1b2c3d4e5f6"), "web-a1b2");
+    fn named_sandbox_gets_name_only() {
+        assert_eq!(sandbox_hostname(Some("web"), "a1b2c3d4e5f6"), "web");
     }
 
     #[test]
     fn name_is_sanitized_to_hostname_safe_ldh() {
         assert_eq!(
             sandbox_hostname(Some(" My_Agent./v2 "), "a1b2c3d4e5f6"),
-            "my-agent-v2-a1b2"
+            "my-agent-v2"
         );
         assert_eq!(sanitize_hostname("--trailing--"), "trailing");
         assert_eq!(sanitize_hostname("UPPER"), "upper");
