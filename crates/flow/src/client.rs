@@ -76,3 +76,27 @@ impl Client {
         Ok(())
     }
 }
+
+/// Transitive descendants of `id` (children, grandchildren, …) across an
+/// agent listing, depth-first, excluding `id` itself. The caller applies a
+/// lifecycle action to each through the existing per-sandbox lifecycle routes
+/// — the client-side equivalent of a propagate call, with no dedicated
+/// endpoint of its own.
+pub fn descendants_of<'a>(agents: &'a [AgentView], id: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&str> = agents
+        .iter()
+        .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == id))
+        .map(|a| a.id.as_str())
+        .collect();
+    while let Some(cur) = stack.pop() {
+        out.push(cur);
+        stack.extend(
+            agents
+                .iter()
+                .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == cur))
+                .map(|a| a.id.as_str()),
+        );
+    }
+    out
+}

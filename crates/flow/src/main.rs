@@ -25,7 +25,7 @@ use ratatui::Terminal;
 use rataflow::{EventResponse, FlowEvent};
 
 use crate::actions::Action;
-use crate::client::Client;
+use crate::client::{descendants_of, Client};
 use crate::detail::Detail;
 use crate::graph::GraphState;
 use crate::mailbox::Mailbox;
@@ -141,8 +141,9 @@ impl ContextMenu {
 }
 
 /// The small action-picker modal: state-applicable actions (start/stop as
-/// gated, delete always) plus the three greyed children placeholders. Rows
-/// the state forbids are dropped entirely. Delete is two-step: the first
+/// gated, delete always) plus the three children actions (propagate to the
+/// node's descendants; only shown when the node has children). Rows the
+/// state forbids are dropped entirely. Delete is two-step: the first
 /// click/Enter arms `confirming_delete`, the second fires (stop-then-remove
 /// via the daemon).
 struct ActionMenu {
@@ -474,7 +475,7 @@ fn main() {
                             continue;
                         }
                         Some(Modal::Actions(am)) => {
-                            if handle_actions_key(am, key, &client, &tx) {
+                            if handle_actions_key(am, key, &snapshot, &client, &tx) {
                                 modal = None;
                             }
                             continue;
@@ -561,7 +562,7 @@ fn main() {
                                     if am.action_at(mouse.column, mouse.row).is_some() {
                                         let id = am.id.clone();
                                         modal = None;
-                                        trigger_action(&id, Action::Delete, &client, &tx);
+                                        trigger_action(&id, Action::Delete, &snapshot, &client, &tx);
                                     } else if am.contains(mouse.column, mouse.row) {
                                         am.confirming_delete = false;
                                     } else {
@@ -573,7 +574,7 @@ fn main() {
                                     } else {
                                         let id = am.id.clone();
                                         modal = None;
-                                        trigger_action(&id, action, &client, &tx);
+                                        trigger_action(&id, action, &snapshot, &client, &tx);
                                     }
                                 } else if !am.contains(mouse.column, mouse.row) {
                                     close = true;
@@ -677,37 +678,83 @@ fn spawn_fetch(client: &Client, tx: &mpsc::Sender<PollUpdate>, id: &str) {
 /// Run a lifecycle action from the actions modal on a background thread.
 /// Delete on a running sandbox is stopped before removal (same order as the
 /// TUI); completion arrives as `PollUpdate::MenuAction`.
-fn trigger_action(id: &str, action: Action, client: &Client, tx: &mpsc::Sender<PollUpdate>) {
+fn trigger_action(
+    id: &str,
+    action: Action,
+    snapshot: &[AgentView],
+    client: &Client,
+    tx: &mpsc::Sender<PollUpdate>,
+) {
     let c = client.clone();
     let t = tx.clone();
     let id = id.to_string();
+    let descendants: Vec<String> = descendants_of(snapshot, &id).into_iter().map(str::to_owned).collect();
     std::thread::spawn(move || {
-        let result: Result<(), String> = match action {
-            Action::Start => c.start_sandbox(&id),
-            Action::Stop => c.stop_sandbox(&id),
-            Action::Delete => {
-                // The record may have transitioned since the menu opened;
-                // stopping a stopped sandbox is a no-op daemon-side.
-                let _ = c.stop_sandbox(&id);
-                c.remove_sandbox(&id)
-            }
-            _ => Ok(()),
-        };
+        let result: Result<(), String> = propagate(&c, action, &id, &descendants);
         let _ = t.send(PollUpdate::MenuAction { result });
     });
+}
+
+/// Apply one action to a node and, for the children actions, to its whole
+/// descendant lineage (deepest-first for delete, mirroring the single-node
+/// stop-then-remove order). Reuses the per-sandbox lifecycle routes, so no
+/// dedicated propagate endpoint is needed. Errors on a node don't abort the
+/// rest; the first error wins.
+fn propagate(
+    client: &Client,
+    action: Action,
+    id: &str,
+    descendants: &[String],
+) -> Result<(), String> {
+    match action {
+        Action::Start => client.start_sandbox(id),
+        Action::Stop => client.stop_sandbox(id),
+        Action::Delete => {
+            // The record may have transitioned since the menu opened;
+            // stopping a stopped sandbox is a no-op daemon-side.
+            let _ = client.stop_sandbox(id);
+            client.remove_sandbox(id)
+        }
+        Action::StartChildren => apply_each(client, descendants, Client::start_sandbox),
+        Action::StopChildren => apply_each(client, descendants, Client::stop_sandbox),
+        Action::DeleteChildren => {
+            // Deepest descendants go first, so a child is gone before its
+            // parent is removed (mirrors the Agent API's reversed walk).
+            let mut order = descendants.to_vec();
+            order.reverse();
+            for node in order {
+                // Stop-then-remove per node, matching single-node Delete.
+                let _ = client.stop_sandbox(&node);
+                client.remove_sandbox(&node)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn apply_each(
+    client: &Client,
+    ids: &[String],
+    op: fn(&Client, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    for node in ids {
+        op(client, node)?;
+    }
+    Ok(())
 }
 
 /// Actions-modal keyboard handler; returns true when the modal should close.
 fn handle_actions_key(
     am: &mut ActionMenu,
     key: event::KeyEvent,
+    snapshot: &[AgentView],
     client: &Client,
     tx: &mpsc::Sender<PollUpdate>,
 ) -> bool {
     if am.confirming_delete {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                trigger_action(&am.id.clone(), Action::Delete, client, tx);
+                trigger_action(&am.id.clone(), Action::Delete, snapshot, client, tx);
                 return true;
             }
             _ => am.confirming_delete = false,
@@ -723,7 +770,7 @@ fn handle_actions_key(
                 if action == Action::Delete {
                     am.confirming_delete = true;
                 } else {
-                    trigger_action(&am.id.clone(), action, client, tx);
+                    trigger_action(&am.id.clone(), action, snapshot, client, tx);
                     return true;
                 }
             }
@@ -890,12 +937,14 @@ mod tests {
     }
 
     #[test]
-    fn action_at_only_hits_live_rows() {
+    fn action_at_hits_live_rows() {
         let mut am = with_children(SandboxState::Created);
         am.area = ratatui::layout::Rect::new(0, 0, 24, am.entries.len() as u16 + 2);
+        // Lifecycle rows are clickable…
         let idx = am.entries.iter().position(|a| *a == Action::Start).unwrap();
         assert_eq!(am.action_at(2, 1 + idx as u16), Some(Action::Start));
+        // …and so are the children rows once the node has a lineage.
         let idx = am.entries.iter().position(|a| *a == Action::StartChildren).unwrap();
-        assert_eq!(am.action_at(2, 1 + idx as u16), None);
+        assert_eq!(am.action_at(2, 1 + idx as u16), Some(Action::StartChildren));
     }
 }

@@ -226,7 +226,7 @@ mod tests {
         let msg = notification.to_text();
         let template = "echo <MSG>".to_string();
         let command = template.replace(MSG_PLACEHOLDER, &msg);
-        assert!(command.contains("Daddy is requesting:"));
+        assert!(command.contains("Parent is asking:"));
         assert!(!command.contains(MSG_PLACEHOLDER));
     }
 
