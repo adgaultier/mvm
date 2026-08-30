@@ -36,6 +36,7 @@ pub struct DelegateRequest {
 /// and the text is prose (spaces, parentheses, …), so templates must quote
 /// it — e.g. `echo '<MSG>' >> /tmp/notifs.log`.
 pub const MSG_PLACEHOLDER: &str = "<MSG>";
+pub const DELEGATION_PROMPT: &str= "Delegate when another agent should handle a separate task.Ask parent when you need additional information or clarification.Notify task done when you have completed your assigned task.";
 
 /// Agent API "set_notification_command" params — register the shell command
 /// template the control plane should run with `mvm exec <id> sh -c <command>`
@@ -159,6 +160,19 @@ pub enum NotificationKind {
     },
 }
 
+impl NotificationKind {
+    /// Kebab-case `type` tag as it appears on the wire, derived from the
+    /// `#[serde(tag = "type", rename_all = "kebab-case")]` representation so it
+    /// can never diverge from what the guest deserializes.
+    pub fn label(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.get("type").cloned())
+            .and_then(|t| t.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".into())
+    }
+}
+
 /// Why a child agent stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -266,8 +280,50 @@ impl Notification {
                 format!("Child {} was terminated ({reason})", child_id())
             }
             NotificationKind::Input { data } => {
-                format!("Daddy is requesting: {}", render_data(data))
+                format!("{}Parent is asking:\n{}",DELEGATION_PROMPT, render_data(data))
             }
+        }
+    }
+}
+
+/// Report of one notification delivery through the control plane. Returned by
+/// `test_notification` for the guest to verify its notification wiring.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotificationDelivery {
+    /// Kebab-case `type` of the notification (the spec's `type`).
+    pub kind: String,
+    /// `true` when the notification command exited 0.
+    pub ok: bool,
+    /// Exit code of the notification command, when it ran.
+    pub exit_code: Option<i32>,
+    /// Combined stdout/stderr of the notification command.
+    pub output: String,
+    /// Set when the delivery itself failed (no command registered, exec
+    /// error, guestd error, …) — distinct from a non-zero `exit_code`, which
+    /// means the agent's endpoint saw the notification but rejected it.
+    pub error: Option<String>,
+}
+
+impl NotificationDelivery {
+    /// Mark a delivery as succeeded; `ok` follows the command's exit code.
+    pub fn succeeded(kind: String, exit_code: i32, output: String) -> Self {
+        Self {
+            kind,
+            ok: exit_code == 0,
+            exit_code: Some(exit_code),
+            output,
+            error: None,
+        }
+    }
+
+    /// Mark a delivery as failed on the host side (infrastructure error).
+    pub fn failed(kind: String, error: String) -> Self {
+        Self {
+            kind,
+            ok: false,
+            exit_code: None,
+            output: String::new(),
+            error: Some(error),
         }
     }
 }
@@ -503,9 +559,28 @@ mod tests {
     }
 
     #[test]
+    fn kind_label_tracks_the_wire_type_tag() {
+        let child: SandboxId = "deadbeefcafe".into();
+        let cases = [
+            (NotificationKind::ChildTtlAboutToExpire { child, remaining_secs: 30 }, "child-ttl-about-to-expire"),
+            (NotificationKind::RestartedAfterIdle, "restarted-after-idle"),
+            (NotificationKind::NeedInput { data: serde_json::json!("q") }, "need-input"),
+            (NotificationKind::Finished { exit_code: Some(0), data: serde_json::json!({}) }, "finished"),
+            (NotificationKind::Terminated { reason: TerminationReason::TtlExpired }, "terminated"),
+            (NotificationKind::Input { data: serde_json::json!({}) }, "input"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.label(), expected);
+            // The label must agree with the serde-derived `type` tag the guest sees.
+            let json = serde_json::to_value(&kind).unwrap();
+            let tag = json["type"].as_str().unwrap();
+            assert_eq!(kind.label(), tag);
+        }
+    }
+
+    #[test]
     fn to_text_renders_every_kind_as_prose() {
         let child: SandboxId = "deadbeefcafe".into();
-
         assert_eq!(
             Notification::child_ttl_about_to_expire(child.clone(), 30).to_text(),
             "Child deadbeefcafe is about to hit its TTL (30s left)"
