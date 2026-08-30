@@ -6,56 +6,14 @@
 //! through the real delivery path — a cheap way to verify a fresh agent's
 //! notification wiring end to end.
 
-use mvm_common::agent_api::{
-    Notification, NotificationKind, TerminationReason, MSG_PLACEHOLDER,
-};
+use mvm_common::agent_api::{Notification, NotificationDelivery, TerminationReason, MSG_PLACEHOLDER};
 use mvm_common::protocol::GuestdEvent;
 use mvm_common::{Error, Result, SandboxId};
-use serde::Serialize;
 
 use crate::Manager;
 
 /// Cap for `Sandbox.recent_notifications` (newest wins once exceeded).
 pub const MAX_RECENT_NOTIFICATIONS: usize = 16;
-
-/// Report of one notification delivery through the control plane.
-#[derive(Debug, Clone, Serialize)]
-pub struct NotificationDelivery {
-    /// Kebab-case `type` of the notification (the spec's `type`).
-    pub kind: String,
-    /// `true` when the notification command exited 0.
-    pub ok: bool,
-    /// Exit code of the notification command, when it ran.
-    pub exit_code: Option<i32>,
-    /// Combined stdout/stderr of the notification command.
-    pub output: String,
-    /// Set when the delivery itself failed (no command registered, exec
-    /// error, guestd error, …) — distinct from a non-zero `exit_code`, which
-    /// means the agent's endpoint saw the notification but rejected it.
-    pub error: Option<String>,
-}
-
-impl NotificationDelivery {
-    fn succeeded(kind: String, exit_code: i32, output: String) -> Self {
-        Self {
-            kind,
-            ok: exit_code == 0,
-            exit_code: Some(exit_code),
-            output,
-            error: None,
-        }
-    }
-
-    fn failed(kind: String, error: String) -> Self {
-        Self {
-            kind,
-            ok: false,
-            exit_code: None,
-            output: String::new(),
-            error: Some(error),
-        }
-    }
-}
 
 impl Manager {
     /// Deliver a notification to a running agent: read its registered
@@ -67,7 +25,7 @@ impl Manager {
         notification: &Notification,
     ) -> Result<NotificationDelivery> {
         let id = self.resolve(id_or_name)?;
-        let kind = notification_kind_label(&notification.kind).to_string();
+            let kind = notification.kind.label();
         let template = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             let entry = sandboxes
@@ -172,7 +130,7 @@ impl Manager {
 
         let mut results = Vec::with_capacity(mocks.len());
         for notification in &mocks {
-            let kind = notification_kind_label(&notification.kind).to_string();
+        let kind = notification.kind.label();
             match self.deliver_notification(&id, notification).await {
                 Ok(delivery) => results.push(delivery),
                 Err(e) => results.push(NotificationDelivery::failed(kind, e.to_string())),
@@ -256,21 +214,10 @@ impl Manager {
     }
 }
 
-/// Kebab-case `type` label of a notification kind (the spec's `type`).
-fn notification_kind_label(kind: &NotificationKind) -> &'static str {
-    match kind {
-        NotificationKind::ChildTtlAboutToExpire { .. } => "child-ttl-about-to-expire",
-        NotificationKind::RestartedAfterIdle => "restarted-after-idle",
-        NotificationKind::NeedInput { .. } => "need-input",
-        NotificationKind::Finished { .. } => "finished",
-        NotificationKind::Terminated { .. } => "terminated",
-        NotificationKind::Input { .. } => "input",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_common::agent_api::NotificationKind;
     use mvm_common::{DataDir, Sandbox, SandboxSpec, SandboxState};
 
     #[test]
@@ -316,18 +263,13 @@ mod tests {
     #[test]
     fn test_notification_covers_every_kind() {
         let child: SandboxId = "test-child".into();
-        let mocks = vec![
-            Notification::child_ttl_about_to_expire(child.clone(), 30),
+        let mocks = [Notification::child_ttl_about_to_expire(child.clone(), 30),
             Notification::restarted_after_idle(),
             Notification::need_input(child.clone(), serde_json::json!({})),
             Notification::finished(child.clone(), Some(0), serde_json::json!({})),
             Notification::terminated(child.clone(), TerminationReason::TtlExpired),
-            Notification::input(serde_json::json!({})),
-        ];
-        let seen: Vec<&str> = mocks
-            .iter()
-            .map(|n| notification_kind_label(&n.kind))
-            .collect();
+            Notification::input(serde_json::json!({}))];
+        let seen: Vec<String> = mocks.iter().map(|n| n.kind.label()).collect();
         for kind in [
             "child-ttl-about-to-expire",
             "restarted-after-idle",
@@ -336,7 +278,7 @@ mod tests {
             "terminated",
             "input",
         ] {
-            assert!(seen.contains(&kind), "mock set missing {kind}");
+            assert!(seen.iter().any(|s| s == kind), "mock set missing {kind}");
         }
         assert_eq!(seen.len(), 6);
     }

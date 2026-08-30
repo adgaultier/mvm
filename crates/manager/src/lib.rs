@@ -3,14 +3,10 @@
 //! Agent API (both vsock).
 
 #[cfg(feature = "agent-api")]
-mod agent_api;
-#[cfg(feature = "agent-api")]
-mod delegate;
+mod agent;
 mod guestd_conn;
 pub mod console_filter;
 mod gvproxy;
-#[cfg(feature = "agent-api")]
-mod notifications;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -526,7 +522,7 @@ impl Manager {
             #[cfg(feature = "agent-api")]
             {
                 agent_api_listener
-                    .map(|listener| agent_api::spawn_accept_loop(self.clone(), id.clone(), listener))
+                    .map(|listener| agent::spawn_accept_loop(self.clone(), id.clone(), listener))
             }
             #[cfg(not(feature = "agent-api"))]
             {
