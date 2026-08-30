@@ -59,12 +59,21 @@ impl std::str::FromStr for NetworkMode {
 }
 
 /// A bind mount into the sandbox (host path -> guest path).
+///
+/// `workspace` marks the mount as the sandbox's *agent workspace*: the one
+/// mount whose host path is namespaced per delegated child on `delegate`
+/// (the child gets `<parent-workspace>/<child-id>` instead of inheriting the
+/// parent's live dir). Non-workspace mounts stay shared verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mount {
     pub host: PathBuf,
     pub guest: PathBuf,
     #[serde(default)]
     pub read_only: bool,
+    /// True when this mount is the agent workspace (namespaced per child on
+    /// delegation). At most one workspace mount per sandbox.
+    #[serde(default)]
+    pub workspace: bool,
 }
 
 /// Security profile for a sandbox.

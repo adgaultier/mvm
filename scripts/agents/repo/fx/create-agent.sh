@@ -11,7 +11,7 @@ source .env
   --name "$SDBX_NAME" \
   --cpus 1  -m 512 \
   -v "$(pwd)/conf:/home/agent/.fx:rw" \
-  -v "$(pwd)/../../workspace:/home/agent/workspace:rw" \
+  -v "workspace:$(pwd)/../../workspace:/home/agent/workspace:rw" \
   -v "$(pwd)/../../experiments:/home/agent/workspace/experiments:ro" \
   -e AI_GATEWAY_API_KEY=$AI_GATEWAY_API_KEY \
   fx-agent:latest fx -c

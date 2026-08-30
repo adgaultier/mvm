@@ -606,10 +606,17 @@ fn clone_spec(source: &Sandbox, overrides: CloneArgs) -> Result<SandboxSpec, Str
 }
 
 fn parse_volume(v: &str) -> Result<Mount, String> {
+    let (workspace, v) = match v.strip_prefix("workspace:") {
+        Some(rest) => (true, rest),
+        None => (false, v),
+    };
     let mut parts = v.splitn(3, ':');
     let host = parts.next().ok_or("missing host path")?;
     let guest = parts.next().ok_or("volume must be host:guest[:ro]")?;
     let read_only = parts.next() == Some("ro");
+    if workspace && read_only {
+        return Err("workspace volume cannot be read-only".into());
+    }
     // Resolve the host path up front: libkrun's virtiofs opens it relative to
     // the daemon's cwd, so a relative (or dangling) path only fails later, at
     // VM boot, as a virtio-fs "BadActivate" panic. Canonicalize to an
@@ -620,6 +627,7 @@ fn parse_volume(v: &str) -> Result<Mount, String> {
         host,
         guest: PathBuf::from(guest),
         read_only,
+        workspace,
     })
 }
 
@@ -730,6 +738,13 @@ mod tests {
         let m = parse_volume(&format!("{}:/data:ro", dir.display())).unwrap();
         assert!(m.read_only);
         assert_eq!(m.guest, PathBuf::from("/data"));
+
+        // The `workspace:` keyword tags the mount as the agent workspace.
+        let m = parse_volume(&format!("workspace:{}:/data", dir.display())).unwrap();
+        assert!(m.workspace);
+        assert!(!m.read_only);
+        // ... but a workspace mount cannot be read-only.
+        assert!(parse_volume(&format!("workspace:{}:/data:ro", dir.display())).is_err());
 
         // A path that does not exist is rejected up front.
         assert!(parse_volume(&format!("{}/nope:/data", dir.display())).is_err());

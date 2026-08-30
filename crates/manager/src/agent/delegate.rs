@@ -78,9 +78,15 @@ impl Manager {
         let child = self.create(child_spec(&caller))?;
         let task = Notification::input(serde_json::Value::String(req.message.clone()));
         {
-            // Lineage, TTL and the queued task live on the record, not the spec.
+            // Lineage, TTL, the queued task and the nested workspace live on
+            // the record, not the spec.
             let mut sandboxes = self.inner.sandboxes.write().unwrap();
             if let Some(entry) = sandboxes.get_mut(child.id.as_str()) {
+                // Namespace the child's agent workspace to
+                // `<parent-workspace>/<child-id>` before it ever boots, so a
+                // child never shares the parent's live workspace dir. This
+                // runs on the record: the child's id is only known now.
+                nest_workspace_for(&mut entry.info)?;
                 entry.info.agent.parent = Some(caller.id.clone());
                 if req.timeout > 0 {
                     entry.info.agent.ttl_deadline =
@@ -102,12 +108,41 @@ impl Manager {
     }
 }
 
+/// Namespace a delegated child's agent workspace mount: replace its `host`
+/// `HOST` with `HOST/<child-id>` (creating the directory) so parent and child
+/// never share a live workspace dir. Non-workspace mounts are left untouched.
+///
+/// Recursive by construction: a child whose own workspace is already
+/// `HOST/<parent-id>` gets `HOST/<parent-id>/<child-id>`, so a grandchild
+/// nests under its parent's subdir rather than back at the root.
+fn nest_workspace_for(child: &mut Sandbox) -> Result<()> {
+    let Some(ws) = child.spec.mounts.iter_mut().find(|m| m.workspace) else {
+        return Ok(());
+    };
+    // `sandbox_dir` was created by `Manager::create`; `child.id` is its
+    // namespacing key. Append it to the workspace host, canonicalize so we
+    // detect (and reject) any path that can't be resolved.
+    let nested = ws.host.join(child.id.as_str());
+    std::fs::create_dir_all(&nested)
+        .map_err(|e| Error::Other(format!("cannot create workspace dir {}: {e}", nested.display())))?;
+    let nested = std::fs::canonicalize(&nested).map_err(|e| {
+        Error::Other(format!(
+            "workspace dir {} is not accessible: {e}",
+            nested.display()
+        ))
+    })?;
+    // Keep the tag: a child of this child nest once more under its own id.
+    ws.host = nested;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mvm_common::spec::{Mount, NetworkMode};
     use mvm_common::{DataDir, SandboxState};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn parent_sandbox() -> Sandbox {
         let mut spec = SandboxSpec::default();
@@ -127,6 +162,7 @@ mod tests {
             host: "/host/data".into(),
             guest: "/data".into(),
             read_only: false,
+            workspace: false,
         }];
         spec.labels = BTreeMap::from([("team".to_string(), "infra".to_string())]);
         Sandbox::new(spec)
@@ -210,5 +246,88 @@ mod tests {
         assert!(err.to_string().contains("non-empty message"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sandbox_with_workspace(host: &str) -> Sandbox {
+        let mut spec = SandboxSpec::default();
+        spec.mounts = vec![
+            Mount {
+                host: host.into(),
+                guest: "/home/agent/workspace".into(),
+                read_only: false,
+                workspace: true,
+            },
+            Mount {
+                host: "/host/shared".into(),
+                guest: "/shared".into(),
+                read_only: true,
+                workspace: false,
+            },
+        ];
+        Sandbox::new(spec)
+    }
+
+    #[test]
+    fn nest_workspace_creates_per_child_subdir_and_keeps_tag() {
+        let base = std::env::temp_dir().join(format!("mvm-nest-ws-{}", std::process::id()));
+        let ws = base.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut sandbox = sandbox_with_workspace(ws.to_str().unwrap());
+
+        nest_workspace_for(&mut sandbox).unwrap();
+
+        let ws_mount = &sandbox.spec.mounts[0];
+        assert!(ws_mount.workspace, "tag preserved for further nesting");
+        assert_eq!(
+            ws_mount.host,
+            ws.join(sandbox.id.as_str()),
+            "workspace host renamed to <workspace>/<child-id>"
+        );
+        assert!(
+            ws_mount.host.is_dir(),
+            "the nested workspace dir must exist on host"
+        );
+        // Non-workspace mounts are untouched.
+        assert_eq!(sandbox.spec.mounts[1].host, PathBuf::from("/host/shared"));
+        assert!(!sandbox.spec.mounts[1].workspace);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nest_workspace_nests_recursively_for_a_grandchild() {
+        let base = std::env::temp_dir().join(format!("mvm-nest-gc-{}", std::process::id()));
+        let ws = base.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut parent = sandbox_with_workspace(ws.to_str().unwrap());
+        nest_workspace_for(&mut parent).unwrap();
+
+        // The child's own spec is already nested (HOST/<parent-id>); nesting it
+        // again yields HOST/<parent-id>/<child-id>.
+        let mut grandchild = Sandbox::new(parent.spec.clone());
+        let grandchild_id = grandchild.id.clone();
+        let child_ws = grandchild.spec.mounts[0].host.clone();
+        nest_workspace_for(&mut grandchild).unwrap();
+        assert_eq!(
+            grandchild.spec.mounts[0].host,
+            child_ws.join(grandchild_id.as_str()),
+            "grandchild nests under its parent's subdir"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nest_workspace_is_a_noop_without_a_workspace_mount() {
+        let mut sandbox = Sandbox::new(SandboxSpec::default());
+        sandbox.spec.mounts = vec![Mount {
+            host: "/host/shared".into(),
+            guest: "/shared".into(),
+            read_only: false,
+            workspace: false,
+        }];
+        let before = sandbox.spec.mounts.clone();
+        nest_workspace_for(&mut sandbox).unwrap();
+        assert_eq!(sandbox.spec.mounts, before, "unchanged when not tagged");
     }
 }

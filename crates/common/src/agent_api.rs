@@ -665,6 +665,7 @@ mod tests {
                 host: "/host/secret".into(),
                 guest: "/guest/data".into(),
                 read_only: true,
+                workspace: false,
             }],
             security: SecurityProfile::Strict,
             labels: BTreeMap::from([("team".to_string(), "infra".to_string())]),

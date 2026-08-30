@@ -1899,6 +1899,7 @@ mod tests {
             host: PathBuf::from(host),
             guest: PathBuf::from("/data"),
             read_only: false,
+            workspace: false,
         };
         // Absolute paths are fine.
         assert!(validate_mounts(&[mount("/tmp/ok")]).is_ok());

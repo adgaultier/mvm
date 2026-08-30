@@ -355,6 +355,17 @@ via the guest (`mvm run … cat /data/…` or exec) rather than expecting direct
 host access. On macOS (no userns) the guest's uid 1000 maps back to the host
 invocation user, so there is nothing to prepare.
 
+A bind can be marked as the sandbox's **agent workspace** with the `workspace:`
+volume keyword: `-v workspace:HOST:GUEST`. A workspace mount must be writable
+(`:rw`). On delegation, the control plane namespaces the workspace per child:
+the delegated sandbox gets `HOST/<child-id>` as its workspace host (the dir is
+created automatically and itself re-owned for the child's agent user), so a
+parent and its children never share a live workspace directory. Other
+(non-workspace) mounts are inherited verbatim and stay shared. Nesting is
+recursive by construction: a child whose workspace is already
+`HOST/<parent-id>` delegates a grandchild into the nested
+`HOST/<parent-id>/<grandchild-id>`.
+
 ## Security model and hardening
 
 ### Security model

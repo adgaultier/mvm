@@ -435,6 +435,22 @@ candidate that is dynamically linked or not a Linux ELF at all.
   chown to `1000` and let the kernel map it to the subuid on disk (that's what
   virtiofs then reports to the guest as uid 1000). The cli userns step and the
   manager must agree on this mapping.
+- **A `workspace:` mount is namespaced per delegated child.** The `-v`
+  keyword `workspace:HOST:GUEST` tags one `:rw` mount as the sandbox's agent
+  workspace (`Mount.workspace`); it must be `:rw`. `Manager::delegate` runs a
+  child with the workspace host rewritten to `HOST/<child-id>` (dir created via
+  `nest_workspace_for` on the child *record* — the child's id only exists after
+  `create`), so parent and children never share a live workspace dir.
+  Non-workspace mounts stay inherited verbatim and shared. Nesting recurses for
+  free: a child whose workspace is already `HOST/<parent-id>` delegates a
+  grandchild into `HOST/<parent-id>/<grandchild-id>` — the remap appends the
+  current child's id to whatever the workspace host already is. The child's own
+  boot then `prepare_mount_ownership`s its nested dir for its guest-1000, so
+  ownership stays consistent (identical identity for every generation). The
+  nested parent workspace gets re-owned by *both* parent and child boots (same
+  subuid), which is why integration cleanup must relax the tree from the
+  guest (`chmod -R a+rwx`) before the host can `rm -rf` it — see the
+  agent-api.sh workspace checks.
 - **`krun_set_rlimits` speaks numeric resource IDs.** libkrun joins the
   entries into `KRUN_RLIMITS="…"` and `/init.krun` parses every field with
   bare `strtoull`, so `7=1024:1024` works while the header-documented
