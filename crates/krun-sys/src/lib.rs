@@ -28,6 +28,14 @@ pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
 /// Don't let `RUST_LOG` and friends override the configured settings.
 pub const KRUN_LOG_OPTION_NO_ENV: u32 = 1;
 
+/// virtio-fs permission semantics: as close as possible to the common
+/// semantics of Linux file systems (faithful host ownership/mode bits).
+pub const KRUN_SEMANTICS_LINUX_COMPLETE: u32 = 0;
+/// virtio-fs permission semantics: host ownership/mode bits are not used to
+/// enforce the guest's normal Unix DAC checks; ownership is reported as the
+/// requesting guest process. Idmaps are unsupported.
+pub const KRUN_SEMANTICS_LINUX_SIMPLIFIED: u32 = 1;
+
 #[link(name = "krun")]
 unsafe extern "C" {
     /// Creates a configuration context. Returns ctx id or negative errno.
@@ -61,14 +69,26 @@ unsafe extern "C" {
         read_only: bool,
     ) -> c_int;
 
-    /// Adds a virtio-fs device with an explicit tag, shared-memory size and
-    /// read-only flag.
+    /// Adds a virtio-fs device with an explicit tag, shared-memory size,
+    /// read-only flag and permission semantics.
     pub fn krun_add_virtiofs3(
         ctx_id: c_uint,
         c_tag: *const c_char,
         c_path: *const c_char,
         shm_size: c_ulonglong,
         read_only: bool,
+    ) -> c_int;
+
+    /// Adds a virtio-fs device with an explicit tag, shared-memory size,
+    /// read-only flag and permission semantics
+    /// (`KRUN_SEMANTICS_LINUX_COMPLETE` or `KRUN_SEMANTICS_LINUX_SIMPLIFIED`).
+    pub fn krun_add_virtiofs4(
+        ctx_id: c_uint,
+        c_tag: *const c_char,
+        c_path: *const c_char,
+        shm_size: c_ulonglong,
+        read_only: bool,
+        semantics: c_uint,
     ) -> c_int;
 
     /// Sets the working directory inside the microVM.

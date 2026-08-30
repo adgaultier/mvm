@@ -82,12 +82,28 @@ impl KrunContext {
     }
 
     /// Add an extra virtio-fs mount (bind mount into the guest).
+    ///
+    /// Extra `-v` mounts use `KRUN_SEMANTICS_LINUX_COMPLETE`, faithful to
+    /// host ownership/mode bits. The manager prepares `:rw` mounts by
+    /// chowning the host dir to the guest user's mapped identity (see the
+    /// manager's mount preparation), so a non-root workload can write without
+    /// the host dir being exposed beyond normal Unix DAC. The rootfs (via
+    /// `set_root`) keeps the default `LINUX_COMPLETE` semantics.
     pub fn add_virtiofs(&self, tag: &str, path: &Path, read_only: bool) -> Result<()> {
         let t = cstr(tag)?;
         let p = cstr(&path.to_string_lossy())?;
         check(
-            unsafe { krun_sys::krun_add_virtiofs3(self.ctx, t.as_ptr(), p.as_ptr(), 0, read_only) },
-            "krun_add_virtiofs3",
+            unsafe {
+                krun_sys::krun_add_virtiofs4(
+                    self.ctx,
+                    t.as_ptr(),
+                    p.as_ptr(),
+                    0,
+                    read_only,
+                    krun_sys::KRUN_SEMANTICS_LINUX_COMPLETE,
+                )
+            },
+            "krun_add_virtiofs4",
         )
     }
 

@@ -29,10 +29,10 @@ rm -f "$BINFILE"
 check "exec tty allocation" "TTY-OK" \
     "$("$MVM" exec -t itest sh -c '[ -t 0 ] && echo TTY-OK' | tr -d '\r')"
 
-# Guest hostname: `<name>-<first 4 id chars>`, also in /etc/hostname and
+# Guest hostname: the sandbox name (`itest`), also in /etc/hostname and
 # /etc/hosts.
-check "hostname is name + short id" "found" \
-    "$("$MVM" exec itest hostname | grep -Eq '^itest-[0-9a-f]{4}$' && echo found)"
+check "hostname is the sandbox name" "found" \
+    "$("$MVM" exec itest hostname | grep -Eq '^itest$' && echo found)"
 check "hostname persisted to /etc/hostname" "found" \
     "$("$MVM" exec itest sh -c '[ "$(hostname)" = "$(cat /etc/hostname)" ] && echo found')"
 check "hostname resolvable via /etc/hosts" "found" \
