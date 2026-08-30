@@ -293,8 +293,19 @@ candidate that is dynamically linked or not a Linux ELF at all.
   env → guestd. Probe the guest kernel's BPF capability with
   `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict)
   before assuming CO-RE/BPF-LSM support; cgroup-BPF does not require BTF.
-  Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec; capability
-  dropping remains a separate compatibility task.
+  Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec and drop
+  `CAP_CHOWN` from the bounding set (`drop_cap_chown` in `apply_strict_seccomp`,
+  `PR_CAPBSET_DROP` — dropping from the bounding set also clears it from the
+  permitted/effective/ambient sets and it cannot return via exec, setuid, or
+  file capabilities). The cap drop stops a *root* strict workload from re-owning
+  live host data on `-v` (LinuxComplete) mounts — the mechanism that prevents
+  ownership divergence between nested parent/child workspaces sharing a host
+  dir. `apply_strict_seccomp` runs before `apply_user`'s privilege drop, so the
+  drop happens while the process is still root with a full bounding set.
+  Verified by `scripts/integration/probes/chownprobe.c` via `just raw-seccomp`
+  (chown succeeds by default, EPERM under strict). Dropping further caps
+  (e.g. `CAP_FOWNER`, to also stop `chmod` on non-owned files) remains a
+  separate task.
  - **VM token: never persisted, never exposed — not even its hash.** The Agent
   API token is minted in `Manager::start` and held as `guest_token_hash`
   (SHA-256) on the `Sandbox` record — but that field is `#[serde(skip)]`, so

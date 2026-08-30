@@ -6,7 +6,15 @@ echo "== raw socket ban (seccomp) =="
 # guestd) and via an exec session, so inheritance through both spawn paths is
 # covered. The static probe is built with `build_probe` (cc -static on Linux,
 # zig cross-compile elsewhere — see the helper above).
-PROBE_DIR=$(mktemp -d /tmp/mvm-itest-probe.XXXXXX)
+PROBE_PARENT=$(mktemp -d /tmp/mvm-itest-probe.XXXXXX)
+# The probe dir is mounted :rw, so the manager chowns it to the guest agent's
+# mapped subuid at boot, and the host loses ownership of it. The parent (a
+# non-sticky, invoker-owned dir) keeps write for cleanup, and the mounted
+# subdir is world-accessible so both the guest workload (writes probe output)
+# and the host harness (reads it back) keep working after that re-own.
+PROBE_DIR=$PROBE_PARENT/probe
+mkdir "$PROBE_DIR"
+chmod 0777 "$PROBE_DIR"
 if build_probe "$PROBES_DIR/rawprobe.c" "$PROBE_DIR" rawprobe; then
     # Workload probe results go to the mounted volume; sleep keeps the
     # sandbox alive long enough for the exec-session probe below.
@@ -58,7 +66,24 @@ else
     skip "strict seccomp probe (no static cc or zig)"
 fi
 
-rm -rf "$PROBE_DIR"
+if build_probe "$PROBES_DIR/chownprobe.c" "$PROBE_DIR" chownprobe; then
+    # Strict mode also drops CAP_CHOWN (via PR_CAPBSET_DROP) from the workload
+    # and exec sessions, so a root workload can no longer re-own live host data
+    # on `-v` (LinuxComplete) mounts. Contrast: default keeps CAP_CHOWN, so root
+    # chown succeeds on a freshly (re)chowned /probe tree.
+    DEFAULT_OUT=$(timeout "$T" "$MVM" run -v "$PROBE_DIR:/probe" alpine \
+        /probe/chownprobe 2>/dev/null || true)
+    STRICT_CHOWN_OUT=$(timeout "$T" "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
+        /probe/chownprobe 2>/dev/null || true)
+    check "chown allowed by default (CAP_CHOWN kept)" "0" \
+        "$(printf '%s' "$DEFAULT_OUT" | grep -o 'chown=[0-9]*' | cut -d= -f2 | head -1)"
+    check "chown denied under strict (CAP_CHOWN dropped)" "1" \
+        "$(printf '%s' "$STRICT_CHOWN_OUT" | grep -o 'chown=[0-9]*' | cut -d= -f2 | head -1)"
+else
+    skip "chown cap probe (no static cc or zig)"
+fi
+
+rm -rf "$PROBE_PARENT"
 echo
 echo "$PASS passed, $SKIP skipped, $FAIL failed"
 [ "$FAIL" -eq 0 ]

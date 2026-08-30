@@ -393,6 +393,12 @@ workload-scoped seccomp profile and `PR_SET_NO_NEW_PRIVS`. This denies BPF,
 perf events, userfaultfd, and io_uring syscalls. The trusted guestd
 retains the broader syscall surface required for VM and exec management.
 
+Strict mode also drops `CAP_CHOWN` from the workload (including a root one),
+so it can no longer re-own host files on `-v` mounts — even those it could
+chown as root. This stops a parent or child agent from mutating the ownership
+of a shared/nested workspace and breaking the other's access. `chown` then
+fails with `EPERM` instead of succeeding.
+
 Strict mode does not yet drop all Linux capabilities. The libkrunfw guest
 kernel supports loading and attaching `cgroup_skb` programs but does not ship
 BTF, and mvm does not yet install production egress policies. Planned

@@ -290,10 +290,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
     guestd.run(selfpipe_r)
 }
 
-/// Apply no-new-privileges in a child before exec. Registered *before*
-/// `apply_user` (whose pre_exec drops privileges). Failure aborts the spawn.
-/// No logging inside the closure: it runs post-fork in the child, where std
-/// locks may deadlock.
+/// Apply no-new-privileges and drop CAP_CHOWN in a child before exec.
+/// Registered *before* `apply_user` (whose pre_exec drops privileges). Failure
+/// aborts the spawn. No logging inside the closure: it runs post-fork in the
+/// child, where std locks may deadlock.
 pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
     unsafe {
         cmd.pre_exec(|| {
@@ -301,6 +301,12 @@ pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("strict no-new-privileges failed: {error}"),
+                )
+            })?;
+            drop_cap_chown().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("strict cap-drop failed: {error}"),
                 )
             })?;
             crate::seccomp::install_strict_filter().map_err(|error| {
@@ -315,9 +321,29 @@ pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
 
 const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 
+/// `CAP_CHOWN` = 0; not exposed by the pinned `libc` version.
+const CAP_CHOWN: libc::c_int = 0;
+
 fn set_no_new_privs() -> std::io::Result<()> {
     unsafe {
         if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Drop CAP_CHOWN from the process by removing it from the bounding set.
+/// Dropping it from the bounding set also clears it from the inspired,
+/// permitted and effective sets, and it cannot reappear via exec, setuid or
+/// file capabilities. This stops a strict-mode workload (even a root one) from
+/// re-owning live host data on `:v` (LinuxComplete) mounts — the mechanism
+/// that prevents ownership divergence between nested parent/child workspaces.
+/// Runs while still root (before `apply_user`), so the bounding set is full
+/// and the drop succeeds.
+fn drop_cap_chown() -> std::io::Result<()> {
+    unsafe {
+        if libc::prctl(libc::PR_CAPBSET_DROP, CAP_CHOWN, 0, 0, 0) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
