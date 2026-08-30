@@ -129,6 +129,41 @@ if [ "$HAVE_PROBE" = 1 ]; then
     check "daddy task arrived as a daddy notification" "1" \
         "$(printf '%s\n' "$DELEG_LOG" | grep -c 'Parent is asking:')"
 
+    # Workspace isolation: a `workspace:` -v mount is namespaced per delegated
+    # child (HOST/<child-id>), so parent and child never share a live dir.
+    # The probe dir stays a plain :ro mount and must be left shared.
+    WS_ROOT=$(mktemp -d /tmp/mvm-itest-ws.XXXXXX)
+    WS_DIR=$WS_ROOT/work
+    mkdir -p "$WS_DIR"
+    SB_WS=$("$MVM" create --name agent-ws \
+        -v "$PROBE_DIR:/probe:ro" \
+        -v "workspace:$WS_DIR:/home/agent/workspace" \
+        alpine sleep infinity 2>/dev/null)
+    "$MVM" start agent-ws >/dev/null 2>&1
+    wait_agent agent-ws
+    TOKEN_WS=$(guest_token_of agent-ws)
+    check "workspace mount is tagged on the parent" "1" \
+        "$("$MVM" inspect agent-ws | grep -c '"workspace": *true')"
+    DELEGATE_WS=$(agent_api_call agent-ws "$TOKEN_WS" delegate '{"timeout":60,"message":"ws-isolation"}')
+    check "workspace parent delegates" "1" \
+        "$(printf '%s\n' "$DELEGATE_WS" | grep -c '"ok": *true')"
+    WS_CHILD_ID=$(printf '%s\n' "$DELEGATE_WS" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')
+    check "workspace child host namespaced under parent ws" "1" \
+        "$("$MVM" inspect "$WS_CHILD_ID" | tr -d ' \n' | grep -c "\"host\":\"$WS_DIR/$WS_CHILD_ID\"")"
+    check "workspace guest path preserved" "1" \
+        "$("$MVM" inspect "$WS_CHILD_ID" | grep -c '/home/agent/workspace')"
+    check "workspace tag survives into the child" "1" \
+        "$("$MVM" inspect "$WS_CHILD_ID" | grep -c '"workspace": *true')"
+    check "child workspace dir created on host" "1" \
+        "$(test -d "$WS_DIR/$WS_CHILD_ID" && echo 1)"
+    # Both the parent and the child re-own their :rw workspace mount to the
+    # guest-1000 identity, so the host can no longer delete the tree. Relax it
+    # from inside the parent's guest (guest 1000 owns the whole subtree) before
+    # the host cleanup, mirroring volumes.sh.
+    "$MVM" exec agent-ws sh -c 'chmod -R a+rwx /home/agent/workspace' >/dev/null 2>&1 || true
+    "$MVM" rm -f agent-ws "$WS_CHILD_ID" >/dev/null 2>&1 || true
+    rm -rf "$WS_ROOT"
+
     # A delegation without a message is refused outright.
     check "delegate with empty message refused" "1" \
         "$(agent_api_call agent-b "$TOKEN_B" delegate '{"timeout":0,"message":"  "}' | grep -c '"ok": *false')"
@@ -155,7 +190,7 @@ if [ "$HAVE_PROBE" = 1 ]; then
         "$(agent_api_call agent-a "$TOKEN_A" inspect | grep -c '"ok": *false')"
 fi
 
-"$MVM" rm -f agent-a agent-b ${CHILD_ID:-} >/dev/null 2>&1 || true
+"$MVM" rm -f agent-a agent-b agent-ws ${CHILD_ID:-} ${WS_CHILD_ID:-} >/dev/null 2>&1 || true
 rm -rf "$PROBE_DIR"
 
 else

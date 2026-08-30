@@ -10,7 +10,7 @@ SDBX_NAME=$1
   --name "$SDBX_NAME" \
   --cpus 2  -m 2048 \
   -v "$(pwd)/conf:/home/agent/opencode:rw" \
-  -v "$(pwd)/../../workspace:/home/agent/workspace:rw" \
+  -v "workspace:$(pwd)/../../workspace:/home/agent/workspace:rw" \
   -v "$(pwd)/../../experiments:/home/agent/workspace/experiments:ro" \
   -e OPENCODE_CONFIG_DIR=/home/agent/opencode \
   opencode-agent:latest  opencode -c --prompt "hello again,agent" --port 4096 #--prompt "xxx" necessary to actually start a session (if first start)
