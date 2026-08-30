@@ -83,7 +83,7 @@ if [ "$HAVE_PROBE" = 1 ]; then
     NOTIF_LOG=$("$MVM" exec agent-a cat /tmp/notifs.log 2>/dev/null || true)
     MISSING=0
     # Notifications are delivered as human-readable text, one line per kind.
-    for marker in "about to hit its TTL" "restarted after an idle stop" "is requesting input" "finished (exit code" "was terminated" "Daddy is requesting"; do
+    for marker in "about to hit its TTL" "restarted after an idle stop" "is requesting input" "finished (exit code" "was terminated" "Parent is asking"; do
         printf '%s\n' "$NOTIF_LOG" | grep -q "$marker" || MISSING=$((MISSING + 1))
     done
     check "mock notifications reached the agent's endpoint" "0" "$MISSING"
@@ -127,7 +127,7 @@ if [ "$HAVE_PROBE" = 1 ]; then
     check "daddy task delivered to the child once ready" "1" \
         "$(printf '%s\n' "$DELEG_LOG" | grep -c 'integration test task')"
     check "daddy task arrived as a daddy notification" "1" \
-        "$(printf '%s\n' "$DELEG_LOG" | grep -c 'Daddy is requesting:')"
+        "$(printf '%s\n' "$DELEG_LOG" | grep -c 'Parent is asking:')"
 
     # A delegation without a message is refused outright.
     check "delegate with empty message refused" "1" \

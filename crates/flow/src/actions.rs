@@ -1,5 +1,7 @@
-//! Lifecycle actions the context menu can trigger on a node (and the three
-//! children placeholders, not yet wired).
+//! Lifecycle actions the context menu can trigger on a node. The three
+//! children actions propagate their action to the node's whole lineage of
+//! descendants, computed client-side and applied via the existing per-sandbox
+//! lifecycle routes.
 
 use mvm_common::SandboxState;
 use ratatui::style::Color;
@@ -40,18 +42,26 @@ impl Action {
             Action::Start => Some(Color::Green),
             Action::Stop => Some(Color::Yellow),
             Action::Delete => Some(Color::Red),
-            _ => None,
+            // Children actions are a distinct "lineage" category: they act on
+            // the node's whole descendant tree, not on the node's own VM, so
+            // they get a neutral colour separate from the single-VM status
+            // colours above.
+            Action::StartChildren | Action::StopChildren | Action::DeleteChildren => {
+                Some(Color::Blue)
+            }
         }
     }
 
-    /// Start anything not running, stop only a running VM, delete always;
-    /// children actions are placeholders and never clickable.
+    /// Start anything not running, stop only a running VM, delete always.
+    /// Children actions propagate to descendants and so apply regardless of
+    /// the parent's own state — they only need the node to have children,
+    /// which the menu enforces when it decides to show the row.
     pub fn enabled(self, state: SandboxState) -> bool {
         match self {
             Action::Start => !matches!(state, SandboxState::Running),
             Action::Stop => matches!(state, SandboxState::Running),
             Action::Delete => true,
-            _ => false,
+            Action::StartChildren | Action::StopChildren | Action::DeleteChildren => true,
         }
     }
 }
@@ -74,15 +84,20 @@ mod tests {
     }
 
     #[test]
-    fn children_actions_are_never_enabled() {
+    fn children_actions_apply_regardless_of_state() {
         for action in Action::ALL {
             if matches!(
                 action,
                 Action::StartChildren | Action::StopChildren | Action::DeleteChildren
             ) {
+                // Propagate acts on descendants, so the parent's own state
+                // never disables it.
                 for state in [Created, Running, Stopped, Exited, Failed] {
-                    assert!(!action.enabled(state), "{action:?} on {state}");
+                    assert!(action.enabled(state), "{action:?} on {state}");
                 }
+                // And they're triggerable: a colour means the menu's
+                // selection/click paths will pick them up.
+                assert!(action.color().is_some(), "{action:?} should be triggerable");
             }
         }
     }

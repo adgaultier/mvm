@@ -5,6 +5,7 @@
 
 pub(crate) mod agent_api;
 pub(crate) mod delegate;
+pub(crate) mod handlers;
 pub(crate) mod notifications;
 
 pub(crate) use agent_api::spawn_accept_loop;

@@ -10,19 +10,21 @@
 //! guest can ever dial in here) and the bearer token in the request body.
 //! Requiring both closes the gap the old shared-listener design had to paper
 //! over with `Principal`/`authorize` alone.
+//!
+//! This file is pure transport + authentication; the actual request handlers
+//! live in `super::handlers`.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
-use mvm_common::agent_api::{
-    AgentApiRequest, AgentApiResponse, AgentInfo, DelegateRequest,
-    SetNotificationCommandParams,
-};
+use mvm_common::agent_api::{AgentApiRequest, AgentApiResponse};
 use mvm_common::protocol::{encode_frame, MAX_FRAME};
 use mvm_common::Principal;
 
 use crate::Manager;
+
+use super::handlers;
 
 /// Spawn the accept loop for one sandbox's Agent API listener. Runs for the
 /// sandbox's lifetime; the caller aborts it when the shim exits.
@@ -93,7 +95,10 @@ async fn handle_conn(
     stream.read_exact(&mut payload).await?;
 
     let response = match serde_json::from_slice::<AgentApiRequest>(&payload) {
-        Ok(request) => dispatch(manager, sandbox_id, &request).await,
+        Ok(request) => match authenticate(manager, sandbox_id, &request) {
+            Ok(()) => handlers::dispatch(manager, sandbox_id, &request).await,
+            Err(e) => e,
+        },
         Err(e) => AgentApiResponse::err(format!("invalid request: {e}")),
     };
 
@@ -117,77 +122,16 @@ async fn handle_conn(
     Ok(())
 }
 
-async fn dispatch(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest) -> AgentApiResponse {
+/// Authenticate the request: the bearer token must name a live sandbox and
+/// the caller must be authorized for this target. Returns the error response
+/// to send, or `Ok(())` to proceed to dispatch.
+fn authenticate(manager: &Manager, sandbox_id: &str, request: &AgentApiRequest) -> Result<(), AgentApiResponse> {
     let vm_id = match manager.authenticate_vm(&request.token) {
         Some(id) => id,
-        None => return AgentApiResponse::err("invalid or expired token"),
+        None => return Err(AgentApiResponse::err("invalid or expired token")),
     };
-    if let Err(e) = manager.authorize(&Principal::Vm(vm_id.clone()), sandbox_id) {
-        return AgentApiResponse::err(e.to_string());
+    if let Err(e) = manager.authorize(&Principal::Vm(vm_id), sandbox_id) {
+        return Err(AgentApiResponse::err(e.to_string()));
     }
-
-    match request.method.as_str() {
-        "inspect" => match manager.get(vm_id.as_str()) {
-            Ok(sandbox) => to_response(&AgentInfo::with_lineage(
-                &sandbox,
-                manager.children_of(&sandbox.id),
-            )),
-            Err(e) => AgentApiResponse::err(e.to_string()),
-        },
-        "stop" => match manager.stop(vm_id.as_str()).await {
-            Ok(sandbox) => to_response(&AgentInfo::from(&sandbox)),
-            Err(e) => AgentApiResponse::err(e.to_string()),
-        },
-        "delegate" => match serde_json::from_value::<DelegateRequest>(request.params.clone()) {
-            Ok(req) => match manager.delegate(&vm_id, req).await {
-                Ok(child) => to_response(&AgentInfo::with_lineage(
-                    &child,
-                    manager.children_of(&child.id),
-                )),
-                Err(e) => AgentApiResponse::err(e.to_string()),
-            },
-            Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
-        },
-        "set_notification_command" => {
-            match serde_json::from_value::<SetNotificationCommandParams>(request.params.clone()) {
-                Ok(params) => match manager.set_notification_command(vm_id.as_str(), params.command) {
-                    Ok(sandbox) => {
-                        tracing::info!(agent = %vm_id, "notification delivery command registered");
-                        // Race guard: if the agent declared `ready` before
-                        // registering the command, `mark_ready`'s flush found
-                        // nothing to drain — do it now.
-                        if let Err(e) = manager.flush_pending(vm_id.as_str()).await {
-                            tracing::warn!(
-                                agent = %vm_id,
-                                error = %e,
-                                "flushing pending notifications failed"
-                            );
-                        }
-                        to_response(&AgentInfo::from(&sandbox))
-                    }
-                    Err(e) => AgentApiResponse::err(e.to_string()),
-                },
-                Err(e) => AgentApiResponse::err(format!("invalid params: {e}")),
-            }
-        }
-        "ready" => match manager.mark_ready(vm_id.as_str()).await {
-            Ok(sandbox) => {
-                tracing::info!(agent = %vm_id, "agent marked ready");
-                to_response(&AgentInfo::from(&sandbox))
-            }
-            Err(e) => AgentApiResponse::err(e.to_string()),
-        },
-        "test_notification" => match manager.test_notification(vm_id.as_str()).await {
-            Ok(deliveries) => to_response(&deliveries),
-            Err(e) => AgentApiResponse::err(e.to_string()),
-        },
-        other => AgentApiResponse::err(format!("unknown method '{other}'")),
-    }
-}
-
-fn to_response<T: serde::Serialize>(value: &T) -> AgentApiResponse {
-    match serde_json::to_value(value) {
-        Ok(v) => AgentApiResponse::ok(v),
-        Err(e) => AgentApiResponse::err(format!("failed to encode result: {e}")),
-    }
+    Ok(())
 }

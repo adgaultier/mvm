@@ -611,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             Notification::input(serde_json::json!("finish the report")).to_text(),
-            "Daddy is requesting: finish the report"
+            format!("{DELEGATION_PROMPT}Parent is asking:\nfinish the report")
         );
     }
 
@@ -619,12 +619,12 @@ mod tests {
     fn to_text_renders_non_string_data_as_compact_json() {
         assert_eq!(
             Notification::input(serde_json::json!({ "text": "mock input" })).to_text(),
-            "Daddy is requesting: {\"text\":\"mock input\"}"
+            format!("{DELEGATION_PROMPT}Parent is asking:\n{{\"text\":\"mock input\"}}")
         );
         // Multi-line strings stay verbatim — a delegated task can span lines.
         assert_eq!(
             Notification::input(serde_json::json!("line one\nline two")).to_text(),
-            "Daddy is requesting: line one\nline two"
+            format!("{DELEGATION_PROMPT}Parent is asking:\nline one\nline two")
         );
     }
 
