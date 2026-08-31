@@ -135,6 +135,9 @@ if [ "$HAVE_PROBE" = 1 ]; then
     WS_ROOT=$(mktemp -d /tmp/mvm-itest-ws.XXXXXX)
     WS_DIR=$WS_ROOT/work
     mkdir -p "$WS_DIR"
+    # macOS exposes /tmp through /private; compare the same canonical form
+    # that Manager::nest_workspace_for stores in the sandbox record.
+    WS_DIR=$(cd "$WS_DIR" && pwd -P)
     SB_WS=$("$MVM" create --name agent-ws \
         -v "$PROBE_DIR:/probe:ro" \
         -v "workspace:$WS_DIR:/home/agent/workspace" \

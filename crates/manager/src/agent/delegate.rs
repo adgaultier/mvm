@@ -270,6 +270,7 @@ mod tests {
     #[test]
     fn nest_workspace_creates_per_child_subdir_and_keeps_tag() {
         let base = std::env::temp_dir().join(format!("mvm-nest-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
         let ws = base.join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
         let mut sandbox = sandbox_with_workspace(ws.to_str().unwrap());
@@ -280,7 +281,7 @@ mod tests {
         assert!(ws_mount.workspace, "tag preserved for further nesting");
         assert_eq!(
             ws_mount.host,
-            ws.join(sandbox.id.as_str()),
+            std::fs::canonicalize(ws.join(sandbox.id.as_str())).unwrap(),
             "workspace host renamed to <workspace>/<child-id>"
         );
         assert!(
