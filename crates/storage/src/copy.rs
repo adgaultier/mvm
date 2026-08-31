@@ -28,7 +28,27 @@ impl StorageDriver for CopyDriver {
     fn create(&self, id: &SandboxId, image_rootfs: &Path) -> Result<PreparedRootfs> {
         let dest = self.sandbox_root(id);
         if dest.exists() {
-            std::fs::remove_dir_all(&dest)?;
+            // Rename first so a restart can create the next rootfs without
+            // waiting for the old tree's recursive deletion. This is
+            // especially important on APFS, where clonefile is cheap but
+            // remove_dir_all still walks every entry.
+            let old = dest.with_file_name(format!(
+                ".rootfs-old-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default()
+            ));
+            if std::fs::rename(&dest, &old).is_ok() {
+                let _ = std::thread::Builder::new()
+                    .name("mvm-rootfs-cleanup".into())
+                    .spawn(move || {
+                        let _ = std::fs::remove_dir_all(old);
+                    });
+            } else {
+                std::fs::remove_dir_all(&dest)?;
+            }
         }
         // APFS: one CoW clone instead of a per-file walk — large images go
         // from seconds to milliseconds. Off-APFS clonefile fails and we fall

@@ -372,7 +372,7 @@ fn flame_lines(timeline: &[Vec<mvm_common::TimelineEvent>], bar_w: usize) -> Vec
             .unwrap_or(false);
         if is_start {
             lines.push(flame_bar_line(lifecycle, bar_w));
-            lines.push(flame_legend(lifecycle));
+            lines.extend(flame_legend(lifecycle, bar_w));
             // Point events (agent_ready, stop) sit after the boot bar, each on
             // its own timestamped line, in chronological order.
             let boot_end = lifecycle
@@ -424,39 +424,40 @@ fn flame_bar_line(events: &[mvm_common::TimelineEvent], width: usize) -> Line<'s
     Line::from(spans)
 }
 
-/// The >1ms phases of one boot bar, laid out sequentially: each phase gets a
-/// segment proportional to its duration relative to the drawn phases (each at
-/// least one column so narrow phases stay visible), and the last phase absorbs
-/// the rounding remainder so the bar always fills exactly `cols`. Phases ≤ 1ms
-/// (absent from the legend) are skipped.
+/// All phases of one boot bar, laid out sequentially: each phase gets a segment
+/// proportional to its duration (each at least one column so tiny phases stay
+/// visible), and the last phase absorbs the rounding remainder so the bar
+/// always fills exactly `cols`.
 fn bar_segments(events: &[mvm_common::TimelineEvent], cols: usize) -> Vec<Span<'static>> {
     if cols == 0 {
         return Vec::new();
     }
 
-    // Collect (phase, duration) for every phase that lasted > 1ms, in
-    // chronological order.
+    // Collect every phase in chronological order.
     let mut phase_starts: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> =
         std::collections::HashMap::new();
     let mut phases: Vec<(&str, u64)> = Vec::new();
+    let detailed_guestd_boot = events.iter().any(|e| e.event == "guestd_seccomp_start");
     for e in events {
         let Some(phase) = phase_of(&e.event) else {
             continue;
         };
+        if detailed_guestd_boot && phase == "boot" {
+            continue;
+        }
         if e.event.ends_with("_start") {
             phase_starts.insert(phase, e.at);
         } else if let Some(start) = phase_starts.remove(phase) {
             let us = (e.at - start).num_microseconds().unwrap_or(0).max(0);
             let ms = (us as f64 / 1000.0).round() as u64;
-            if ms > 1 {
-                phases.push((phase, ms));
-            }
+            phases.push((phase, ms));
         }
     }
 
     let total_ms: u64 = phases.iter().map(|(_, ms)| ms).sum();
     let mut cells: Vec<Option<Color>> = vec![None; cols];
     let mut col = 0usize;
+    let extra_cols = cols.saturating_sub(phases.len());
     for (i, (phase, ms)) in phases.iter().enumerate() {
         if col >= cols {
             break;
@@ -465,8 +466,15 @@ fn bar_segments(events: &[mvm_common::TimelineEvent], cols: usize) -> Vec<Span<'
         let width = if last {
             cols - col
         } else {
-            let want = ((*ms as f64 / total_ms as f64) * cols as f64).round() as usize;
-            want.max(1).min(cols - col)
+            let phases_after = phases.len() - i - 1;
+            let available = cols - col - phases_after;
+            let extra = if total_ms == 0 {
+                0
+            } else {
+                ((extra_cols as f64 * *ms as f64 / total_ms as f64).round() as usize)
+                    .min(available.saturating_sub(1))
+            };
+            1 + extra
         };
         for cell in cells.iter_mut().skip(col).take(width) {
             *cell = Some(phase_color(phase));
@@ -500,17 +508,19 @@ fn bar_segments(events: &[mvm_common::TimelineEvent], cols: usize) -> Vec<Span<'
     spans
 }
 
-/// One legend line per boot bar: the ms timing of every phase that lasted
-/// > 1ms. Phases that didn't reach 1ms are not worth reporting.
-fn flame_legend(events: &[mvm_common::TimelineEvent]) -> Line<'static> {
-    let mut spans = vec![Span::raw("   ")];
+/// One legend line per boot bar: the ms timing of every phase.
+fn flame_legend(events: &[mvm_common::TimelineEvent], width: usize) -> Vec<Line<'static>> {
     let mut phase_starts: std::collections::HashMap<&str, chrono::DateTime<chrono::Utc>> =
         std::collections::HashMap::new();
     let mut phase_durs: Vec<(&str, u64)> = Vec::new();
+    let detailed_guestd_boot = events.iter().any(|e| e.event == "guestd_seccomp_start");
     for e in events {
         let Some(phase) = phase_of(&e.event) else {
             continue;
         };
+        if detailed_guestd_boot && phase == "boot" {
+            continue;
+        }
         if e.event.ends_with("_start") {
             phase_starts.insert(phase, e.at);
         } else if let Some(start) = phase_starts.remove(phase) {
@@ -519,16 +529,36 @@ fn flame_legend(events: &[mvm_common::TimelineEvent]) -> Line<'static> {
             phase_durs.push((phase, ms));
         }
     }
-    let shown: Vec<_> = phase_durs.into_iter().filter(|(_, ms)| *ms > 1).collect();
-    if shown.is_empty() {
-        spans.push(Span::styled("no phases", Style::default().fg(Color::DarkGray)));
-    } else {
-        for (name, ms) in shown {
-            spans.push(Span::styled("█", Style::default().fg(phase_color(name))));
-            spans.push(Span::raw(format!(" {name}={ms}ms  ")));
-        }
+    if phase_durs.is_empty() {
+        return vec![Line::from(Span::styled(
+            "   no phases",
+            Style::default().fg(Color::DarkGray),
+        ))];
     }
-    Line::from(spans)
+    let entries: Vec<(String, Color)> = phase_durs
+        .into_iter()
+        .map(|(name, ms)| (format!("{name}={ms}ms"), phase_color(name)))
+        .collect();
+    let max_entry = entries.iter().map(|(entry, _)| entry.len() + 4).max().unwrap_or(1);
+    let columns = (1..=3)
+        .rev()
+        .find(|columns| max_entry * columns + 3 <= width)
+        .unwrap_or(1);
+    let column_width = width.saturating_sub(3) / columns;
+    entries
+        .chunks(columns)
+        .map(|row| {
+            let mut spans = vec![Span::raw("   ")];
+            for (index, (entry, color)) in row.iter().enumerate() {
+                spans.push(Span::styled("■", Style::default().fg(*color)));
+                spans.push(Span::raw(format!(" {entry}")));
+                if index + 1 < row.len() {
+                    spans.push(Span::raw(" ".repeat(column_width.saturating_sub(entry.len() + 2))));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// A timestamped line for a point event (`agent_ready`, `stop`) below the
@@ -609,13 +639,22 @@ fn phase_color(name: &str) -> Color {
         "register" => Color::LightCyan,
         "disk" => Color::Blue,
         "rootfs" => Color::Yellow,
-        "guestd" => Color::Magenta,
-        "gvproxy" => Color::LightMagenta,
-        "ports" => Color::LightBlue,
-        "shim" => Color::Green,
-        "boot" => Color::Red,
-        "persist" => Color::DarkGray,
-        "terminate" => Color::LightRed,
+        "guestd_inject" => Color::Gray,
+        "gvproxy" => Color::Red,
+        "ports" => Color::LightYellow,
+        "shim" => Color::LightGreen,
+        "boot" => Color::White,
+        "guestd_seccomp" => Color::DarkGray,
+        "guestd_mounts" => Color::LightBlue,
+        "guestd_network" => Color::Green,
+        "guestd_ebpf" => Color::Magenta,
+        "guestd_identity" => Color::LightMagenta,
+        "guestd_workload" => Color::LightRed,
+        "guestd_control_connect" => Color::Rgb(128, 200, 255),
+        "guestd_setup" => Color::Rgb(255, 180, 80),
+        "guestd_ownership" => Color::Rgb(220, 220, 120),
+        "persist" => Color::Black,
+        "terminate" => Color::Rgb(255, 128, 128),
         other => PALETTE[fnv32(other) % PALETTE.len()],
     }
 }
@@ -874,6 +913,14 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    fn legend_text(events: &[TimelineEvent]) -> String {
+        flame_legend(events, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn bar_colors(line: &Line) -> Vec<Color> {
         line.spans.iter().filter_map(|s| s.style.fg).collect()
     }
@@ -913,8 +960,8 @@ mod tests {
     }
 
     #[test]
-    fn legend_lists_only_phases_over_1ms() {
-        // rootfs: 1s, guestd: 0ms (below the floor), boot: 2s.
+    fn legend_lists_all_phases_including_sub_millisecond() {
+        // rootfs: 1s, guestd: 0ms, boot: 2s.
         let lifecycle = vec![
             ev("start_start", 200),
             ev("rootfs_start", 200),
@@ -925,10 +972,48 @@ mod tests {
             ev("boot_stop", 203), // +2s
             ev("start_stop", 203),
         ];
-        let legend = line_text(&flame_legend(&lifecycle));
+        let legend = legend_text(&lifecycle);
         assert!(legend.contains("rootfs=1000ms"), "legend: {legend}");
         assert!(legend.contains("boot=2000ms"), "legend: {legend}");
-        assert!(!legend.contains("guestd"), "sub-1ms phase leaked: {legend}");
+        assert!(legend.contains("guestd=0ms"), "tiny phase missing: {legend}");
+    }
+
+    #[test]
+    fn detailed_guestd_phases_replace_generic_boot_segment() {
+        let lifecycle = vec![
+            ev("start_start", 220),
+            ev("boot_start", 220),
+            ev("guestd_seccomp_start", 220),
+            ev_ms("guestd_seccomp_stop", 220, 10),
+            ev("guestd_ebpf_start", 220),
+            ev_ms("guestd_ebpf_stop", 220, 25),
+            ev("boot_stop", 221),
+            ev("start_stop", 221),
+        ];
+        let legend = legend_text(&lifecycle);
+        assert!(legend.contains("guestd_seccomp=10ms"), "legend: {legend}");
+        assert!(legend.contains("guestd_ebpf=25ms"), "legend: {legend}");
+        assert!(!legend.contains("boot="), "generic boot leaked: {legend}");
+    }
+
+    #[test]
+    fn late_short_phase_is_not_lost_from_the_bar() {
+        let lifecycle = vec![
+            ev("start_start", 225),
+            ev("rootfs_start", 225),
+            ev("rootfs_stop", 230),
+            ev("guestd_seccomp_start", 230),
+            ev_ms("guestd_seccomp_stop", 230, 1),
+            ev("guestd_workload_start", 230),
+            ev_ms("guestd_workload_stop", 230, 1),
+            ev("boot_stop", 231),
+            ev("start_stop", 231),
+        ];
+        let colors = bar_colors(&flame_bar_line(&lifecycle, 60));
+        assert!(
+            colors.contains(&Color::LightRed),
+            "late workload phase missing: {colors:?}"
+        );
     }
 
     #[test]
@@ -966,8 +1051,8 @@ mod tests {
         // Both sub-phases survive: the root span must not have painted over them.
         let colors = bar_colors(&flame_bar_line(&lifecycle, 40));
         assert!(colors.contains(&Color::Yellow), "rootfs painted over: {colors:?}");
-        assert!(colors.contains(&Color::Red), "boot painted over: {colors:?}");
-        let legend = line_text(&flame_legend(&lifecycle));
+        assert!(colors.contains(&Color::White), "boot painted over: {colors:?}");
+        let legend = legend_text(&lifecycle);
         assert!(!legend.contains("start="), "root span in legend: {legend}");
         assert!(legend.contains("rootfs=1000ms"), "legend: {legend}");
         assert!(legend.contains("boot=2000ms"), "legend: {legend}");
@@ -990,7 +1075,7 @@ mod tests {
             ev("start_stop", 503),
         ];
         let colors = bar_colors(&flame_bar_line(&lifecycle, 40));
-        assert!(colors.contains(&Color::LightBlue), "ports sliver missing: {colors:?}");
+        assert!(colors.contains(&Color::LightYellow), "ports sliver missing: {colors:?}");
     }
 
     #[test]
@@ -1012,9 +1097,39 @@ mod tests {
     #[test]
     fn phase_color_is_fixed_per_name_not_rank() {
         assert_eq!(phase_color("rootfs"), Color::Yellow);
-        assert_eq!(phase_color("guestd"), Color::Magenta);
-        assert_eq!(phase_color("boot"), Color::Red);
+        assert_eq!(phase_color("guestd_inject"), Color::Gray);
+        assert_eq!(phase_color("boot"), Color::White);
         assert_eq!(phase_color("future-phase"), phase_color("future-phase"));
+    }
+
+    #[test]
+    fn known_phase_colors_do_not_repeat() {
+        let names = [
+            "validate",
+            "register",
+            "disk",
+            "rootfs",
+            "guestd_inject",
+            "gvproxy",
+            "ports",
+            "shim",
+            "boot",
+            "guestd_seccomp",
+            "guestd_mounts",
+            "guestd_network",
+            "guestd_ebpf",
+            "guestd_setup",
+            "guestd_identity",
+            "guestd_workload",
+            "guestd_control_connect",
+            "persist",
+            "terminate",
+        ];
+        for (index, name) in names.iter().enumerate() {
+            for previous in &names[..index] {
+                assert_ne!(phase_color(name), phase_color(previous), "color collision: {name} / {previous}");
+            }
+        }
     }
 
     fn sandbox() -> mvm_common::Sandbox {
