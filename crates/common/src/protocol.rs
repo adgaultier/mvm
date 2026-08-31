@@ -68,7 +68,11 @@ pub enum GuestdRequest {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GuestdEvent {
     /// Guestd is up; carries the workload PID.
-    Ready { workload_pid: u32 },
+    Ready {
+        workload_pid: u32,
+        #[serde(default)]
+        boot_phases: Vec<BootPhase>,
+    },
     /// stdout data (base64 over the wire: binary-safe).
     Stdout {
         id: u32,
@@ -89,6 +93,13 @@ pub enum GuestdEvent {
     Pong,
     /// Fatal error from the guestd.
     Error { message: String },
+}
+
+/// Monotonic duration of one guestd startup phase, reported with Ready.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootPhase {
+    pub name: String,
+    pub duration_ms: u64,
 }
 
 /// Base64 (standard alphabet, with padding) for byte payloads on the wire.

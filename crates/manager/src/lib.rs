@@ -59,6 +59,7 @@ struct SandboxEntry {
     /// Accept loop for this sandbox's Agent API vsock listener; aborted when
     /// the shim exits (the socket only makes sense while the guest is up).
     agent_api_task: Option<tokio::task::JoinHandle<()>>,
+    guestd_boot_phases: Option<Vec<protocol::BootPhase>>,
 }
 
 impl SandboxEntry {
@@ -74,8 +75,31 @@ impl SandboxEntry {
             stop_requested: false,
             lifecycle: Arc::new(AsyncMutex::new(())),
             agent_api_task: None,
+            guestd_boot_phases: None,
         }
     }
+}
+
+fn add_guestd_phases(
+    mut events: Vec<TimelineEvent>,
+    phases: Option<&[protocol::BootPhase]>,
+) -> Vec<TimelineEvent> {
+    let Some(phases) = phases.filter(|phases| !phases.is_empty()) else {
+        return events;
+    };
+    let Some(boot_stop) = events.iter().position(|e| e.event == "boot_stop") else {
+        return events;
+    };
+    let total_ms: u64 = phases.iter().map(|phase| phase.duration_ms).sum();
+    let mut at = events[boot_stop].at - chrono::Duration::milliseconds(total_ms as i64);
+    let mut details = Vec::with_capacity(phases.len() * 2);
+    for phase in phases {
+        details.push(TimelineEvent { event: format!("{}_start", phase.name), at });
+        at += chrono::Duration::milliseconds(phase.duration_ms as i64);
+        details.push(TimelineEvent { event: format!("{}_stop", phase.name), at });
+    }
+    events.splice(boot_stop..boot_stop, details);
+    events
 }
 
 /// Central registry + lifecycle driver. Cloneable; shares all state.
@@ -274,6 +298,10 @@ impl Manager {
         }
         let mut timings = OpTimings::begin("start");
 
+        if let Some(entry) = self.inner.sandboxes.write().unwrap().get_mut(&id) {
+            entry.guestd_boot_phases = None;
+        }
+
         let (spec, log_tx) = {
             let sandboxes = self.inner.sandboxes.read().unwrap();
             let entry = sandboxes.get(&id).unwrap();
@@ -330,7 +358,7 @@ impl Manager {
             let _ = std::fs::remove_file(&sock);
             sock
         });
-        timings.mark("guestd");
+        timings.mark("guestd_inject");
 
         // 3. Open the control-channel listener before the guest boots.
         let guestd_listener = match &guestd_socket {
@@ -574,7 +602,7 @@ impl Manager {
                 {
                     let sandboxes = self.inner.sandboxes.read().unwrap();
                     match sandboxes.get(&id) {
-                        Some(e) if e.guestd.is_some() => break,
+                        Some(e) if e.guestd.is_some() && e.guestd_boot_phases.is_some() => break,
                         Some(e) if !e.info.state.is_alive() => break,
                         None => break,
                         _ => {}
@@ -590,7 +618,14 @@ impl Manager {
 
         let total_ms = timings.total_ms();
         let boot_ms = timings.phase_ms("boot");
-        let events = timings.finish();
+        let guestd_phases = self
+            .inner
+            .sandboxes
+            .write()
+            .unwrap()
+            .get_mut(&id)
+            .and_then(|entry| entry.guestd_boot_phases.take());
+        let events = add_guestd_phases(timings.finish(), guestd_phases.as_deref());
         self.push_lifecycle(&id, events);
         let sb = self.get(&id)?;
         tracing::info!(
@@ -1326,13 +1361,14 @@ impl Manager {
                     let _ = tx.send(event).await;
                 }
             }
-            Ready { workload_pid } => {
+            Ready { workload_pid, boot_phases } => {
                 tracing::info!(sandbox = %id, workload_pid, "guestd ready");
                 // Infrastructure boot is complete (seccomp, mounts, network,
                 // workload spawned, vsock control channel up). Applies to
                 // every sandbox, not just agent-backed ones.
                 if let Some(entry) = self.inner.sandboxes.write().unwrap().get_mut(id) {
                     entry.info.booted_at = Some(chrono::Utc::now());
+                    entry.guestd_boot_phases = Some(boot_phases);
                 }
             }
             WorkloadExit { code } => {

@@ -21,6 +21,38 @@ use crate::pty;
 const HOST_CID: u32 = 2; // VMADDR_CID_HOST
 const CHUNK: usize = 8192;
 
+struct BootTiming {
+    phases: Vec<mvm_common::protocol::BootPhase>,
+    current: Option<(&'static str, std::time::Instant)>,
+}
+
+impl BootTiming {
+    fn new() -> Self {
+        Self { phases: Vec::new(), current: None }
+    }
+
+    fn mark(&mut self, name: &'static str) {
+        let now = std::time::Instant::now();
+        if let Some((previous, start)) = self.current.take() {
+            self.phases.push(mvm_common::protocol::BootPhase {
+                name: format!("guestd_{previous}"),
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+        self.current = Some((name, now));
+    }
+
+    fn finish(mut self) -> Vec<mvm_common::protocol::BootPhase> {
+        if let Some((name, start)) = self.current.take() {
+            self.phases.push(mvm_common::protocol::BootPhase {
+                name: format!("guestd_{name}"),
+                duration_ms: start.elapsed().as_millis() as u64,
+            });
+        }
+        self.phases
+    }
+}
+
 static SELFPIPE_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn signal_handler(sig: i32) {
@@ -93,6 +125,8 @@ pub fn main() {
     std::process::exit(code);
 }
 fn real_main(workload_argv: &[String]) -> i32 {
+    let mut boot_timing = BootTiming::new();
+    boot_timing.mark("seccomp");
     // 0. seccomp before anything else: the filter is inherited by every
     // process we spawn and can never be weakened, so the raw-socket ban
     // covers the workload, exec sessions and everything in between. It also
@@ -104,13 +138,16 @@ fn real_main(workload_argv: &[String]) -> i32 {
         return 125;
     }
 
+    boot_timing.mark("mounts");
     // 1. Mount any virtiofs bind mounts passed via MVM_MOUNTS.
     mount_bind_shares();
 
     // Static IPv4 bootstrap for NIC-backed modes (gvproxy defaults).
+    boot_timing.mark("network");
     network::configure_network();
 
     // Install the bootstrap network hook before any untrusted workload exists.
+    boot_timing.mark("ebpf");
     let ebpf = match crate::ebpf::install(network::dns_servers()) {
         Ok(ebpf) => ebpf,
         Err(e) => {
@@ -136,6 +173,8 @@ fn real_main(workload_argv: &[String]) -> i32 {
     });
 
     let user_spec = std::env::var("MVM_USER").ok();
+
+    boot_timing.mark("setup");
 
     // Which OS the *host* runs; only "macos" is ever set (Linux needs no
     // signal). The guestd itself always runs in a Linux guest.
@@ -191,6 +230,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // 2. Resolve the identity the workload runs as (image USER or `-u`), now
     // that the rootfs — and its /etc/passwd — is in place. Exec sessions
     // inherit it, docker-style, unless they ask for someone else.
+    boot_timing.mark("identity");
     let user = match user_spec.as_deref() {
         None | Some("") => GuestUser::root(),
         Some(spec) => match resolve_user(spec) {
@@ -207,6 +247,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // workload can't write its own home. Repair it before spawning. This flag
     // only reaches the guest on macOS hosts; Linux userns mode already
     // preserves ownership, and the uid check below makes it a no-op there.
+    boot_timing.mark("ownership");
     if host_os == "macos" && !user.is_root() && !user.home.is_empty() && user.home != "/" {
         if let Ok(meta) = std::fs::symlink_metadata(&user.home) {
             if meta.uid() != user.uid || meta.gid() != user.gid {
@@ -219,6 +260,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // interactive workload needs a real guest PTY of its own.
     let mut console_output = None;
     let mut console_pty = None;
+    boot_timing.mark("workload");
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
@@ -271,6 +313,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     install_handlers();
 
     // 5. Connect to the host over vsock (retry while host listener comes up).
+    boot_timing.mark("control_connect");
     let vsock = match connect_vsock_retry(HOST_CID, protocol::GUESTD_VSOCK_PORT, 100) {
         Some(fd) => fd,
         None => {
@@ -300,8 +343,10 @@ fn real_main(workload_argv: &[String]) -> i32 {
         strict,
         ebpf,
     };
+    let boot_phases = boot_timing.finish();
     guestd.send(&GuestdEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
+        boot_phases,
     });
 
     guestd.run(selfpipe_r)
