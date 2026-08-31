@@ -56,6 +56,8 @@
  * a misleading EINVAL before the verifier ever saw the program. */
 #define BPF_PROG_TYPE_CGROUP_SKB 8
 #define BPF_CGROUP_INET_EGRESS 1
+#define BPF_PROG_TYPE_CGROUP_SOCK_ADDR 18
+#define BPF_CGROUP_INET4_CONNECT 10
 
 /* bpf_insn field encodings */
 #define BPF_ALU64 0x07
@@ -169,6 +171,8 @@ int main(void) {
          * the full key set is always present (integration.sh checks every
          * key is reported, whatever the verdict). */
         printf("attach=na\n");
+        printf("sockprogl=na\n");
+        printf("sockattach=na\n");
         return 0;
     }
     printf("progl=0\n");
@@ -176,6 +180,8 @@ int main(void) {
     int cg_fd = open("/tmp/mvmprobe-cgroup2", O_RDONLY | O_DIRECTORY);
     if (cg_fd < 0) {
         printf("attach=%d (no cgroup dir)\n", errno);
+        printf("sockprogl=na\n");
+        printf("sockattach=na\n");
         close(prog_fd);
         return 0;
     }
@@ -185,6 +191,33 @@ int main(void) {
     attr.attach.attach_type = BPF_CGROUP_INET_EGRESS;
     long rc = bpf_call(BPF_PROG_ATTACH, &attr);
     printf("attach=%d\n", rc == 0 ? 0 : errno);
+
+    /* The production bootstrap uses cgroup_sock_addr/connect4. Keep this
+     * separate from the cgroup_skb probe because the program types have
+     * different verifier and attach requirements. */
+    memset(&attr, 0, sizeof(attr));
+    attr.load.prog_type = BPF_PROG_TYPE_CGROUP_SOCK_ADDR;
+    attr.load.insn_cnt = 2;
+    attr.load.insns = (uint64_t)(uintptr_t)prog;
+    attr.load.license = (uint64_t)(uintptr_t)license;
+    attr.load.log_level = 1;
+    attr.load.log_size = sizeof(logbuf);
+    attr.load.log_buf = (uint64_t)(uintptr_t)logbuf;
+    attr.load.expected_attach_type = BPF_CGROUP_INET4_CONNECT;
+    long sock_prog_fd = bpf_call(BPF_PROG_LOAD, &attr);
+    if (sock_prog_fd < 0) {
+        printf("sockprogl=%d\n", errno);
+        printf("sockattach=na\n");
+    } else {
+        printf("sockprogl=0\n");
+        memset(&attr, 0, sizeof(attr));
+        attr.attach.target_fd = (uint32_t)cg_fd;
+        attr.attach.attach_bpf_fd = (uint32_t)sock_prog_fd;
+        attr.attach.attach_type = BPF_CGROUP_INET4_CONNECT;
+        long sock_rc = bpf_call(BPF_PROG_ATTACH, &attr);
+        printf("sockattach=%d\n", sock_rc == 0 ? 0 : errno);
+        close(sock_prog_fd);
+    }
     close(cg_fd);
     close(prog_fd);
     return 0;

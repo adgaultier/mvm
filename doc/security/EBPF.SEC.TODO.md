@@ -1,23 +1,23 @@
 # Bootstrap plan — Aya eBPF
 ## 1. Create new crate
 
+Implemented:
+
+```text
 crates/
   guest-ebpf/     # no_std eBPF program
-  guestd/         # normal static-musl userspace
+  guestd/         # normal static-musl userspace and Aya loader
+```
 
 ## 2. guest-ebpf uses aya-ebpf
 
-#![no_std]
-#![no_main]
+The initial `connect4` program returns allow for every flow. It is a
+load/attach bootstrap, not network policy yet.
 
-use aya_ebpf::{
-    bindings::BPF_SOCK_ADDR,
-    macros::cgroup_sock_addr,
-    programs::CgroupSockAddr,
-};
+use aya_ebpf::{macros::cgroup_sock_addr, programs::SockAddrContext};
 
 #[cgroup_sock_addr(connect4)]
-pub fn connect4(ctx: CgroupSockAddr) -> i32 {
+pub fn connect4(_ctx: SockAddrContext) -> i32 {
     1 // initially allow everything
 }
 
@@ -25,14 +25,18 @@ pub fn connect4(ctx: CgroupSockAddr) -> i32 {
 
 bpfel-unknown-none
 
-using the Aya build tooling / bpf-linker. The build produces the BPF ELF as a build artifact; it doesn't need to be manually maintained as network.bpf.o.
+Using the Aya build tooling / bpf-linker. `guestd/build.rs` builds the artifact
+only for Linux targets and embeds it into the static guestd binary. The build
+produces the BPF ELF as a build artifact; it doesn't need to be manually
+maintained as `network.bpf.o`.
 
 ## 4. Make guestd consume that build artifact
 
 Use the Aya userspace crate (aya) in guestd.
 Load the generated BPF ELF from the build output.
-Initially, just load and attach connect4.
-Keep the program/link alive for the lifetime of guestd.
+Initially, just load and attach `connect4` to `/sys/fs/cgroup/mvm-workload`.
+The loaded `Ebpf` object is retained for the lifetime of guestd, keeping the
+attachment alive.
 ## 5. First test: prove the complete pipeline
 
 guestd
@@ -47,7 +51,12 @@ cgroup/connect4
   ↓
 workload
 
-Test the same artifact on both your x86_64 and aarch64 libkrun kernels.
+The static guestd target build is checked on both x86_64 and aarch64 hosts;
+the integration probe also checks that the guest kernel accepts
+`cgroup_sock_addr/connect4`.
+
+The workload and every exec session move into the protected cgroup in their
+`pre_exec` path, before UID dropping and before untrusted code runs.
 
 ## 6. Then add a BPF map
 

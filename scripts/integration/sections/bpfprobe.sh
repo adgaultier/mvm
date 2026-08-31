@@ -34,7 +34,7 @@ if build_probe "$PROBES_DIR/bpfprobe.c" "$PROBE_DIR" bpfprobe; then
     # depend on the pinned libkrunfw kernel, not on mvm). The greps are
     # guarded: a missing key (or an empty probe output) must yield an
     # empty value, not a non-zero pipeline that set -e turns into an exit.
-    for key in btf configgz jit cgroup2 bpffs progl attach; do
+    for key in btf configgz jit cgroup2 bpffs progl attach sockprogl sockattach; do
         VAL=$(printf '%s' "$BPF_OUT" | grep -o "$key=[0-9a-z]*" | cut -d= -f2 | head -1 || true)
         check "bpfprobe $key reported" "yes" "$([ -n "$VAL" ] && echo yes || echo no)"
     done
@@ -42,10 +42,17 @@ if build_probe "$PROBES_DIR/bpfprobe.c" "$PROBE_DIR" bpfprobe; then
     printf '%s\n' "$BPF_OUT" | sed 's/^/  bpfprobe: /' || true
     PROG_L=$(printf '%s' "$BPF_OUT" | grep -o 'progl=[0-9]*' | cut -d= -f2 | head -1 || true)
     ATTACH_L=$(printf '%s' "$BPF_OUT" | grep -o 'attach=[0-9]*' | cut -d= -f2 | head -1 || true)
+    SOCK_PROG_L=$(printf '%s' "$BPF_OUT" | grep -o 'sockprogl=[0-9]*' | cut -d= -f2 | head -1 || true)
+    SOCK_ATTACH_L=$(printf '%s' "$BPF_OUT" | grep -o 'sockattach=[0-9]*' | cut -d= -f2 | head -1 || true)
     if [ "$PROG_L" = 0 ] && [ "$ATTACH_L" = 0 ]; then
-        echo "  ✅ bpfprobe: cgroup_skb load+attach works — Phase 2 (in-guest egress policy) is viable"
+        echo "  ✅ bpfprobe: cgroup_skb load+attach works"
     else
-        echo "  ℹ️ bpfprobe: cgroup_skb load+attach unavailable — Phase 2 stays behind the strict-mode probe gate"
+        echo "  ℹ️ bpfprobe: cgroup_skb load+attach unavailable"
+    fi
+    if [ "$SOCK_PROG_L" = 0 ] && [ "$SOCK_ATTACH_L" = 0 ]; then
+        echo "  ✅ bpfprobe: cgroup_sock_addr/connect4 load+attach works"
+    else
+        echo "  ℹ️ bpfprobe: cgroup_sock_addr/connect4 unavailable"
     fi
     "$MVM" stop bpfprobe >/dev/null 2>&1 || true
     wait "$PROBE_RUN_PID" 2>/dev/null || true
