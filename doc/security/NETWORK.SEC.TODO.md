@@ -3,6 +3,7 @@
 MVM Network Security
 │
 ├── Guest network enforcement
+│   ├── seccomp
 │   └── eBPF
 │
 ├── VM network isolation
@@ -153,8 +154,8 @@ MVM uses multiple independent enforcement layers:
                  ┌───────────────────┐
                  │ Guest kernel      │
                  │                   │
-                 │ MVM eBPF          │
-                 │ network policy    │
+                 │ seccomp           │
+                 │ eBPF net policy   │
                  └─────────┬─────────┘
                            │
                        virtio-net
@@ -277,15 +278,18 @@ The workload cannot modify this mapping.
 Source IP, SNI, HTTP headers, or guest-presented tokens must not be the root of
 VM identity.
 
+vsock is reserved for the MVM control plane. Guest Internet traffic MUST use the virtio-net data plane and MUST NOT use vsock as an alternate network path.
+
 ---
 
 # 5. Guest eBPF Network Enforcement
 
-Guest eBPF is a trusted enforcement layer against compromised workload
-userspace.
+Guest eBPF is a trusted network enforcement layer against compromised workload userspace. It complements the existing guestd seccomp-BPF enforcement: seccomp restricts dangerous kernel/network interfaces such as raw sockets and AF_PACKET, while eBPF enforces the permitted network path and transport policy.
 
-It is not responsible for TLS, HTTP, credential selection, or secret
-management.
+Guest eBPF is not responsible for TLS, HTTP, credential selection, or secret management.
+
+
+
 
 ## Responsibilities
 
@@ -352,39 +356,44 @@ security boundary.
 
 # 7. Host Network Enforcement
 
-Guest eBPF is not the only enforcement layer.
+Guest eBPF is not the final network security boundary. The host must independently ensure that every guest flow reaches the controlled egress path.
 
-The host must independently enforce:
-
-```text
-VM ──X──► uncontrolled Internet
+The desired path is:
 ```
-
-The desired invariant is:
-
-```text
 VM
  │
  ▼
 guest eBPF
  │
  ▼
-virtio
+virtio-net
  │
  ▼
 passt/gvproxy
  │
  ▼
-host enforcement
+host network enforcement
  │
  ▼
-L7 proxy
+transparent L7 proxy
  │
  ▼
 Internet
 ```
 
-Direct Internet access outside this path must be denied.
+The host maintains the trusted mapping between each network instance and VM identity. Direct Internet access outside this path must be denied.
+
+The host enforcement layer must ensure:
+
+every Internet-bound flow has a host-derived VM identity;
+IPv4 and IPv6 have equivalent enforcement;
+alternate routes/interfaces cannot bypass enforcement;
+VM-to-VM and host/private-network access are explicitly controlled;
+DNS cannot provide an independent egress bypass;
+UDP/443 cannot bypass credential interception through QUIC;
+failure of enforcement results in denied networking, not unrestricted networking.
+
+The host proxy is responsible for policy requiring L7 visibility: destination identity, URL/method/path policy, and credential authorization/injection.
 
 ## Required properties
 
@@ -749,27 +758,29 @@ when credential interception fails.
 
 ---
 
-# 19. HTTP/1.1 and HTTP/2
+# 19. Transparent L7 Proxy
 
-The proxy must explicitly support:
+The egress proxy is transparent to the workload. The workload uses ordinary TCP/TLS/HTTP and does not configure an HTTP proxy or use a special SDK.
+
+The proxy terminates the guest-side TLS connection and establishes an independent upstream TLS connection.
+
+It must support:
 
 * HTTP/1.1;
-* HTTP/2.
-
-The client-side and upstream TLS connections may negotiate independently.
-
-The proxy must correctly handle:
-
-* HTTP/1.1 `Host`;
+* HTTP/2;
+* HTTP `Host`;
 * HTTP/2 `:authority`;
-* duplicate headers;
-* case-insensitive header names;
-* request bodies;
-* streaming requests;
-* HTTP/2 streams;
+* request bodies and streaming;
 * connection reuse.
 
-HTTP/3/QUIC is initially outside the credential-injection path.
+
+The host proxy is responsible for policy requiring L7 visibility:
+* destination identity, URL/method/path policy, and credential
+* authorization/injection. Host-side network enforcement remains responsible
+* for ensuring that traffic cannot bypass the proxy.
+
+
+HTTP/3/QUIC is initially outside the credential-injection path; UDP/443 is therefore denied as specified in §20.
 
 ---
 
@@ -803,18 +814,19 @@ would invalidate the intended egress invariant.
 
 # 21. Credential Policy
 
-Credential selection must be completely separate from transport interception.
+Credential selection is a host-side authorization decision, separate from transport interception.
 
 The logical pipeline is:
 
-```text
 Egress flow
     ↓
 VM identity
     ↓
-destination normalization
+destination identity
     ↓
 request parsing
+    ↓
+network/request policy
     ↓
 AuthorizationEngine
     ↓
@@ -823,9 +835,15 @@ opaque CredentialHandle
 CredentialBroker
     ↓
 CredentialInjector
-```
 
-The guest never provides a credential reference.
+
+The guest may indicate that managed authentication is expected, but it never provides a credential reference or selects a credential.
+
+A credential is authorized for an explicit destination and may additionally be constrained by HTTP method and path.
+
+Destination changes, redirects, and cross-origin requests require independent authorization.
+
+If destination identity or authorization cannot be established, credential injection fails closed.
 
 ---
 
@@ -1714,7 +1732,7 @@ The recommended MVM architecture is:
 │                         ▼                               │
 │                 Guest kernel                            │
 │                         │                               │
-│                  MVM eBPF policy                         │
+│                  MVM eBPF policy                        │
 │                         │                               │
 │                         ▲                               │
 │                         │                               │
