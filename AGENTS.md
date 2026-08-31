@@ -302,7 +302,9 @@ candidate that is dynamically linked or not a Linux ELF at all.
    skips DNS eBPF enforcement. Workloads and exec sessions are moved into
    `/sys/fs/cgroup/mvm-workload` in `pre_exec` before UID dropping. The
    dedicated end-to-end check is `just -f scripts/integration/Justfile dns-ebpf`;
-   `just bpfprobe` remains only a kernel capability probe.
+   `just bpfprobe` remains only a kernel capability probe. The `seccomp`
+   integration section probes BPF load, attach, detach, map create/update, and
+   pin/get attempts as workload root and through exec sessions.
   Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec and drop
   `CAP_CHOWN` from the bounding set (`drop_cap_chown` in `apply_strict_seccomp`,
   `PR_CAPBSET_DROP` — dropping from the bounding set also clears it from the

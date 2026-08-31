@@ -302,7 +302,8 @@ Guest eBPF is not responsible for TLS, HTTP, credential selection, or secret man
 * [ ] constrain outbound TCP/UDP flows;
 * [ ] enforce allowed destination classes where practical;
 * [ ] prevent alternate guest network paths;
-* [ ] prevent workload modification of enforcement state;
+* [x] prevent workload modification of enforcement state (workload-scoped
+  seccomp denies `bpf(2)` and security maps are not exposed);
 * [x] establish enforcement before workload startup;
 * [x] fail closed if enforcement cannot be established;
 * [ ] fail closed if enforcement is lost during VM lifetime.
@@ -321,8 +322,8 @@ used for the additional NIC-mode DNS and transport policy described here.
 The workload-scoped seccomp layer also denies `bpf(2)` for default and strict
 workloads, including exec sessions. The trusted guestd is the only process
 that loads MVM's embedded programs. Security-critical maps are not pinned or
-exposed to workload processes; direct detach/replace/map-update probes remain
-to be added to the integration suite.
+exposed to workload processes; the `seccomp` integration section probes BPF
+load, attach, detach, map create/update, and pin/get attempts.
 
 ---
 
@@ -1623,9 +1624,9 @@ Run the complete suite from a fully compromised workload userspace.
 * [x] `AF_PACKET` fails (seccomp-BPF).
 * [ ] `AF_ALG` fails.
 * [ ] unauthorized socket operations fail.
-* [ ] workload cannot detach eBPF.
-* [ ] workload cannot replace eBPF.
-* [ ] workload cannot modify security-critical BPF maps.
+* [x] workload cannot detach eBPF.
+* [x] workload cannot replace eBPF.
+* [x] workload cannot modify security-critical BPF maps.
 * [x] enforcement is active before workload startup.
 * [ ] enforcement loss fails closed.
 
