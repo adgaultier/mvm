@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{lchown, MetadataExt};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -116,7 +115,7 @@ struct Guestd {
     /// seccomp filter in their pre_exec, like the workload itself.
     strict: bool,
     /// Keeps the loaded program and its cgroup link alive for the VM lifetime.
-    ebpf: crate::ebpf::Installed,
+    _ebpf: crate::ebpf::Installed,
 }
 
 pub fn main() {
@@ -269,7 +268,6 @@ fn real_main(workload_argv: &[String]) -> i32 {
             console_size,
             &user,
             strict,
-            &ebpf.cgroup_procs,
         ) {
             Some((child, handle, pty)) => {
                 console_output = Some(handle);
@@ -288,7 +286,6 @@ fn real_main(workload_argv: &[String]) -> i32 {
         if strict {
             apply_strict_seccomp(&mut cmd);
         }
-        apply_cgroup(&mut cmd, &ebpf.cgroup_procs);
         apply_user(&mut cmd, &user);
         match cmd.spawn() {
             Ok(child) => Some(child),
@@ -341,7 +338,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
         console_pty,
         guest_token,
         strict,
-        ebpf,
+        _ebpf: ebpf,
     };
     let boot_phases = boot_timing.finish();
     guestd.send(&GuestdEvent::Ready {
@@ -350,38 +347,6 @@ fn real_main(workload_argv: &[String]) -> i32 {
     });
 
     guestd.run(selfpipe_r)
-}
-
-/// Move the child into the protected cgroup before any workload code runs.
-pub(crate) fn apply_cgroup(cmd: &mut Command, procs: &std::path::Path) {
-    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).expect("cgroup path");
-    unsafe {
-        cmd.pre_exec(move || {
-            let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut buf = [0u8; 20];
-            let mut pid = libc::getpid() as u32;
-            let mut len = 0;
-            loop {
-                buf[buf.len() - 1 - len] = b'0' + (pid % 10) as u8;
-                len += 1;
-                pid /= 10;
-                if pid == 0 {
-                    break;
-                }
-            }
-            let start = buf.len() - len;
-            let result = if libc::write(fd, buf[start..].as_ptr().cast(), len) as usize == len {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            };
-            libc::close(fd);
-            result
-        });
-    }
 }
 
 /// Apply no-new-privileges and drop CAP_CHOWN in a child before exec.
@@ -945,7 +910,6 @@ impl Guestd {
         if self.strict {
             apply_strict_seccomp(&mut cmd);
         }
-        apply_cgroup(&mut cmd, &self.ebpf.cgroup_procs);
         // Last, so the tty work above still happens as root. Also overrides
         // HOME/USER/LOGNAME from baseline_env for the target identity.
         apply_user(&mut cmd, &user);

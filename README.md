@@ -418,8 +418,8 @@ Strict mode does not yet drop all Linux capabilities. The guestd loads its
 embedded Aya eBPF programs before starting workloads. NIC-backed networking
 attaches a `cgroup_skb/egress` policy that permits DNS TCP/UDP port 53 only to
 the configured virtual resolver (the `gvproxy` gateway is normally
-`192.168.127.1`) and denies IPv6 DNS. Workloads and exec sessions are placed in
-the protected cgroup before exec.
+`192.168.127.1`) and denies IPv6 DNS. The policy is attached to the guest
+cgroup root, covering workloads and exec sessions without a cgroup escape path.
 
 This DNS policy applies only to NIC-backed networking. It does not apply to
 `tsi`, whose socket operations are serviced by the host and which remains an

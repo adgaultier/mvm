@@ -1,22 +1,21 @@
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aya::maps::HashMap;
 use aya::programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSockAddr};
 use aya::Ebpf;
 
-pub(crate) const WORKLOAD_CGROUP: &str = "/sys/fs/cgroup/mvm-workload";
+pub(crate) const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 pub(crate) struct Installed {
     pub(crate) _bpf: Ebpf,
-    pub(crate) cgroup_procs: PathBuf,
 }
 
 pub(crate) fn install(
     dns_servers: Option<Vec<std::net::Ipv4Addr>>,
 ) -> Result<Installed, Box<dyn std::error::Error>> {
-    let root = Path::new("/sys/fs/cgroup");
+    let root = Path::new(CGROUP_ROOT);
     fs::create_dir_all(root)?;
     let source = std::ffi::CString::new("cgroup2")?;
     let target = std::ffi::CString::new(root.as_os_str().as_bytes())?;
@@ -34,9 +33,7 @@ pub(crate) fn install(
         }
     }
 
-    let cgroup = Path::new(WORKLOAD_CGROUP);
-    fs::create_dir_all(cgroup)?;
-    let cgroup_file = File::open(cgroup)?;
+    let cgroup_file = File::open(root)?;
     let mut bpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/mvm-guest-ebpf"
@@ -49,7 +46,7 @@ pub(crate) fn install(
     program.attach(cgroup_file, CgroupAttachMode::Single)?;
 
     if let Some(dns_servers) = dns_servers {
-        let cgroup_file = File::open(cgroup)?;
+        let cgroup_file = File::open(root)?;
         let dns_program: &mut CgroupSkb = bpf
             .program_mut("dns_egress")
             .ok_or("embedded dns_egress program is missing")?
@@ -71,6 +68,5 @@ pub(crate) fn install(
 
     Ok(Installed {
         _bpf: bpf,
-        cgroup_procs: cgroup.join("cgroup.procs"),
     })
 }
