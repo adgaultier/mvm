@@ -60,7 +60,8 @@ candidate that is dynamically linked or not a Linux ELF at all.
   there is no userns; the daemon runs with host credentials.
 - **Storage** (`storage` crate): `overlay` (default under root/userns;
   `userxattr` inside a userns; upper persists across restarts) and `copy`
-  (fallback, wiped each start). Both are served to the guest over virtiofs.
+  (persistent per-sandbox CoW rootfs, with recursive-copy fallback). Both are
+  served to the guest over virtiofs.
 - **Networking** (`--net`): `none` = dead unixgram NIC (disables libkrun's
   default TSI!), `tsi` = transparent host-serviced sockets, `gvproxy` =
   vfkit-mode datagram socket + guestd-side static IP bootstrap (the daemon
@@ -396,13 +397,15 @@ candidate that is dynamically linked or not a Linux ELF at all.
   per-message. `handle_conn` therefore half-closes (`shutdown`) and drains
   until the client closes (capped at 5 s) before the stream is dropped.
 - **macOS rootfs loses image ownership (host uid owns everything).** The copy
-  driver writes the rootfs as the host user and macOS has no userns, so
+  driver writes the persistent rootfs as the host user and macOS has no userns, so
   `/home/agent` ends up owned by the host uid and a non-root workload can't
   write its own home (`PermissionDenied` on opencode's log). The shim sets
   `MVM_HOST_OS=macos` (host-gated via `#[cfg(target_os = "macos")]`), and the
   guestd — before spawning a non-root workload whose home is owned by someone
   else — recursively `lchown`s the home to the workload's uid/gid using
-  descriptor-relative traversal. macOS
+  descriptor-relative traversal. The persistent rootfs keeps the resulting
+  ownership metadata across restarts, so the repair is normally one-time.
+  macOS
   virtiofs `LinuxComplete` semantics turns that chown into a
   `user.containers.override_stat` xattr, so it sticks for the boot; it's a
   no-op on Linux (userns already owns the files, and the uid check skips it).

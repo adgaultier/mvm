@@ -28,27 +28,10 @@ impl StorageDriver for CopyDriver {
     fn create(&self, id: &SandboxId, image_rootfs: &Path) -> Result<PreparedRootfs> {
         let dest = self.sandbox_root(id);
         if dest.exists() {
-            // Rename first so a restart can create the next rootfs without
-            // waiting for the old tree's recursive deletion. This is
-            // especially important on APFS, where clonefile is cheap but
-            // remove_dir_all still walks every entry.
-            let old = dest.with_file_name(format!(
-                ".rootfs-old-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or_default()
-            ));
-            if std::fs::rename(&dest, &old).is_ok() {
-                let _ = std::thread::Builder::new()
-                    .name("mvm-rootfs-cleanup".into())
-                    .spawn(move || {
-                        let _ = std::fs::remove_dir_all(old);
-                    });
-            } else {
-                std::fs::remove_dir_all(&dest)?;
-            }
+            // The CoW rootfs is the sandbox's persistent disk. Reusing it
+            // keeps workload data and macOS virtiofs ownership metadata across
+            // stops, avoiding a repeated recursive ownership repair in guestd.
+            return Ok(PreparedRootfs { rootfs: dest });
         }
         // APFS: one CoW clone instead of a per-file walk — large images go
         // from seconds to milliseconds. Off-APFS clonefile fails and we fall
@@ -109,6 +92,28 @@ mod tests {
         copy_tree(&src, &dst).unwrap();
         assert_eq!(std::fs::read(dst.join("etc/motd")).unwrap(), b"hi");
         assert!(dst.join("link").symlink_metadata().unwrap().is_symlink());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn create_reuses_existing_rootfs() {
+        let base = std::env::temp_dir().join(format!("mvm-copy-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let image = base.join("image");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("from-image"), b"image").unwrap();
+
+        let data = mvm_common::DataDir::at(base.join("data"));
+        let driver = CopyDriver::new(data);
+        let id: SandboxId = "sandbox".into();
+        let first = driver.create(&id, &image).unwrap();
+        std::fs::write(first.rootfs.join("workload-data"), b"keep").unwrap();
+        assert!(first.rootfs.join("workload-data").exists());
+        let second = driver.create(&id, &image).unwrap();
+
+        assert_eq!(first.rootfs, second.rootfs);
+        assert_eq!(std::fs::read(second.rootfs.join("workload-data")).unwrap(), b"keep");
+        driver.destroy(&id).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
