@@ -300,7 +300,7 @@ The guest root is always served over **virtiofs**. Drivers are auto-selected;
 | Driver | Behavior |
 |---|---|
 | `overlay` | default under root and userns mode: kernel OverlayFS with the image rootfs as lower layer and a per-sandbox upper. Changes **persist** across `stop`/`start`. Auto-probed, falls back to `copy` if unsupported. |
-| `copy` | per-sandbox rootfs copy; universal fallback and the macOS default (APFS copies are `clonefile(2)`, so they are cheap). The rootfs is **rebuilt (wiped) on every start**. |
+| `copy` | per-sandbox persistent CoW rootfs; universal fallback and the macOS default (APFS copies use `clonefile(2)`, so initial creation is cheap). The rootfs and workload data persist across stops and restarts; `mvm rm` removes it. Existing sandboxes do not automatically adopt a newly pulled image. |
 
 State layout under the `MVM_DATA_DIR` data dir:
 

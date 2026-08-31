@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{lchown, MetadataExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -976,21 +977,71 @@ impl Guestd {
 }
 
 /// Recursively make `root` (and everything under it) owned by uid:gid.
-/// Best-effort and symlink-safe: entries are `lchown`ed (the symlink itself
-/// is owned, never its target) and only real directories are descended into.
+/// Descriptor-relative traversal avoids rebuilding a full path for every
+/// entry. `AT_SYMLINK_NOFOLLOW` keeps links owned but never traversed.
 fn chown_tree(root: &std::path::Path, uid: u32, gid: u32) {
-    let _ = lchown(root, Some(uid), Some(gid));
-    let Ok(entries) = std::fs::read_dir(root) else {
+    let Ok(path) = std::ffi::CString::new(root.as_os_str().as_bytes()) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let _ = lchown(&path, Some(uid), Some(gid));
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            if meta.is_dir() {
-                chown_tree(&path, uid, gid);
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    chown_dir(fd, uid, gid);
+}
+
+fn chown_dir(fd: libc::c_int, uid: u32, gid: u32) {
+    unsafe {
+        let _ = libc::fchown(fd, uid, gid);
+        let dir = libc::fdopendir(fd);
+        if dir.is_null() {
+            libc::close(fd);
+            return;
+        }
+        let dir_fd = libc::dirfd(dir);
+        loop {
+            let entry = libc::readdir(dir);
+            if entry.is_null() {
+                break;
+            }
+            let entry = &*entry;
+            let name = entry.d_name.as_ptr();
+            if *name == 0 || (*name == b'.' as libc::c_char && *name.add(1) == 0) {
+                continue;
+            }
+            if *name == b'.' as libc::c_char
+                && *name.add(1) == b'.' as libc::c_char
+                && *name.add(2) == 0
+            {
+                continue;
+            }
+            let _ = libc::fchownat(dir_fd, name, uid, gid, libc::AT_SYMLINK_NOFOLLOW);
+            let is_dir = if entry.d_type == libc::DT_DIR {
+                true
+            } else if entry.d_type == libc::DT_UNKNOWN {
+                let mut stat: libc::stat = std::mem::zeroed();
+                libc::fstatat(dir_fd, name, &mut stat, libc::AT_SYMLINK_NOFOLLOW) == 0
+                    && (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
+            } else {
+                false
+            };
+            if is_dir {
+                let child = libc::openat(
+                    dir_fd,
+                    name,
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                );
+                if child >= 0 {
+                    chown_dir(child, uid, gid);
+                }
             }
         }
+        libc::closedir(dir);
     }
 }
 
