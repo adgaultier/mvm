@@ -81,7 +81,7 @@ impl Manager {
             .ok_or_else(|| Error::Runtime("exec channel closed before the Exit frame".into()))?;
 
         self.record_notification(&id, notification);
-
+        let output = String::from_utf8_lossy(&output).into_owned();
         if exit_code == 0 {
             tracing::info!(
                 sandbox = %id,
@@ -90,19 +90,21 @@ impl Manager {
                 "notification delivered"
             );
         } else {
+
             tracing::warn!(
                 sandbox = %id,
                 kind = %kind,
                 notification = %notification.id,
                 exit_code,
-                "notification command exited non-zero"
+                error = %output,
+                "notification command exited non-zero:"
             );
         }
 
         Ok(NotificationDelivery::succeeded(
             kind,
             exit_code,
-            String::from_utf8_lossy(&output).into_owned(),
+            output,
         ))
     }
 

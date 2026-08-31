@@ -11,7 +11,7 @@ mod gvproxy;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -1599,7 +1599,7 @@ fn prepare_mount_ownership(mounts: &[Mount]) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn chown_tree(path: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+fn chown_tree(path: &std::path::Path, uid: u32, gid: u32) -> std::io::Result<()> {
     use std::ffi::CString;
     let p = CString::new(
         path.to_str()
