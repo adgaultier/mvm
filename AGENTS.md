@@ -299,10 +299,13 @@ candidate that is dynamically linked or not a Linux ELF at all.
    for the bootstrap and, for NIC-backed modes only, `dns_egress` with the
    `ALLOWED_DNS_IPV4` map. The map contains the NIC gateway from
    `MVM_NET_CONFIG` (normally `192.168.127.1` for gvproxy); TSI deliberately
-   skips DNS eBPF enforcement. Workloads and exec sessions are moved into
-   `/sys/fs/cgroup/mvm-workload` in `pre_exec` before UID dropping. The
+    skips DNS eBPF enforcement. The eBPF programs attach to the guest cgroup
+    root, so workloads and exec sessions cannot escape the policy by changing
+    cgroup membership. The
    dedicated end-to-end check is `just -f scripts/integration/Justfile dns-ebpf`;
-   `just bpfprobe` remains only a kernel capability probe. The `seccomp`
+   `just bpfprobe` is retained as a historical raw kernel probe but skips
+   because workload `bpf(2)` is intentionally denied; `dns-ebpf` validates the
+   trusted guestd attachment path. The `seccomp`
    integration section probes BPF load, attach, detach, map create/update, and
    pin/get attempts as workload root and through exec sessions.
   Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec and drop

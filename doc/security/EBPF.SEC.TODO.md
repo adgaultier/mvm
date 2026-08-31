@@ -34,7 +34,8 @@ maintained as `network.bpf.o`.
 
 Use the Aya userspace crate (aya) in guestd.
 Load the generated BPF ELF from the build output.
-Initially, just load and attach `connect4` to `/sys/fs/cgroup/mvm-workload`.
+Initially, just load and attach `connect4` to the cgroup v2 root at
+`/sys/fs/cgroup`.
 The loaded `Ebpf` object is retained for the lifetime of guestd, keeping the
 attachment alive.
 ## 5. First test: prove the complete pipeline
@@ -51,12 +52,13 @@ cgroup/connect4
   ↓
 workload
 
-The static guestd target build is checked on both x86_64 and aarch64 hosts;
-the integration probe also checks that the guest kernel accepts
-`cgroup_sock_addr/connect4`.
+The static guestd target build is checked on both x86_64 and aarch64 hosts.
+The trusted guestd load/attach path is exercised by `dns-ebpf`; the historical
+raw `bpf(2)` capability probe is skipped because workloads are intentionally
+denied `bpf(2)`.
 
-The workload and every exec session move into the protected cgroup in their
-`pre_exec` path, before UID dropping and before untrusted code runs.
+The root attachment covers the workload and every exec session automatically,
+so they cannot escape the policy by moving between child cgroups.
 
 ## 6. DNS enforcement
 

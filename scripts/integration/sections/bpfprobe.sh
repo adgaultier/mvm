@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "== guest kernel eBPF probe (bpfprobe) =="
+# Workload BPF is intentionally denied by guestd's always-on seccomp boundary.
+# The trusted guestd attachment path is exercised by `dns-ebpf`; this probe
+# cannot remain an untrusted raw bpf(2) capability probe.
+skip "bpfprobe (workload bpf(2) is denied by design; use dns-ebpf)"
+echo
+echo "$PASS passed, $SKIP skipped, $FAIL failed"
+[ "$FAIL" -eq 0 ]
+return 0
 # Informs the Phase 2 plan (in-guest cgroup_skb egress policy): whether the
 # libkrunfw guest kernel can load and attach eBPF programs at all. The probe
 # runs as guest root (the threat model's hostile-root assumption), so bpf()
