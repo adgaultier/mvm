@@ -15,7 +15,7 @@ else
         sleep 0.2
     done
 
-    check "configured resolver works" "DNS-OK" \
+    check "configured resolver UDP works" "DNS-OK" \
         "$(timeout "$T" "$MVM" exec dns-ebpf sh -c \
             'nslookup example.com >/dev/null 2>&1 && echo DNS-OK' 2>/dev/null || true)"
 
@@ -25,6 +25,11 @@ else
         "$(timeout "$T" "$MVM" exec dns-ebpf sh -c \
             'printf "nameserver 1.1.1.1\\n" > /etc/resolv.conf; \
              nslookup example.com >/dev/null 2>&1 && echo DNS-BYPASS || echo DNS-DENIED' \
+            2>/dev/null || true)"
+
+    check "rewritten resolver TCP is denied" "DNS-DENIED" \
+        "$(timeout "$T" "$MVM" exec dns-ebpf sh -c \
+            'nslookup -vc example.com >/dev/null 2>&1 && echo DNS-BYPASS || echo DNS-DENIED' \
             2>/dev/null || true)"
 
     "$MVM" stop dns-ebpf >/dev/null 2>&1 || true

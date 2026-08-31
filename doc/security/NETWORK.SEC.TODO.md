@@ -1651,7 +1651,7 @@ Run the complete suite from a fully compromised workload userspace.
 * [ ] alternate interfaces fail.
 * [ ] host-loopback access follows explicit policy.
 * [ ] VM-to-VM access follows explicit policy.
-* [ ] DNS bypass cannot create unrestricted egress.
+* [x] NIC-mode DNS bypass cannot create unrestricted egress.
 
 ## Destination attacks
 

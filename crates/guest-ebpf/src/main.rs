@@ -28,6 +28,16 @@ pub fn dns_egress(ctx: SkBuffContext) -> i32 {
             Ok(value) => ((value & 0x0f) as usize) * 4,
             Err(_) => return 0,
         };
+        if ihl < 20 {
+            return 0;
+        }
+        let fragment = match ctx.load::<u16>(6) {
+            Ok(value) => u16::from_be(value),
+            Err(_) => return 0,
+        };
+        if fragment & 0x3fff != 0 {
+            return 0;
+        }
         let protocol = match ctx.load::<u8>(9) {
             Ok(value) => value,
             Err(_) => return 0,
