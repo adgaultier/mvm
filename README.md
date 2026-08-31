@@ -398,6 +398,10 @@ the workload and all exec sessions. `AF_NETLINK` raw-type sockets remain
 allowed for network bootstrap, so tools such as `tcpdump`, `arping`,
 old-style `ping`, and `udhcpc` are unavailable.
 
+The same workload-scoped boundary unconditionally blocks `bpf(2)` for default
+and strict workloads, including exec sessions. The trusted guestd retains the
+ability to load MVM's embedded programs before spawning them.
+
 With `--security=strict`, workloads additionally receive a
 workload-scoped seccomp profile and `PR_SET_NO_NEW_PRIVS`. This denies BPF,
 `ptrace`, namespace and mount changes, kernel module loading, kexec, keyctl,
@@ -410,11 +414,17 @@ chown as root. This stops a parent or child agent from mutating the ownership
 of a shared/nested workspace and breaking the other's access. `chown` then
 fails with `EPERM` instead of succeeding.
 
-Strict mode does not yet drop all Linux capabilities. The libkrunfw guest
-kernel supports loading and attaching `cgroup_skb` programs but does not ship
-BTF, and mvm does not yet install production egress policies. Planned
-cgroup-BPF network enforcement applies only to NIC-backed networking; it does
-not apply to `tsi`, whose socket operations are serviced by the host.
+Strict mode does not yet drop all Linux capabilities. The guestd loads its
+embedded Aya eBPF programs before starting workloads. NIC-backed networking
+attaches a `cgroup_skb/egress` policy that permits DNS TCP/UDP port 53 only to
+the configured virtual resolver (the `gvproxy` gateway is normally
+`192.168.127.1`) and denies IPv6 DNS. Workloads and exec sessions are placed in
+the protected cgroup before exec.
+
+This DNS policy applies only to NIC-backed networking. It does not apply to
+`tsi`, whose socket operations are serviced by the host and which remains an
+insecure test backend. The dedicated integration check is
+`just -f scripts/integration/Justfile dns-ebpf`.
 
 Workload users are resolved against the guest rootfs's `/etc/passwd`, never
 the host's user database. On Linux, rootless operation can run the daemon

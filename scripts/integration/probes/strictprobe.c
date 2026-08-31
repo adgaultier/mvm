@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #ifdef __aarch64__
+#define S_BPF 280
 #define S_PTRACE 117
 #define S_MOUNT 40
 #define S_UMOUNT2 39
@@ -22,6 +23,7 @@
 #define S_KEXEC_LOAD 104
 #define S_KEXEC_FILE_LOAD 294
 #else
+#define S_BPF 321
 #define S_PTRACE 101
 #define S_MOUNT 165
 #define S_UMOUNT2 166
@@ -42,6 +44,14 @@
 #endif
 #define PR_GET_NO_NEW_PRIVS 39
 
+#define BPF_MAP_CREATE 0
+#define BPF_MAP_UPDATE_ELEM 2
+#define BPF_OBJ_PIN 6
+#define BPF_OBJ_GET 7
+#define BPF_PROG_ATTACH 8
+#define BPF_PROG_DETACH 9
+#define BPF_PROG_LOAD 5
+
 #define CHECK(name, call) \
     do { \
         errno = 0; \
@@ -50,11 +60,25 @@
         fflush(stdout); \
     } while (0)
 
+static long bpf_attempt(int command) {
+    unsigned char attr[256] = {0};
+    errno = 0;
+    (void)syscall(S_BPF, command, attr, sizeof(attr));
+    return errno == EPERM;
+}
+
 int main(void) {
     errno = 0;
     printf("no_new_privs=%d\n",
            syscall(S_PRCTL, PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1);
     fflush(stdout);
+    printf("bpf=%ld\n", bpf_attempt(BPF_PROG_LOAD));
+    printf("bpf_map_create=%ld\n", bpf_attempt(BPF_MAP_CREATE));
+    printf("bpf_map_update=%ld\n", bpf_attempt(BPF_MAP_UPDATE_ELEM));
+    printf("bpf_obj_pin=%ld\n", bpf_attempt(BPF_OBJ_PIN));
+    printf("bpf_obj_get=%ld\n", bpf_attempt(BPF_OBJ_GET));
+    printf("bpf_prog_attach=%ld\n", bpf_attempt(BPF_PROG_ATTACH));
+    printf("bpf_prog_detach=%ld\n", bpf_attempt(BPF_PROG_DETACH));
 
     CHECK("ptrace", syscall(S_PTRACE, 0, 0, 0, 0));
     CHECK("mount", syscall(S_MOUNT, 0, 0, 0, 0, 0));

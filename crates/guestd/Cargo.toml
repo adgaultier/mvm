@@ -3,6 +3,7 @@ name = "mvm-guestd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "mvm-guestd"
@@ -11,3 +12,9 @@ path = "src/main.rs"
 [dependencies]
 mvm-common = { path = "../common" }
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya.workspace = true
+
+[build-dependencies]
+aya-build.workspace = true

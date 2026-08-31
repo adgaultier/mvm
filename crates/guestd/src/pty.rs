@@ -10,6 +10,7 @@ pub(super) fn spawn_tty_workload(
     size: Option<(u16, u16)>,
     user: &GuestUser,
     strict: bool,
+    cgroup_procs: &std::path::Path,
 ) -> Option<(
     std::process::Child,
     std::thread::JoinHandle<()>,
@@ -62,9 +63,11 @@ pub(super) fn spawn_tty_workload(
             Ok(())
         });
     }
+    crate::linux::apply_bpf_seccomp(&mut cmd);
     if strict {
         crate::linux::apply_strict_seccomp(&mut cmd);
     }
+    crate::linux::apply_cgroup(&mut cmd, cgroup_procs);
     apply_user(&mut cmd, user);
     let child = match cmd.spawn() {
         Ok(child) => child,

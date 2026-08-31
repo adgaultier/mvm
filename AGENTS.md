@@ -273,7 +273,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
    (`udhcpc`); the planned `--net passt` guestd-side bootstrap must NOT rely on
    DHCP — it needs the gvproxy-style static-IP bootstrap instead.    Always-on
    by design: there is no opt-out. Filter shape is probed in-VM by
-   `scripts/integration/probes/rawprobe.c` through `just raw-seccomp` (as
+   `scripts/integration/probes/rawprobe.c` through `just seccomp` (as
    workload *and* exec session).
 - **`--security=strict` is a workload-scoped *second* seccomp filter.** The
   raw-socket ban above is installed on the guestd (PID 1) at boot and inherited
@@ -284,15 +284,27 @@ candidate that is dynamically linked or not a Linux ELF at all.
   namespace changes, mount/pivot-root, module loading, and kexec, while the
   guestd keeps the full syscall surface it needs for exec/pty plumbing. The
   strict set is exercised by `scripts/integration/probes/strictprobe.c` via
-  `just raw-seccomp`. The var rides the `MVM_*` channel as
+   `just seccomp`. The var rides the `MVM_*` channel as
   `MVM_SECURITY_STRICT` and is scrubbed like the other plumbing vars. This
-  matters for the cgroup-BPF plan: the guestd can still load trusted eBPF
-  programs itself even in strict mode — the workload cannot. TSI is excluded
+   matters for the cgroup-BPF plan: `bpf(2)` is denied for every workload and
+   exec session, while the guestd can still load trusted eBPF programs itself.
+   Strict mode adds the remaining high-risk syscall restrictions. TSI is excluded
   from guest network policy because its sockets are host-serviced. Plumbed:
   `--security` on `create`/`run`/`clone` → `SandboxSpec` → `ShimConfig` → shim
   env → guestd. Probe the guest kernel's BPF capability with
-  `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict)
-  before assuming CO-RE/BPF-LSM support; cgroup-BPF does not require BTF.
+   `scripts/integration/probes/bpfprobe.c` (BTF/cgroup2/prog-load verdict)
+   before assuming CO-RE/BPF-LSM support; cgroup-BPF does not require BTF.
+   The embedded Aya bootstrap lives in `crates/guest-ebpf` and is built by
+   `crates/guestd/build.rs` for Linux guestd targets. It attaches `connect4`
+   for the bootstrap and, for NIC-backed modes only, `dns_egress` with the
+   `ALLOWED_DNS_IPV4` map. The map contains the NIC gateway from
+   `MVM_NET_CONFIG` (normally `192.168.127.1` for gvproxy); TSI deliberately
+   skips DNS eBPF enforcement. Workloads and exec sessions are moved into
+   `/sys/fs/cgroup/mvm-workload` in `pre_exec` before UID dropping. The
+   dedicated end-to-end check is `just -f scripts/integration/Justfile dns-ebpf`;
+   `just bpfprobe` remains only a kernel capability probe. The `seccomp`
+   integration section probes BPF load, attach, detach, map create/update, and
+   pin/get attempts as workload root and through exec sessions.
   Strict workloads also set `PR_SET_NO_NEW_PRIVS` before exec and drop
   `CAP_CHOWN` from the bounding set (`drop_cap_chown` in `apply_strict_seccomp`,
   `PR_CAPBSET_DROP` — dropping from the bounding set also clears it from the
@@ -302,7 +314,7 @@ candidate that is dynamically linked or not a Linux ELF at all.
   ownership divergence between nested parent/child workspaces sharing a host
   dir. `apply_strict_seccomp` runs before `apply_user`'s privilege drop, so the
   drop happens while the process is still root with a full bounding set.
-  Verified by `scripts/integration/probes/chownprobe.c` via `just raw-seccomp`
+   Verified by `scripts/integration/probes/chownprobe.c` via `just seccomp`
   (chown succeeds by default, EPERM under strict). Dropping further caps
   (e.g. `CAP_FOWNER`, to also stop `chmod` on non-owned files) remains a
   separate task.
@@ -487,6 +499,11 @@ by the guestd via `sethostname(2)` + `/etc/hostname` + `/etc/hosts`),
 `MVM_GUEST_TOKEN`, which is deliberately *not* scrubbed so the workload's
 tooling (the `mvm-agent-mcp` bridge) can authenticate over the Agent API's
 vsock channel.
+
+For managed gvproxy, `MVM_NET_CONFIG` carries `192.168.127.2/24,192.168.127.1`;
+the guestd uses the gateway as the guest DNS endpoint and the DNS eBPF map
+allows only that IPv4 address on TCP/UDP port 53. `MVM_NET_TSI` keeps its
+existing public resolvers and intentionally skips this policy.
 
 ## Conventions
 

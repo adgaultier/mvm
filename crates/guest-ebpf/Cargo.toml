@@ -1,0 +1,16 @@
+[package]
+name = "mvm-guest-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mvm-guest-ebpf"
+path = "src/main.rs"
+required-features = ["ebpf"]
+
+[features]
+ebpf = []
+
+[dependencies]
+aya-ebpf = "0.2"

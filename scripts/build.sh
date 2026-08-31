@@ -25,6 +25,16 @@ echo "==> building workspace (release)"
 cargo build --release --workspace
 
 echo "==> building static guestd ($MUSL_TARGET)"
+if ! rustup toolchain list | grep -q '^nightly'; then
+    echo "error: nightly Rust is required for the embedded eBPF build" >&2
+    echo "       (run: rustup toolchain install nightly --component rust-src)" >&2
+    exit 1
+fi
+command -v bpf-linker >/dev/null || {
+    echo "error: bpf-linker is required for the embedded eBPF build" >&2
+    echo "       (run: cargo install bpf-linker --version 0.11.0)" >&2
+    exit 1
+}
 if [ "$(uname -s)" = Darwin ]; then
     command -v cargo-zigbuild >/dev/null || {
         echo "error: cargo-zigbuild required to cross-compile the guestd on macOS" >&2

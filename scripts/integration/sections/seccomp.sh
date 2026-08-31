@@ -55,9 +55,33 @@ else
 fi
 
 if build_probe "$PROBES_DIR/strictprobe.c" "$PROBE_DIR" strictprobe; then
+    DEFAULT_BPF_OUT=$(timeout "$T" "$MVM" run -v "$PROBE_DIR:/probe" alpine \
+        /probe/strictprobe 2>/dev/null || true)
+    for key in bpf bpf_map_create bpf_map_update bpf_obj_pin bpf_obj_get \
+               bpf_prog_attach bpf_prog_detach; do
+        check "default root workload denies $key" "1" \
+            "$(printf '%s' "$DEFAULT_BPF_OUT" | grep -o "$key=[0-9]*" | cut -d= -f2 | head -1)"
+    done
+    "$MVM" run --name bpfexec -v "$PROBE_DIR:/probe" alpine sh -c 'sleep 300' \
+        >/dev/null 2>&1 &
+    BPF_EXEC_PID=$!
+    for _ in $(seq 1 100); do
+        "$MVM" exec bpfexec true >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    EXEC_BPF_OUT=$("$MVM" exec bpfexec /probe/strictprobe 2>/dev/null || true)
+    for key in bpf bpf_map_create bpf_map_update bpf_obj_pin bpf_obj_get \
+               bpf_prog_attach bpf_prog_detach; do
+        check "default exec session denies $key" "1" \
+            "$(printf '%s' "$EXEC_BPF_OUT" | grep -o "$key=[0-9]*" | cut -d= -f2 | head -1)"
+    done
+    "$MVM" stop bpfexec >/dev/null 2>&1 || true
+    wait "$BPF_EXEC_PID" 2>/dev/null || true
+    "$MVM" rm bpfexec >/dev/null 2>&1 || true
     STRICT_OUT=$(timeout "$T" "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
         /probe/strictprobe 2>/dev/null || true)
-    for key in no_new_privs ptrace mount umount2 pivot_root unshare setns init_module \
+    for key in bpf bpf_map_create bpf_map_update bpf_obj_pin bpf_obj_get \
+               bpf_prog_attach bpf_prog_detach no_new_privs ptrace mount umount2 pivot_root unshare setns init_module \
                delete_module finit_module kexec_load kexec_file_load; do
         check "strict seccomp $key" "1" \
             "$(printf '%s' "$STRICT_OUT" | grep -o "$key=[0-9]*" | cut -d= -f2 | head -1)"

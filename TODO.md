@@ -252,7 +252,7 @@ prebuilt images.
   BTF/cgroup2/prog-load+attach capabilities; `progl=0`+`attach=0` is the
   gate for the planned in-guest cgroup_skb/egress
   policy. `scripts/integration/probes/strictprobe.c` now verifies the added
-  syscall denials through `just raw-seccomp`. This is the P2
+  syscall denials through `just seccomp`. This is the P2
   syscall-hardening baseline from `doc/security/SEC.TODO.md`; strict
   workloads also set `PR_SET_NO_NEW_PRIVS` before exec. Capability dropping
   remains a separate compatibility task.
@@ -318,7 +318,7 @@ prebuilt images.
   `sock_fprog` + `prctl` (no new deps, musl-safe); the filter is inherited by
   every descendant (workload, exec sessions) and cannot be weakened.
   `scripts/integration/probes/rawprobe.c` probes the full matrix in-VM as
-  both a workload and an exec session via `just raw-seccomp` (80/80 green).
+  both a workload and an exec session via `just seccomp` (80/80 green).
 
 - **Live console window resize for `mvm run -it` / `mvm attach`** (2026-08-09) —
   the console now tracks the terminal like `exec` does. The guestd `dup`s the

@@ -294,23 +294,36 @@ Guest eBPF is not responsible for TLS, HTTP, credential selection, or secret man
 ## Responsibilities
 
 * [ ] enforce allowed socket/network operations;
-* [ ] prevent prohibited raw networking;
-* [ ] prevent `AF_PACKET`;
-* [ ] prevent IPv4/IPv6 raw sockets;
+* [x] prevent prohibited raw networking (guest-wide seccomp-BPF);
+* [x] prevent `AF_PACKET` (guest-wide seccomp-BPF);
+* [x] prevent IPv4/IPv6 raw sockets (guest-wide seccomp-BPF);
 * [ ] prevent `AF_ALG`;
 * [ ] prevent `AF_VSOCK` unless explicitly required;
 * [ ] constrain outbound TCP/UDP flows;
 * [ ] enforce allowed destination classes where practical;
 * [ ] prevent alternate guest network paths;
-* [ ] prevent workload modification of enforcement state;
-* [ ] establish enforcement before workload startup;
-* [ ] fail closed if enforcement cannot be established;
+* [x] prevent workload modification of enforcement state (workload-scoped
+  seccomp denies `bpf(2)` and security maps are not exposed);
+* [x] establish enforcement before workload startup;
+* [x] fail closed if enforcement cannot be established;
 * [ ] fail closed if enforcement is lost during VM lifetime.
 
 The eBPF layer should enforce **transport/network policy**, not hostname-bound
 credential policy.
 
 Avoid putting credential identifiers or secrets into eBPF.
+
+The existing guestd seccomp-BPF layer already enforces the raw-networking
+items above before mounts, network setup, or workload startup. Its filter is
+inherited by workloads and exec sessions and is verified by
+`scripts/integration/probes/rawprobe.c` through `just seccomp`. eBPF is
+used for the additional NIC-mode DNS and transport policy described here.
+
+The workload-scoped seccomp layer also denies `bpf(2)` for default and strict
+workloads, including exec sessions. The trusted guestd is the only process
+that loads MVM's embedded programs. Security-critical maps are not pinned or
+exposed to workload processes; the `seccomp` integration section probes BPF
+load, attach, detach, map create/update, and pin/get attempts.
 
 ---
 
@@ -1603,16 +1616,18 @@ Run the complete suite from a fully compromised workload userspace.
 
 ## Guest enforcement
 
+* [x] NIC-mode DNS is restricted to the configured resolver;
+* [x] rewriting `/etc/resolv.conf` cannot bypass NIC-mode DNS policy;
 * [ ] Normal TCP works.
 * [ ] Normal UDP follows policy.
-* [ ] `SOCK_RAW` fails.
-* [ ] `AF_PACKET` fails.
+* [x] `SOCK_RAW` fails (seccomp-BPF).
+* [x] `AF_PACKET` fails (seccomp-BPF).
 * [ ] `AF_ALG` fails.
 * [ ] unauthorized socket operations fail.
-* [ ] workload cannot detach eBPF.
-* [ ] workload cannot replace eBPF.
-* [ ] workload cannot modify security-critical BPF maps.
-* [ ] enforcement is active before workload startup.
+* [x] workload cannot detach eBPF.
+* [x] workload cannot replace eBPF.
+* [x] workload cannot modify security-critical BPF maps.
+* [x] enforcement is active before workload startup.
 * [ ] enforcement loss fails closed.
 
 ## Identity
@@ -1636,7 +1651,7 @@ Run the complete suite from a fully compromised workload userspace.
 * [ ] alternate interfaces fail.
 * [ ] host-loopback access follows explicit policy.
 * [ ] VM-to-VM access follows explicit policy.
-* [ ] DNS bypass cannot create unrestricted egress.
+* [x] NIC-mode DNS bypass cannot create unrestricted egress.
 
 ## Destination attacks
 

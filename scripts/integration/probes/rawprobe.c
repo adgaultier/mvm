@@ -6,7 +6,7 @@
  *
  *   cc -static -O2 -o rawprobe rawprobe.c
  *
- * `scripts/integration/sections/raw-seccomp.sh` (via `just raw-seccomp`) runs
+ * `scripts/integration/sections/seccomp.sh` (via `just seccomp`) runs
  * this inside a VM through `mvm run ... -v`.
  */
 #include <errno.h>

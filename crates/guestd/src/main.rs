@@ -21,6 +21,9 @@ mod network;
 mod seccomp;
 
 #[cfg(target_os = "linux")]
+mod ebpf;
+
+#[cfg(target_os = "linux")]
 fn main() {
     linux::main()
 }

@@ -13,6 +13,7 @@ members = [
     "crates/storage",
     "crates/tui",
     "crates/flow",
+    "crates/guest-ebpf",
 ]
 
 [workspace.package]
@@ -23,6 +24,8 @@ repository = "https://github.com/adgaultier/mvm"
 
 [workspace.dependencies]
 anyhow = "1"
+aya = "0.14"
+aya-build = "0.2"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"

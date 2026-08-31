@@ -6,12 +6,13 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{lchown, MetadataExt};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use mvm_common::protocol::{self, encode_frame, GuestdEvent, GuestdRequest, FrameDecoder};
+use mvm_common::protocol::{self, encode_frame, FrameDecoder, GuestdEvent, GuestdRequest};
 
 use crate::identity::{apply_user, resolve_user, GuestUser};
 use crate::network;
@@ -82,6 +83,8 @@ struct Guestd {
     /// Strict security profile: exec sessions install the high-risk-syscall
     /// seccomp filter in their pre_exec, like the workload itself.
     strict: bool,
+    /// Keeps the loaded program and its cgroup link alive for the VM lifetime.
+    ebpf: crate::ebpf::Installed,
 }
 
 pub fn main() {
@@ -106,6 +109,15 @@ fn real_main(workload_argv: &[String]) -> i32 {
 
     // Static IPv4 bootstrap for NIC-backed modes (gvproxy defaults).
     network::configure_network();
+
+    // Install the bootstrap network hook before any untrusted workload exists.
+    let ebpf = match crate::ebpf::install(network::dns_servers()) {
+        Ok(ebpf) => ebpf,
+        Err(e) => {
+            eprintln!("mvm-guestd: eBPF bootstrap: {e}");
+            return 125;
+        }
+    };
 
     // TSI mode: sockets are host-serviced (no NIC), but DNS still reads
     // /etc/resolv.conf, which most images ship empty.
@@ -195,11 +207,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     // workload can't write its own home. Repair it before spawning. This flag
     // only reaches the guest on macOS hosts; Linux userns mode already
     // preserves ownership, and the uid check below makes it a no-op there.
-    if host_os == "macos"
-        && !user.is_root()
-        && !user.home.is_empty()
-        && user.home != "/"
-    {
+    if host_os == "macos" && !user.is_root() && !user.home.is_empty() && user.home != "/" {
         if let Ok(meta) = std::fs::symlink_metadata(&user.home) {
             if meta.uid() != user.uid || meta.gid() != user.gid {
                 chown_tree(std::path::Path::new(&user.home), user.uid, user.gid);
@@ -214,7 +222,13 @@ fn real_main(workload_argv: &[String]) -> i32 {
     let workload = if workload_argv.is_empty() {
         None
     } else if console_tty {
-        match pty::spawn_tty_workload(workload_argv, console_size, &user, strict) {
+        match pty::spawn_tty_workload(
+            workload_argv,
+            console_size,
+            &user,
+            strict,
+            &ebpf.cgroup_procs,
+        ) {
             Some((child, handle, pty)) => {
                 console_output = Some(handle);
                 console_pty = pty;
@@ -228,9 +242,11 @@ fn real_main(workload_argv: &[String]) -> i32 {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        apply_bpf_seccomp(&mut cmd);
         if strict {
             apply_strict_seccomp(&mut cmd);
         }
+        apply_cgroup(&mut cmd, &ebpf.cgroup_procs);
         apply_user(&mut cmd, &user);
         match cmd.spawn() {
             Ok(child) => Some(child),
@@ -282,12 +298,45 @@ fn real_main(workload_argv: &[String]) -> i32 {
         console_pty,
         guest_token,
         strict,
+        ebpf,
     };
     guestd.send(&GuestdEvent::Ready {
         workload_pid: workload_pid.max(0) as u32,
     });
 
     guestd.run(selfpipe_r)
+}
+
+/// Move the child into the protected cgroup before any workload code runs.
+pub(crate) fn apply_cgroup(cmd: &mut Command, procs: &std::path::Path) {
+    let path = std::ffi::CString::new(procs.as_os_str().as_bytes()).expect("cgroup path");
+    unsafe {
+        cmd.pre_exec(move || {
+            let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut buf = [0u8; 20];
+            let mut pid = libc::getpid() as u32;
+            let mut len = 0;
+            loop {
+                buf[buf.len() - 1 - len] = b'0' + (pid % 10) as u8;
+                len += 1;
+                pid /= 10;
+                if pid == 0 {
+                    break;
+                }
+            }
+            let start = buf.len() - len;
+            let result = if libc::write(fd, buf[start..].as_ptr().cast(), len) as usize == len {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            };
+            libc::close(fd);
+            result
+        });
+    }
 }
 
 /// Apply no-new-privileges and drop CAP_CHOWN in a child before exec.
@@ -313,6 +362,19 @@ pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("strict seccomp install failed: {error}"),
+                )
+            })
+        });
+    }
+}
+
+pub(crate) fn apply_bpf_seccomp(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            crate::seccomp::install_bpf_filter().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("BPF seccomp install failed: {error}"),
                 )
             })
         });
@@ -834,9 +896,11 @@ impl Guestd {
         // Strict mode: seccomp before the tty/pre_exec privilege work, so the
         // filter is active for the whole chain and for every process the
         // session spawns.
+        apply_bpf_seccomp(&mut cmd);
         if self.strict {
             apply_strict_seccomp(&mut cmd);
         }
+        apply_cgroup(&mut cmd, &self.ebpf.cgroup_procs);
         // Last, so the tty work above still happens as root. Also overrides
         // HOME/USER/LOGNAME from baseline_env for the target identity.
         apply_user(&mut cmd, &user);
