@@ -401,7 +401,8 @@ candidate that is dynamically linked or not a Linux ELF at all.
   write its own home (`PermissionDenied` on opencode's log). The shim sets
   `MVM_HOST_OS=macos` (host-gated via `#[cfg(target_os = "macos")]`), and the
   guestd — before spawning a non-root workload whose home is owned by someone
-  else — recursively `lchown`s the home to the workload's uid/gid. macOS
+  else — recursively `lchown`s the home to the workload's uid/gid using
+  descriptor-relative traversal. macOS
   virtiofs `LinuxComplete` semantics turns that chown into a
   `user.containers.override_stat` xattr, so it sticks for the boot; it's a
   no-op on Linux (userns already owns the files, and the uid check skips it).
