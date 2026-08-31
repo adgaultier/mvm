@@ -58,12 +58,20 @@ the integration probe also checks that the guest kernel accepts
 The workload and every exec session move into the protected cgroup in their
 `pre_exec` path, before UID dropping and before untrusted code runs.
 
-## 6. Then add a BPF map
+## 6. DNS enforcement
+
+The first enforcing policy is limited to NIC-backed modes. TSI is intentionally
+excluded because it is an insecure test backend. `guestd` derives the resolver
+from the NIC gateway, populates `ALLOWED_DNS_IPV4`, and attaches a
+`cgroup_skb/egress` program. IPv4 TCP/UDP port 53 is allowed only to that
+resolver; IPv6 DNS is denied by the bootstrap program.
+
+## 7. Then add a BPF map
 
 guest-ebpf: lookup destination/port and return allow/deny.
 guestd: parse the user's configuration and populate the map.
 Keep all configuration parsing and validation in Rust userspace.
-## 7. Only after that add connect6, bind4/6, etc.
+## 8. Only after that add connect6, bind4/6, etc.
 
 One additional correction: Aya's build tooling can arrange for the eBPF artifact to be embedded into the userspace binary, so you don't necessarily need a runtime .o file in the VM filesystem. That's what I'd prefer for guestd:
 

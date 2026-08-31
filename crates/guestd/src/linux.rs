@@ -111,7 +111,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
     network::configure_network();
 
     // Install the bootstrap network hook before any untrusted workload exists.
-    let ebpf = match crate::ebpf::install() {
+    let ebpf = match crate::ebpf::install(network::dns_servers()) {
         Ok(ebpf) => ebpf,
         Err(e) => {
             eprintln!("mvm-guestd: eBPF bootstrap: {e}");
@@ -242,6 +242,7 @@ fn real_main(workload_argv: &[String]) -> i32 {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        apply_bpf_seccomp(&mut cmd);
         if strict {
             apply_strict_seccomp(&mut cmd);
         }
@@ -361,6 +362,19 @@ pub(crate) fn apply_strict_seccomp(cmd: &mut Command) {
                 std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("strict seccomp install failed: {error}"),
+                )
+            })
+        });
+    }
+}
+
+pub(crate) fn apply_bpf_seccomp(cmd: &mut Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            crate::seccomp::install_bpf_filter().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("BPF seccomp install failed: {error}"),
                 )
             })
         });
@@ -882,6 +896,7 @@ impl Guestd {
         // Strict mode: seccomp before the tty/pre_exec privilege work, so the
         // filter is active for the whole chain and for every process the
         // session spawns.
+        apply_bpf_seccomp(&mut cmd);
         if self.strict {
             apply_strict_seccomp(&mut cmd);
         }

@@ -63,6 +63,7 @@ pub(super) fn spawn_tty_workload(
             Ok(())
         });
     }
+    crate::linux::apply_bpf_seccomp(&mut cmd);
     if strict {
         crate::linux::apply_strict_seccomp(&mut cmd);
     }

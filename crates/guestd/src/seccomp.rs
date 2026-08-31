@@ -274,6 +274,45 @@ pub fn install_raw_socket_filter() -> Result<(), std::io::Error> {
     install(build())
 }
 
+fn build_bpf_deny() -> Vec<libc::sock_filter> {
+    let mut f = Filter {
+        insns: Vec::new(),
+        pending: Vec::new(),
+    };
+    f.ld_abs(OFF_ARCH);
+    f.jeq(AUDIT_ARCH, None, Some(Label::Kill));
+    f.ld_abs(OFF_SYSCALL);
+    f.jeq(SYS_BPF, Some(Label::Deny), None);
+    let allow = f.ret(SECCOMP_RET_ALLOW);
+    let deny = f.ret(SECCOMP_RET_ERRNO | EPERM);
+    let kill = f.ret(SECCOMP_RET_KILL_PROCESS);
+    for (idx, is_jt, label) in &f.pending {
+        let target = match *label {
+            Label::Allow => allow,
+            Label::Deny => deny,
+            Label::TypeCheck => unreachable!("BPF-only filter has no type check"),
+            Label::Kill => kill,
+        };
+        let off = target as i64 - *idx as i64 - 1;
+        assert!(
+            (0..=u8::MAX as i64).contains(&off),
+            "seccomp jump out of range"
+        );
+        if *is_jt {
+            f.insns[*idx].jt = off as u8;
+        } else {
+            f.insns[*idx].jf = off as u8;
+        }
+    }
+    f.insns
+}
+
+/// Install the workload-scoped BPF syscall deny. Guestd itself remains able
+/// to load the trusted programs before this hook is inherited by children.
+pub fn install_bpf_filter() -> Result<(), std::io::Error> {
+    install(build_bpf_deny())
+}
+
 /// Build the strict-mode filter: deny a fixed set of high-risk syscalls
 /// (`bpf`, namespace/mount controls, module loading, kexec, `ptrace`,
 /// `keyctl`, `perf_event_open`, `userfaultfd`, `io_uring_*`) while
@@ -384,7 +423,11 @@ mod tests {
                 BPF_JMP_JEQ_K => {
                     let take = acc == insn.k;
                     let off = if take { insn.jt } else { insn.jf };
-                    pc = if off > 0 { pc + 1 + off as usize } else { pc + 1 };
+                    pc = if off > 0 {
+                        pc + 1 + off as usize
+                    } else {
+                        pc + 1
+                    };
                 }
                 BPF_ALU_AND_K => {
                     acc &= insn.k;

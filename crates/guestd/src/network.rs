@@ -20,8 +20,7 @@ pub(super) fn configure_network() {
 
         let mut req = ifreq("eth0");
         if libc::ioctl(sock, libc::SIOCGIFADDR as _, &mut req) == 0 {
-            let sin = &req.ifr_ifru.ifru_addr as *const libc::sockaddr
-                as *const libc::sockaddr_in;
+            let sin = &req.ifr_ifru.ifru_addr as *const libc::sockaddr as *const libc::sockaddr_in;
             if (*sin).sin_addr.s_addr != 0 {
                 libc::close(sock);
                 write_resolv_conf(gw);
@@ -32,7 +31,10 @@ pub(super) fn configure_network() {
         let mut req = ifreq("eth0");
         put_sockaddr_in(&mut req.ifr_ifru.ifru_addr, ip);
         if libc::ioctl(sock, libc::SIOCSIFADDR as _, &req) != 0 {
-            eprintln!("mvm-guestd: SIOCSIFADDR: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "mvm-guestd: SIOCSIFADDR: {}",
+                std::io::Error::last_os_error()
+            );
             libc::close(sock);
             return;
         }
@@ -53,6 +55,16 @@ pub(super) fn configure_network() {
         libc::close(sock);
     }
     write_resolv_conf(gw);
+}
+
+/// Return the resolver enforced by NIC-backed setup. TSI is intentionally
+/// excluded from this security policy.
+pub(super) fn dns_servers() -> Option<Vec<std::net::Ipv4Addr>> {
+    if std::env::var_os("MVM_NET_TSI").is_some() {
+        return None;
+    }
+    let spec = std::env::var("MVM_NET_CONFIG").ok()?;
+    Some(vec![parse_net_config(&spec).ok()?.2])
 }
 
 fn parse_net_config(spec: &str) -> Result<(std::net::Ipv4Addr, u32, std::net::Ipv4Addr), String> {

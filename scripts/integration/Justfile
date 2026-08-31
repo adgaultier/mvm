@@ -93,12 +93,12 @@ networking: _serve
     trap cleanup EXIT
     source {{justfile_directory()}}/sections/networking.sh
 
-raw-seccomp: _serve
+seccomp: _serve
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{LIB}}"
     trap cleanup EXIT
-    source {{justfile_directory()}}/sections/raw-seccomp.sh
+    source {{justfile_directory()}}/sections/seccomp.sh
 
 bpfprobe: _serve
     #!/usr/bin/env bash
@@ -106,6 +106,13 @@ bpfprobe: _serve
     source "{{LIB}}"
     trap cleanup EXIT
     source {{justfile_directory()}}/sections/bpfprobe.sh
+
+dns-ebpf: _serve
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{LIB}}"
+    trap cleanup EXIT
+    source {{justfile_directory()}}/sections/dns-ebpf.sh
 
 volumes: _serve
     #!/usr/bin/env bash

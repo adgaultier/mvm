@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #ifdef __aarch64__
+#define S_BPF 280
 #define S_PTRACE 117
 #define S_MOUNT 40
 #define S_UMOUNT2 39
@@ -22,6 +23,7 @@
 #define S_KEXEC_LOAD 104
 #define S_KEXEC_FILE_LOAD 294
 #else
+#define S_BPF 321
 #define S_PTRACE 101
 #define S_MOUNT 165
 #define S_UMOUNT2 166
@@ -55,6 +57,7 @@ int main(void) {
     printf("no_new_privs=%d\n",
            syscall(S_PRCTL, PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1);
     fflush(stdout);
+    CHECK("bpf", syscall(S_BPF, 0, 0, 0));
 
     CHECK("ptrace", syscall(S_PTRACE, 0, 0, 0, 0));
     CHECK("mount", syscall(S_MOUNT, 0, 0, 0, 0, 0));

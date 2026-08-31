@@ -55,6 +55,23 @@ else
 fi
 
 if build_probe "$PROBES_DIR/strictprobe.c" "$PROBE_DIR" strictprobe; then
+    DEFAULT_BPF_OUT=$(timeout "$T" "$MVM" run -v "$PROBE_DIR:/probe" alpine \
+        /probe/strictprobe 2>/dev/null || true)
+    check "default root workload cannot load BPF" "1" \
+        "$(printf '%s' "$DEFAULT_BPF_OUT" | grep -o 'bpf=[0-9]*' | cut -d= -f2 | head -1)"
+    "$MVM" run --name bpfexec -v "$PROBE_DIR:/probe" alpine sh -c 'sleep 300' \
+        >/dev/null 2>&1 &
+    BPF_EXEC_PID=$!
+    for _ in $(seq 1 100); do
+        "$MVM" exec bpfexec true >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    EXEC_BPF_OUT=$("$MVM" exec bpfexec /probe/strictprobe 2>/dev/null || true)
+    check "default exec session cannot load BPF" "1" \
+        "$(printf '%s' "$EXEC_BPF_OUT" | grep -o 'bpf=[0-9]*' | cut -d= -f2 | head -1)"
+    "$MVM" stop bpfexec >/dev/null 2>&1 || true
+    wait "$BPF_EXEC_PID" 2>/dev/null || true
+    "$MVM" rm bpfexec >/dev/null 2>&1 || true
     STRICT_OUT=$(timeout "$T" "$MVM" run --security=strict -v "$PROBE_DIR:/probe" alpine \
         /probe/strictprobe 2>/dev/null || true)
     for key in no_new_privs ptrace mount umount2 pivot_root unshare setns init_module \
