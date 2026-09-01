@@ -108,6 +108,15 @@ const HOST_RLIMITS: [(u32, libc::c_int); 10] = [
     (9, libc::RLIMIT_AS),
 ];
 
+/// Linux's `RLIMIT_NOFILE` ceiling (`/proc/sys/fs/nr_open`). A Linux guest's
+/// `setrlimit(RLIMIT_NOFILE, …)` fails with `EPERM` when the hard limit is
+/// raised above this — even for guest root — so any host value above it must
+/// be clamped down, or `/init.krun` prints "Error setting rlimit for ID=7"
+/// (polluting the console captured by `mvm run`) and the limit is not applied.
+/// The default is 1048576 on every current kernel; a sysctl raise is a host
+/// machine-specific tweak we don't try to match.
+const LINUX_NR_OPEN: u64 = 1 << 20;
+
 /// One `KRUN_RLIMITS` entry: `"ID=CUR:MAX"` with numeric fields — the
 /// guest's `/init.krun` runs bare `strtoull` over all three. `RLIM_INFINITY`
 /// becomes decimal `u64::MAX`, which `strtoull` reads back as `ULLONG_MAX`,
@@ -124,8 +133,12 @@ fn rlimit_entry(linux_id: u32, cur: libc::rlim_t, max: libc::rlim_t) -> String {
 }
 
 /// The shim inherits the daemon's (i.e. the host's) rlimits; forward them
-/// verbatim so the guest's init — and everything it spawns: guestd,
-/// workload, exec sessions — starts with the same limits.
+/// so the guest's init — and everything it spawns: guestd, workload, exec
+/// sessions — starts with the same limits. `RLIMIT_NOFILE` (guest id 7) is
+/// clamped to Linux's `nr_open` ceiling: the guest kernel refuses to raise
+/// NOFILE above it (hard or soft), so the host's value — on macOS routinely
+/// `RLIM_INFINITY` (`0x7fff_ffff_ffff_ffff`) for the hard limit — would
+/// otherwise make `/init.krun` reject the whole entry.
 fn host_rlimits() -> Vec<String> {
     HOST_RLIMITS
         .iter()
@@ -134,11 +147,18 @@ fn host_rlimits() -> Vec<String> {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            if unsafe { libc::getrlimit(res as _, &mut rl) } == 0 {
-                Some(rlimit_entry(id, rl.rlim_cur, rl.rlim_max))
-            } else {
-                None
+            if unsafe { libc::getrlimit(res as _, &mut rl) } != 0 {
+                return None;
             }
+            let (cur, max) = if id == 7 {
+                (
+                    rl.rlim_cur.min(LINUX_NR_OPEN as libc::rlim_t),
+                    rl.rlim_max.min(LINUX_NR_OPEN as libc::rlim_t),
+                )
+            } else {
+                (rl.rlim_cur, rl.rlim_max)
+            };
+            Some(rlimit_entry(id, cur, max))
         })
         .collect()
 }
@@ -345,5 +365,23 @@ mod tests {
             cur.parse::<u64>().expect("numeric soft limit");
             max.parse::<u64>().expect("numeric hard limit");
         }
+    }
+
+    #[test]
+    fn host_rlimits_clamps_nofile_to_the_guest_ceiling() {
+        // NOFILE survives forwarding (macOS hard limit is often infinity,
+        // which the Linux guest cannot set), but both fields are clamped to
+        // Linux's `nr_open` ceiling so `/init.krun` does not reject ID=7.
+        let limits = host_rlimits();
+        let nofile = limits
+            .iter()
+            .find(|e| e.starts_with("7="))
+            .expect("guest RLIMIT_NOFILE entry present");
+        let (_id, pair) = nofile.split_once('=').unwrap();
+        let (cur, max) = pair.split_once(':').unwrap();
+        let cur: u64 = cur.parse().unwrap();
+        let max: u64 = max.parse().unwrap();
+        assert!(cur <= LINUX_NR_OPEN, "soft clamped to nr_open, got {cur}");
+        assert!(max <= LINUX_NR_OPEN, "hard clamped to nr_open, got {max}");
     }
 }
